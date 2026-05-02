@@ -34,6 +34,22 @@ spring:
           jwk-set-uri: ${KEYCLOAK_JWKS_URI:http://keycloak:8080/realms/serban/protocol/openid-connect/certs}
           audiences: ${SECURITY_JWT_AUDIENCE:endpoint-admin-service,frontend,account,serban-web}
 
+# Faz 22.1.1 BE-009 — OpenFGA live config (Codex 019de00f revize AGREE).
+# common-auth OpenFgaStartupGuard fail-closed: enabled=true + store/model
+# yoksa start fail. ERP_OPENFGA_* env'ler ConfigMap'ten gelir; gitops
+# tarafında kustomize/base/apps/endpoint-admin-service/configmap.yaml
+# overlay set eder.
+#
+# Reference: ADR-0012-EA OpenFGA tuple writer YALNIZ permission-service
+# (DD-EA-2 boundary); endpoint-admin-service consumer'dır, tuple yazmaz.
+erp:
+  openfga:
+    enabled: ${ERP_OPENFGA_ENABLED:false}
+    api-url: ${ERP_OPENFGA_API_URL:http://openfga:8080}
+    store-id: ${ERP_OPENFGA_STORE_ID:}
+    model-id: ${ERP_OPENFGA_MODEL_ID:}
+    check-cache-ttl-seconds: ${ERP_OPENFGA_CHECK_CACHE_TTL_SECONDS:10}
+
 server:
   port: ${SERVER_PORT:8096}
 
