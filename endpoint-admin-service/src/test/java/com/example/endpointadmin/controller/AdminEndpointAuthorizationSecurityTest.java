@@ -19,9 +19,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.RequestPostProcessor;
 
 import java.time.Instant;
 import java.util.List;
@@ -79,7 +82,7 @@ class AdminEndpointAuthorizationSecurityTest {
                 .thenReturn(true);
         when(deviceService.listDevices(TENANT_ID)).thenReturn(List.of(deviceDto()));
 
-        mockMvc.perform(get("/api/v1/admin/endpoint-devices").with(jwt().jwt(jwt -> jwt.subject("user-1"))))
+        mockMvc.perform(get("/api/v1/admin/endpoint-devices").with(adminJwt("user-1")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].id").value(DEVICE_ID.toString()))
                 .andExpect(jsonPath("$[0].hostname").value("PC-001"));
@@ -90,7 +93,7 @@ class AdminEndpointAuthorizationSecurityTest {
         when(authzService.check("user-1", EndpointAdminAuthz.VIEWER, "module", EndpointAdminAuthz.MODULE))
                 .thenReturn(false);
 
-        mockMvc.perform(get("/api/v1/admin/endpoint-devices").with(jwt().jwt(jwt -> jwt.subject("user-1"))))
+        mockMvc.perform(get("/api/v1/admin/endpoint-devices").with(adminJwt("user-1")))
                 .andExpect(status().isForbidden());
 
         verifyNoInteractions(deviceService);
@@ -102,7 +105,7 @@ class AdminEndpointAuthorizationSecurityTest {
                 .thenReturn(false);
 
         mockMvc.perform(post("/api/v1/admin/endpoint-devices/{deviceId}/maintenance-tokens", DEVICE_ID)
-                        .with(jwt().jwt(jwt -> jwt.subject("user-1")))
+                        .with(adminJwt("user-1"))
                         .contentType("application/json")
                         .content("""
                                 {
@@ -129,7 +132,7 @@ class AdminEndpointAuthorizationSecurityTest {
                 ));
 
         mockMvc.perform(post("/api/v1/admin/endpoint-devices/{deviceId}/maintenance-tokens", DEVICE_ID)
-                        .with(jwt().jwt(jwt -> jwt.subject("user-1")))
+                        .with(adminJwt("user-1"))
                         .contentType("application/json")
                         .content("""
                                 {
@@ -148,9 +151,25 @@ class AdminEndpointAuthorizationSecurityTest {
         when(authzService.isEnabled()).thenReturn(false);
         when(deviceService.listDevices(TENANT_ID)).thenReturn(List.of(deviceDto()));
 
-        mockMvc.perform(get("/api/v1/admin/endpoint-devices").with(jwt().jwt(jwt -> jwt.subject("user-1"))))
+        mockMvc.perform(get("/api/v1/admin/endpoint-devices").with(adminJwt("user-1")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].hostname").value("PC-001"));
+    }
+
+    /**
+     * Admin filter chain (SecurityConfig.adminSecurityFilterChain) requires the
+     * JWT to carry one of: ROLE_ADMIN, ROLE_ENDPOINT_ADMIN, SCOPE_endpoint-admin.
+     * A subject-only JWT is rejected at the Spring Security layer with 403,
+     * never reaching the @RequireModule interceptor — so OpenFGA mocks alone
+     * cannot make the request green. This helper attaches SCOPE_endpoint-admin
+     * (the realistic shape that `JwtAuthenticationConverter` produces from the
+     * `scope` claim) so tests exercise the OpenFGA / interceptor path that
+     * they are actually trying to validate.
+     */
+    private static RequestPostProcessor adminJwt(String subject) {
+        return SecurityMockMvcRequestPostProcessors.jwt()
+                .jwt(jwt -> jwt.subject(subject))
+                .authorities(new SimpleGrantedAuthority("SCOPE_endpoint-admin"));
     }
 
     private EndpointDeviceDto deviceDto() {

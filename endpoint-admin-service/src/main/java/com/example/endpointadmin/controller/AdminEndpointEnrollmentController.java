@@ -1,8 +1,10 @@
 package com.example.endpointadmin.controller;
 
+import com.example.commonauth.openfga.RequireModule;
 import com.example.endpointadmin.dto.v1.admin.CreateEndpointEnrollmentRequest;
 import com.example.endpointadmin.dto.v1.admin.CreateEndpointEnrollmentResponse;
 import com.example.endpointadmin.dto.v1.admin.EndpointEnrollmentDto;
+import com.example.endpointadmin.security.EndpointAdminAuthz;
 import com.example.endpointadmin.security.TenantContextResolver;
 import com.example.endpointadmin.service.EndpointEnrollmentService;
 import jakarta.validation.Valid;
@@ -31,6 +33,7 @@ public class AdminEndpointEnrollmentController {
     }
 
     @PostMapping
+    @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.MANAGER)
     public ResponseEntity<CreateEndpointEnrollmentResponse> createEnrollment(
             @Valid @RequestBody(required = false) CreateEndpointEnrollmentRequest request) {
         CreateEndpointEnrollmentResponse response = enrollmentService.createEnrollment(
@@ -44,6 +47,7 @@ public class AdminEndpointEnrollmentController {
     }
 
     @GetMapping
+    @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.VIEWER)
     public List<EndpointEnrollmentDto> listEnrollments() {
         return enrollmentService.listEnrollments(tenantContextResolver.resolveRequired());
     }

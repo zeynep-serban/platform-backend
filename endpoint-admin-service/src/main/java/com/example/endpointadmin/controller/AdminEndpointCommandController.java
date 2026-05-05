@@ -1,8 +1,10 @@
 package com.example.endpointadmin.controller;
 
+import com.example.commonauth.openfga.RequireModule;
 import com.example.endpointadmin.dto.v1.admin.CreateEndpointCommandRequest;
 import com.example.endpointadmin.dto.v1.admin.EndpointCommandDto;
 import com.example.endpointadmin.security.AdminTenantContext;
+import com.example.endpointadmin.security.EndpointAdminAuthz;
 import com.example.endpointadmin.security.TenantContextResolver;
 import com.example.endpointadmin.service.EndpointAdminCommandService;
 import jakarta.validation.Valid;
@@ -33,6 +35,7 @@ public class AdminEndpointCommandController {
     }
 
     @PostMapping("/endpoint-devices/{deviceId}/commands")
+    @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.MANAGER)
     public EndpointCommandDto createCommand(@PathVariable UUID deviceId,
                                             @Valid @RequestBody CreateEndpointCommandRequest request) {
         AdminTenantContext context = tenantContextResolver.resolveRequired();
@@ -40,6 +43,7 @@ public class AdminEndpointCommandController {
     }
 
     @PostMapping("/endpoint-commands")
+    @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.MANAGER)
     public EndpointCommandDto createCommand(@Valid @RequestBody CreateEndpointCommandRequest request) {
         if (request.deviceId() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Endpoint device id is required.");
@@ -49,18 +53,21 @@ public class AdminEndpointCommandController {
     }
 
     @GetMapping("/endpoint-commands")
+    @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.VIEWER)
     public List<EndpointCommandDto> listCommands(@RequestParam(required = false) UUID deviceId) {
         AdminTenantContext context = tenantContextResolver.resolveRequired();
         return commandService.listCommands(context, deviceId);
     }
 
     @GetMapping("/endpoint-devices/{deviceId}/commands")
+    @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.VIEWER)
     public List<EndpointCommandDto> listDeviceCommands(@PathVariable UUID deviceId) {
         AdminTenantContext context = tenantContextResolver.resolveRequired();
         return commandService.listDeviceCommands(context, deviceId);
     }
 
     @GetMapping("/endpoint-commands/{commandId}")
+    @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.VIEWER)
     public EndpointCommandDto getCommand(@PathVariable UUID commandId) {
         AdminTenantContext context = tenantContextResolver.resolveRequired();
         return commandService.getCommand(context, commandId);
