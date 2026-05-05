@@ -42,9 +42,12 @@ management:
       show-details: never
 
 notify:
-  outbox:
-    poll-interval-ms: ${NOTIFY_OUTBOX_POLL_INTERVAL_MS:5000}
-    batch-size: 50
+  # PR2 dispatch.enabled=false default — worker yok, intake-only mode (Codex 019df9ae Q3)
+  dispatch:
+    enabled: ${NOTIFY_DISPATCH_ENABLED:false}
+  # PR2 bounded intake — max-pending threshold (admin --reset-queue YASAK)
+  intake:
+    max-pending: ${NOTIFY_INTAKE_MAX_PENDING:10000}
   retry:
     max-attempts: ${NOTIFY_RETRY_MAX_ATTEMPTS:5}
     backoff-initial-ms: ${NOTIFY_RETRY_BACKOFF_INITIAL_MS:30000}
@@ -55,6 +58,9 @@ notify:
     window-hours: ${NOTIFY_IDEMPOTENCY_WINDOW_HOURS:24}
   dedupe:
     window-minutes: ${NOTIFY_DEDUPE_WINDOW_MINUTES:5}
+  # PR2 PII redaction HMAC pepper — Faz 23.2 production: Vault/ESO injection
+  redaction:
+    pepper: ${NOTIFY_REDACTION_PEPPER:dev-only-pepper-not-for-production}
 
 logging:
   level:

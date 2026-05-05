@@ -16,6 +16,15 @@ public interface NotificationIntentRepository extends JpaRepository<Notification
 
     Optional<NotificationIntent> findByIntentId(String intentId);
 
+    /**
+     * Org-scoped intent lookup (Codex 019df9ae non-neg #1 absorb).
+     *
+     * <p>Cross-tenant status leak prevention — caller's authenticated org_id
+     * must match intent's org_id. Returns empty if intent exists but in
+     * different org → controller raises {@link com.serban.notify.exception.CrossOrgAccessException}.
+     */
+    Optional<NotificationIntent> findByIntentIdAndOrgId(String intentId, String orgId);
+
     @Query("SELECT i FROM NotificationIntent i WHERE i.status = :status " +
            "AND (i.scheduledAt IS NULL OR i.scheduledAt <= :now) " +
            "AND (i.expireAt IS NULL OR i.expireAt > :now)")
