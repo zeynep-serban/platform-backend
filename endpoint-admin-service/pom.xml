@@ -25,6 +25,13 @@
     </properties>
 
     <dependencies>
+        <!-- Faz 22.1.1b: common-auth (RequireModule, OpenFgaConfig, OpenFgaProperties,
+             OpenFgaAuthzService) — Codex 019df86f III review build-fix absorb. -->
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>common-auth</artifactId>
+            <version>1.1.0</version>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
