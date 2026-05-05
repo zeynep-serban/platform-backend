@@ -1,6 +1,28 @@
 spring:
   application:
     name: notification-orchestrator
+  # Mail config — Faz 23.1 PR3 (Codex 019df9ef P1 absorb).
+  # Production: corporate SMTP relay or app-side DKIM (Faz 23.2). Test/dev:
+  # Mailpit Testcontainers or local docker-compose Mailpit (port 1025).
+  # spring-boot-starter-mail JavaMailSender bean auto-configured when host set.
+  mail:
+    host: ${SPRING_MAIL_HOST:localhost}
+    port: ${SPRING_MAIL_PORT:1025}
+    username: ${SPRING_MAIL_USERNAME:}
+    password: ${SPRING_MAIL_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: ${SPRING_MAIL_SMTP_AUTH:false}
+          starttls:
+            enable: ${SPRING_MAIL_SMTP_STARTTLS_ENABLE:false}
+          connectiontimeout: 5000
+          timeout: 10000
+          writetimeout: 10000
+    # Production TLS-only (Codex Q4 mandate); Mailpit/test plaintext exception.
+    # test-connection: false — context startup'ta probe ETME (boot sirasinda
+    # SMTP yok ise context fail OLMASIN; PR3 dispatch lazy connect).
+    test-connection: false
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/notify_db}
     username: ${SPRING_DATASOURCE_USERNAME:postgres}

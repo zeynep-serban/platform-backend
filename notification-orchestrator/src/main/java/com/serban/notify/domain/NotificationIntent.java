@@ -86,6 +86,20 @@ public class NotificationIntent {
     @Column(name = "preference_override", columnDefinition = "jsonb")
     private Map<String, Object> preferenceOverride;
 
+    /**
+     * Recipients snapshot — submit-time persisted (Codex 019df9ef P2 absorb).
+     *
+     * <p>Email channel fan-out (N targets per intent) requires recipients list
+     * at PR4 worker time. Slack/webhook channels are target-addressed (1 target
+     * via channel_routing) and do not depend on this column.
+     *
+     * <p>Each entry: {@code {type, subscriberId, email, phone, name, locale}}.
+     * Stored as List in JSONB column for PG/JSON friendliness.
+     */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "recipients_snapshot", columnDefinition = "jsonb")
+    private java.util.List<Map<String, Object>> recipientsSnapshot;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private Status status = Status.PENDING;
@@ -164,6 +178,11 @@ public class NotificationIntent {
     public Map<String, Object> getPreferenceOverride() { return preferenceOverride; }
     public void setPreferenceOverride(Map<String, Object> preferenceOverride) {
         this.preferenceOverride = preferenceOverride;
+    }
+
+    public java.util.List<Map<String, Object>> getRecipientsSnapshot() { return recipientsSnapshot; }
+    public void setRecipientsSnapshot(java.util.List<Map<String, Object>> recipientsSnapshot) {
+        this.recipientsSnapshot = recipientsSnapshot;
     }
 
     public Status getStatus() { return status; }

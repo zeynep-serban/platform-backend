@@ -18,7 +18,18 @@ public class NotificationDelivery {
         BLOCKED_EXTERNAL_NOT_ALLOWED
     }
 
-    public enum RecipientType { SUBSCRIBER, EXTERNAL }
+    /**
+     * Recipient type semantics:
+     * <ul>
+     *   <li>{@code SUBSCRIBER} — internal user (subscriber_id)</li>
+     *   <li>{@code EXTERNAL} — external person (email/phone)</li>
+     *   <li>{@code CHANNEL} — target-addressed channel (Codex 019df9ef absorb):
+     *       slack/webhook target where there is no individual recipient (e.g.,
+     *       org-level Slack channel webhook URL). Audit context: N recipients
+     *       receive the message via the channel, but only 1 delivery row exists.</li>
+     * </ul>
+     */
+    public enum RecipientType { SUBSCRIBER, EXTERNAL, CHANNEL }
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

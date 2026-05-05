@@ -108,6 +108,13 @@
             <version>${testcontainers.version}</version>
             <scope>test</scope>
         </dependency>
+        <!-- PR3 Channel adapters: WireMock JUnit 5 extension (Slack + Webhook mock) -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <version>3.9.2</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

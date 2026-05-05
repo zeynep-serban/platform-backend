@@ -155,8 +155,29 @@ public class IntentSubmissionService {
         intent.setExpireAt(request.expireAt());
         intent.setMetadata(request.metadata());
         intent.setPreferenceOverride(request.preferenceOverride());
+        // Codex 019df9ef P2 absorb: persist recipients snapshot for PR4 worker
+        // email N-target reconstruction.
+        intent.setRecipientsSnapshot(serializeRecipients(request.recipients()));
         intent.setStatus(NotificationIntent.Status.PENDING);
         return intent;
+    }
+
+    private static java.util.List<java.util.Map<String, Object>> serializeRecipients(
+        java.util.List<SubmitIntentRequest.RecipientRef> recipients
+    ) {
+        if (recipients == null) return java.util.List.of();
+        java.util.List<java.util.Map<String, Object>> out = new java.util.ArrayList<>(recipients.size());
+        for (SubmitIntentRequest.RecipientRef r : recipients) {
+            java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();
+            entry.put("type", r.type().name());
+            if (r.subscriberId() != null) entry.put("subscriberId", r.subscriberId());
+            if (r.email() != null) entry.put("email", r.email());
+            if (r.phone() != null) entry.put("phone", r.phone());
+            if (r.name() != null) entry.put("name", r.name());
+            if (r.locale() != null) entry.put("locale", r.locale());
+            out.add(entry);
+        }
+        return out;
     }
 
     private String computeRecipientHash(String orgId, SubmitIntentRequest.RecipientRef ref) {
