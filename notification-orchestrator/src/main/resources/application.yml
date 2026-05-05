@@ -1,0 +1,71 @@
+spring:
+  application:
+    name: notification-orchestrator
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/notify_db}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: 20
+      connection-timeout: 5000
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: ${NOTIFY_DB_SCHEMA:notify}
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    default-schema: ${NOTIFY_DB_SCHEMA:notify}
+    schemas: ${NOTIFY_DB_SCHEMA:notify}
+    locations: classpath:db/migration
+
+server:
+  port: ${SERVER_PORT:8089}
+
+management:
+  server:
+    port: ${MANAGEMENT_SERVER_PORT:8081}
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+notify:
+  outbox:
+    poll-interval-ms: ${NOTIFY_OUTBOX_POLL_INTERVAL_MS:5000}
+    batch-size: 50
+  retry:
+    max-attempts: ${NOTIFY_RETRY_MAX_ATTEMPTS:5}
+    backoff-initial-ms: ${NOTIFY_RETRY_BACKOFF_INITIAL_MS:30000}
+    backoff-multiplier: ${NOTIFY_RETRY_BACKOFF_MULTIPLIER:2.5}
+  audit:
+    retention-days: ${NOTIFY_AUDIT_RETENTION_DAYS:90}
+  idempotency:
+    window-hours: ${NOTIFY_IDEMPOTENCY_WINDOW_HOURS:24}
+  dedupe:
+    window-minutes: ${NOTIFY_DEDUPE_WINDOW_MINUTES:5}
+  openfga:
+    check-timeout-ms: ${NOTIFY_OPENFGA_CHECK_TIMEOUT_MS:2000}
+    permission-service-url: ${PERMISSION_SERVICE_URL:http://permission-service:8090}
+  abuse:
+    rate-limit-per-source: ${NOTIFY_RATE_LIMIT_PER_SOURCE:100}
+    duplicate-flood-window-minutes: 5
+    webhook-fanout-cap: 50
+
+logging:
+  level:
+    root: INFO
+    com.serban.notify: ${LOG_LEVEL_NOTIFY:INFO}
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %5p [%X{correlation_id:-NONE}] %-40.40logger{39} : %m%n"
+
+# PII Redaction enforced — D42 + D46 #7
+# Log entry'lerde mail body / SMS body YASAK; sadece template_id +
+# recipient_hash + correlation_id + delivery_status.
