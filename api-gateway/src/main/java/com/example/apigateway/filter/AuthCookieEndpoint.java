@@ -28,9 +28,16 @@ public class AuthCookieEndpoint {
 
     /**
      * Set the access token as an httpOnly cookie.
-     * Frontend calls this after Keycloak login.
+     * Frontend calls this after Keycloak login (POST /api/auth/cookie) and on
+     * silent token refresh (POST /api/auth/cookie/refresh).
+     *
+     * The /refresh suffix mirrors the frontend AuthBootstrapper contract — root
+     * POST is the initial cookie write, /refresh is the periodic re-write each
+     * time the Keycloak adapter rotates the access_token. Both paths share the
+     * same logic (write Bearer token to httpOnly cookie); separating them lets
+     * observability/audit pipelines distinguish login vs. refresh hits.
      */
-    @PostMapping
+    @PostMapping(path = {"", "/refresh"})
     public Mono<ResponseEntity<Void>> setTokenCookie(ServerWebExchange exchange) {
         String authHeader = exchange.getRequest().getHeaders().getFirst("Authorization");
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
