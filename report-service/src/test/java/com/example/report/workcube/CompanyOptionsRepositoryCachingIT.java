@@ -25,8 +25,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.contains;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -77,8 +75,6 @@ class CompanyOptionsRepositoryCachingIT {
 
     @Test
     void findAll_isCached_secondCallSkipsJdbc() {
-        when(jdbc.queryForList(contains("sys.schemas"), eq(String.class)))
-                .thenReturn(List.of("workcube_mikrolink_1"));
         List<CompanyOptionsRepository.CompanyOption> rows = List.of(
                 new CompanyOptionsRepository.CompanyOption(1, "ARC", "ARÇELİK A.Ş.")
         );
@@ -90,14 +86,11 @@ class CompanyOptionsRepositoryCachingIT {
 
         assertEquals(rows, first);
         assertSame(first, second, "second call must return the cached list");
-        verify(jdbc, times(1)).queryForList(contains("sys.schemas"), eq(String.class));
         verify(jdbc, times(1)).query(any(String.class), any(RowMapper.class));
     }
 
     @Test
     void cachedValueIsReadable_viaCacheManager() {
-        when(jdbc.queryForList(contains("sys.schemas"), eq(String.class)))
-                .thenReturn(List.of("workcube_mikrolink_1"));
         when(jdbc.query(any(String.class), any(RowMapper.class)))
                 .thenReturn(List.of(new CompanyOptionsRepository.CompanyOption(
                         1, "ARC", "ARÇELİK A.Ş.")));
@@ -132,8 +125,7 @@ class CompanyOptionsRepositoryCachingIT {
 
         @Bean
         public CompanyOptionsRepository companyOptionsRepository(JdbcTemplate workcubeMssqlPlainJdbc) {
-            // Range covers schema 1 only — keeps mocks small.
-            return new CompanyOptionsRepository(workcubeMssqlPlainJdbc, 1, 1);
+            return new CompanyOptionsRepository(workcubeMssqlPlainJdbc);
         }
 
         @Bean
