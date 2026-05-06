@@ -4,6 +4,7 @@ import com.serban.notify.audit.AuditEventPublisher;
 import com.serban.notify.domain.NotificationDelivery;
 import com.serban.notify.domain.NotificationIntent;
 import com.serban.notify.repository.NotificationDeliveryRepository;
+import com.serban.notify.repository.NotificationInboxRepository;
 import com.serban.notify.repository.NotificationIntentRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,6 +39,7 @@ class ErasureServiceTest {
 
     private NotificationIntentRepository intentRepo;
     private NotificationDeliveryRepository deliveryRepo;
+    private NotificationInboxRepository inboxRepo;
     private AuditEventPublisher audit;
     private ErasureService service;
 
@@ -45,8 +47,9 @@ class ErasureServiceTest {
     void setUp() {
         intentRepo = mock(NotificationIntentRepository.class);
         deliveryRepo = mock(NotificationDeliveryRepository.class);
+        inboxRepo = mock(NotificationInboxRepository.class);
         audit = mock(AuditEventPublisher.class);
-        service = new ErasureService(intentRepo, deliveryRepo, audit);
+        service = new ErasureService(intentRepo, deliveryRepo, inboxRepo, audit);
     }
 
     @Test
@@ -153,6 +156,70 @@ class ErasureServiceTest {
         assertThat(intent1.getPayload()).isNull();
         assertThat(intent2.getPayload()).isNull();
         verify(intentRepo, times(2)).save(any(NotificationIntent.class));
+    }
+
+    // ─── Faz 23.3 PR-E.1 inbox erasure (Codex iter-1 P1.2 absorb) ───────
+
+    @Test
+    void inboxRowsHardDeletedOnErasure() {
+        when(intentRepo.findIntentsBySubscriber("acme", "1204")).thenReturn(List.of());
+        when(inboxRepo.deleteByOrgIdAndSubscriberId("acme", "1204")).thenReturn(3);
+
+        var result = service.eraseSubscriber(new ErasureService.EraseRequest(
+            "acme", "1204", "subject_request", "ticket"
+        ));
+
+        assertThat(result.inboxRowsDeleted()).isEqualTo(3);
+        verify(inboxRepo).deleteByOrgIdAndSubscriberId("acme", "1204");
+    }
+
+    @Test
+    void inboxErasureAuditEventEmittedOnlyWhenRowsDeleted() {
+        when(intentRepo.findIntentsBySubscriber("acme", "1204")).thenReturn(List.of());
+        when(inboxRepo.deleteByOrgIdAndSubscriberId("acme", "1204")).thenReturn(2);
+
+        service.eraseSubscriber(new ErasureService.EraseRequest(
+            "acme", "1204", "subject_request", "ticket"
+        ));
+
+        // Codex iter-2 P1 absorb: standalone publish (no intent dep)
+        verify(audit).publishStandalone(
+            org.mockito.ArgumentMatchers.eq("SUBSCRIBER_INBOX_ERASURE"),
+            org.mockito.ArgumentMatchers.eq("acme"),
+            org.mockito.ArgumentMatchers.isNull(),
+            any()
+        );
+    }
+
+    @Test
+    void inboxErasureNoAuditWhenNoRowsDeleted() {
+        when(intentRepo.findIntentsBySubscriber("acme", "1204")).thenReturn(List.of());
+        when(inboxRepo.deleteByOrgIdAndSubscriberId("acme", "1204")).thenReturn(0);
+
+        service.eraseSubscriber(new ErasureService.EraseRequest(
+            "acme", "1204", "subject_request", "ticket"
+        ));
+
+        // No SUBSCRIBER_INBOX_ERASURE audit event when 0 rows deleted (idempotent silence)
+        verify(audit, never()).publishStandalone(
+            org.mockito.ArgumentMatchers.eq("SUBSCRIBER_INBOX_ERASURE"),
+            any(), any(), any()
+        );
+    }
+
+    @Test
+    void inboxErasureCombinedWithIntentResultIncludesAllCounts() {
+        NotificationIntent intent = newIntent("intent-1", Map.of("k", "v"));
+        when(intentRepo.findIntentsBySubscriber("acme", "1204")).thenReturn(List.of(intent));
+        when(deliveryRepo.findByIntentId("intent-1")).thenReturn(List.of());
+        when(inboxRepo.deleteByOrgIdAndSubscriberId("acme", "1204")).thenReturn(5);
+
+        var result = service.eraseSubscriber(new ErasureService.EraseRequest(
+            "acme", "1204", "subject_request", "ticket"
+        ));
+
+        assertThat(result.intentsErased()).isEqualTo(1);
+        assertThat(result.inboxRowsDeleted()).isEqualTo(5);
     }
 
     private NotificationIntent newIntent(String intentId, Map<String, Object> payload) {

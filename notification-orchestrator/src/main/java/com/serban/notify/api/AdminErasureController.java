@@ -89,10 +89,16 @@ public class AdminErasureController {
             )
         );
 
+        // Codex iter-2 P3 absorb: status reflects ALL counters; inbox-only
+        // erasure (no intent match) was previously misreported as "no_op".
+        boolean anyMutation = result.intentsErased() > 0
+            || result.deliveriesAnonymized() > 0
+            || result.inboxRowsDeleted() > 0;
         return ResponseEntity.ok(Map.of(
             "intents_erased", result.intentsErased(),
             "deliveries_anonymized", result.deliveriesAnonymized(),
-            "status", result.intentsErased() == 0 ? "no_op" : "completed"
+            "inbox_rows_deleted", result.inboxRowsDeleted(),
+            "status", anyMutation ? "completed" : "no_op"
         ));
     }
 

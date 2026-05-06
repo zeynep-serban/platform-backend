@@ -81,7 +81,7 @@ class AdminErasureControllerSecurityTest {
     @WithMockUser(authorities = {"ROLE_PRIVACY_OFFICER"})
     void privacyOfficerRole_returns200_callsErasureService() throws Exception {
         when(erasureService.eraseSubscriber(any())).thenReturn(
-            new ErasureService.EraseResult(1, 2)
+            new ErasureService.EraseResult(1, 2, 0)
         );
 
         String body = objectMapper.writeValueAsString(Map.of(
@@ -101,7 +101,7 @@ class AdminErasureControllerSecurityTest {
     @WithMockUser(authorities = {"ROLE_PRIVACY_OFFICER", "ROLE_OTHER"})
     void privacyOfficerWithExtraRoles_stillPasses() throws Exception {
         when(erasureService.eraseSubscriber(any())).thenReturn(
-            new ErasureService.EraseResult(0, 0)
+            new ErasureService.EraseResult(0, 0, 0)
         );
 
         String body = objectMapper.writeValueAsString(Map.of(

@@ -42,4 +42,19 @@ class OpenApiContractTest extends AbstractPostgresTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.paths./api/v1/notify/intents.post.responses.202").exists());
     }
+
+    @Test
+    void openApiContainsInboxEndpoints() throws Exception {
+        // Faz 23.3 PR-E.1 (Codex iter-1 P4 absorb) — inbox surface contract assertion
+        mockMvc.perform(get("/v3/api-docs"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.paths./api/v1/notify/inbox/me").exists())
+            .andExpect(jsonPath("$.paths./api/v1/notify/inbox/me.get").exists())
+            .andExpect(jsonPath("$.paths./api/v1/notify/inbox/me/unread-count").exists())
+            .andExpect(jsonPath("$.paths./api/v1/notify/inbox/me/unread-count.get").exists())
+            .andExpect(jsonPath("$.paths./api/v1/notify/inbox/{id}/read").exists())
+            .andExpect(jsonPath("$.paths./api/v1/notify/inbox/{id}/read.post").exists())
+            .andExpect(jsonPath("$.paths./api/v1/notify/inbox/{id}/archive").exists())
+            .andExpect(jsonPath("$.paths./api/v1/notify/inbox/{id}/archive.post").exists());
+    }
 }

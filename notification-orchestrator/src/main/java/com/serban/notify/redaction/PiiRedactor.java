@@ -65,6 +65,7 @@ public class PiiRedactor {
         "evidence_ref",              // ticket/letter/audit operator reference
         "subscriber_id",             // erasure target (NOT email/phone — pseudonymous boundary)
         "deliveries_anonymized",     // count of recipient_id null'lanan delivery row
+        "inbox_rows_deleted",        // Faz 23.3 PR-E.1 (Codex iter-2 P2 absorb): inbox hard delete count
         "policy",                    // PR5 absorb: BLOCKED_* policy identifier
         "reason",                    // PR5 absorb: human-readable detail
         "status",                    // PR5 absorb: BLOCKED_* status
