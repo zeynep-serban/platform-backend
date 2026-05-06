@@ -9,8 +9,10 @@ import com.serban.notify.domain.AuditEvent;
 import com.serban.notify.domain.NotificationDelivery;
 import com.serban.notify.domain.NotificationIntent;
 import com.serban.notify.domain.NotificationTemplate;
+import com.serban.notify.domain.NotificationInbox;
 import com.serban.notify.repository.AuditEventRepository;
 import com.serban.notify.repository.NotificationDeliveryRepository;
+import com.serban.notify.repository.NotificationInboxRepository;
 import com.serban.notify.repository.NotificationIntentRepository;
 import com.serban.notify.repository.NotificationTemplateRepository;
 import com.serban.notify.template.RenderedMessage;
@@ -45,9 +47,12 @@ import static org.mockito.Mockito.when;
  *   <li>Adapter exception → RETRY result (no propagation)</li>
  * </ul>
  *
- * <p>Strategy: real Spring context + Testcontainers PG; channel adapter
- * implementations replaced with {@link MockBean} so we control adapter return
- * values without real SMTP/HTTP.
+ * <p>Strategy: real Spring context + Testcontainers PG. SMTP/Slack/Webhook
+ * adapter implementations replaced with {@link MockBean} so we control return
+ * values without real SMTP/HTTP. {@code InAppInboxAdapter} is intentionally
+ * NOT mocked (Faz 23.3 PR-E.2 Codex iter-1 P2 absorb) — in-app dispatch tests
+ * exercise the real adapter against real {@code NotificationInboxRepository}
+ * to verify end-to-end inbox row insertion and provider_msg_id correlation.
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -59,6 +64,7 @@ class DeliveryDispatchServiceIntegrationTest extends AbstractPostgresTest {
     @Autowired NotificationTemplateRepository templateRepo;
     @Autowired NotificationIntentRepository intentRepo;
     @Autowired NotificationDeliveryRepository deliveryRepo;
+    @Autowired NotificationInboxRepository inboxRepo;
     @Autowired AuditEventRepository auditRepo;
 
     // ChannelAdapterRegistry indexes lazily on first access (Codex 019df9ef CI
@@ -349,6 +355,75 @@ class DeliveryDispatchServiceIntegrationTest extends AbstractPostgresTest {
         // BOUNCED is permanent fail → intent stays PROCESSING (PR4 decides)
         NotificationIntent reloaded = intentRepo.findByIntentId(intent.getIntentId()).orElseThrow();
         assertThat(reloaded.getStatus()).isEqualTo(NotificationIntent.Status.PROCESSING);
+    }
+
+    @Test
+    void dispatchInAppDeliveredInsertsInboxRowAndCorrelatesProviderMsgId() {
+        // Faz 23.3 PR-E.2 Codex iter-1 P2 absorb: real DeliveryDispatchService
+        // + real InAppInboxAdapter (NOT mocked) round-trip → both
+        // notification_inbox AND notification_delivery.provider_msg_id verified.
+        NotificationIntent intent = saveIntent("in-app");
+        DeliveryTarget target = new DeliveryTarget(
+            "in-app", "subscriber", "sub-int-1", "rh-int",
+            intent.getIntentId() + "|" + intent.getOrgId(), "inapp-default"
+        );
+
+        int attempted = dispatcher.dispatchPlanned(intent, List.of(target));
+
+        assertThat(attempted).isEqualTo(1);
+
+        // Delivery row: DELIVERED + provider_msg_id starts with "inbox-"
+        List<NotificationDelivery> deliveries = deliveryRepo.findByIntentId(intent.getIntentId());
+        assertThat(deliveries).hasSize(1);
+        NotificationDelivery d = deliveries.get(0);
+        assertThat(d.getStatus()).isEqualTo(NotificationDelivery.Status.DELIVERED);
+        assertThat(d.getChannel()).isEqualTo("in-app");
+        assertThat(d.getProviderMsgId()).startsWith("inbox-");
+        assertThat(d.getRecipientType()).isEqualTo(NotificationDelivery.RecipientType.SUBSCRIBER);
+
+        // Inbox row: real persistence
+        java.util.Optional<NotificationInbox> inboxRow = inboxRepo.findByOrgIdAndIntentIdAndSubscriberId(
+            intent.getOrgId(), intent.getIntentId(), "sub-int-1"
+        );
+        assertThat(inboxRow).isPresent();
+        assertThat(inboxRow.get().getState()).isEqualTo(NotificationInbox.State.UNREAD);
+        assertThat(inboxRow.get().getTopicKey()).isEqualTo(intent.getTopicKey());
+        assertThat(inboxRow.get().getSeverity()).isEqualTo(intent.getSeverity().name());
+
+        // Cross-reference: provider_msg_id "inbox-{N}" matches saved row id
+        String expectedMsgId = "inbox-" + inboxRow.get().getId();
+        assertThat(d.getProviderMsgId()).isEqualTo(expectedMsgId);
+
+        // Intent COMPLETED (sole target delivered)
+        NotificationIntent reloaded = intentRepo.findByIntentId(intent.getIntentId()).orElseThrow();
+        assertThat(reloaded.getStatus()).isEqualTo(NotificationIntent.Status.COMPLETED);
+    }
+
+    @Test
+    void dispatchInAppIdempotentSecondCallNoOpsOnPreExistingRow() {
+        // Codex iter-1 P2 absorb: documented sequential-retry idempotency
+        // (DB UNIQUE backstop + adapter pre-check). First dispatch persists row;
+        // second dispatch on same intent×subscriber returns DELIVERED no-op.
+        NotificationIntent intent = saveIntent("in-app");
+        DeliveryTarget target = new DeliveryTarget(
+            "in-app", "subscriber", "sub-idempo", "rh-idempo",
+            intent.getIntentId() + "|" + intent.getOrgId(), "inapp-default"
+        );
+
+        // First call
+        dispatcher.dispatchPlanned(intent, List.of(target));
+        long inboxCountAfter1 = inboxRepo.count();
+
+        // Second call (worker stale re-dispatch simulation) — must NOT duplicate
+        NotificationIntent reloaded = intentRepo.findByIntentId(intent.getIntentId()).orElseThrow();
+        // Force PROCESSING so dispatchPlanned doesn't bypass
+        reloaded.setStatus(NotificationIntent.Status.PROCESSING);
+        intentRepo.save(reloaded);
+        dispatcher.dispatchPlanned(reloaded, List.of(target));
+        long inboxCountAfter2 = inboxRepo.count();
+
+        // No duplicate inbox row
+        assertThat(inboxCountAfter2).isEqualTo(inboxCountAfter1);
     }
 
     private NotificationIntent saveIntent(String channel) {

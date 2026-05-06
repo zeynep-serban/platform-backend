@@ -50,11 +50,12 @@ class DeliveryPlanServiceTest {
         // All test channels are supported by registry
         when(registry.supports("email")).thenReturn(true);
         when(registry.supports("sms")).thenReturn(true);
+        when(registry.supports("in-app")).thenReturn(true);
         when(registry.supports("slack")).thenReturn(true);
         when(registry.supports("webhook")).thenReturn(true);
         when(registry.supports("unknown")).thenReturn(false);
         when(registry.supportedChannels())
-            .thenReturn(java.util.Set.of("email", "sms", "slack", "webhook"));
+            .thenReturn(java.util.Set.of("email", "sms", "in-app", "slack", "webhook"));
 
         // PR5: SubscriberPreferenceService dependency injected; tests provide
         // ref.email() / ref.phone() directly when contact lookup not desired.
@@ -393,6 +394,95 @@ class DeliveryPlanServiceTest {
         assertThat(targets).hasSize(4);
         assertThat(targets).extracting(DeliveryTarget::channel)
             .containsExactly("email", "email", "sms", "sms");
+    }
+
+    // ─── Faz 23.3 PR-E.2 in-app channel tests ──────────────────────────
+
+    @Test
+    void planInAppFanoutPerSubscriber() {
+        NotificationIntent intent = intent(new String[] { "in-app" }, null);
+        intent.setIntentId("intent-1");
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "sub-A", null, null, null, "tr-TR"
+            ),
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "sub-B", null, null, null, "tr-TR"
+            )
+        );
+
+        List<DeliveryTarget> targets = service.plan(intent, recipients);
+
+        assertThat(targets).hasSize(2);
+        assertThat(targets).extracting(DeliveryTarget::channel)
+            .containsExactly("in-app", "in-app");
+        assertThat(targets).extracting(DeliveryTarget::recipientType)
+            .containsExactly("subscriber", "subscriber");
+        assertThat(targets).extracting(DeliveryTarget::recipientId)
+            .containsExactly("sub-A", "sub-B");
+        // targetRef = "intentId|orgId" — adapter parses for parent intent lookup
+        assertThat(targets).extracting(DeliveryTarget::targetRef)
+            .containsOnly("intent-1|default");
+        assertThat(targets).extracting(DeliveryTarget::providerKey)
+            .containsOnly("inapp-default");
+    }
+
+    @Test
+    void planInAppRejectsExternalRecipient() {
+        // External recipient has no inbox account; reject at planning.
+        NotificationIntent intent = intent(new String[] { "in-app" }, null);
+        intent.setIntentId("intent-1");
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.external,
+                null, "ext@example.com", null, null, "tr-TR"
+            )
+        );
+
+        assertThatThrownBy(() -> service.plan(intent, recipients))
+            .isInstanceOf(InvalidRequestException.class)
+            .hasMessageContaining("subscriber");
+    }
+
+    @Test
+    void planInAppRejectsBlankSubscriberId() {
+        NotificationIntent intent = intent(new String[] { "in-app" }, null);
+        intent.setIntentId("intent-1");
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "", null, null, null, "tr-TR"
+            )
+        );
+
+        assertThatThrownBy(() -> service.plan(intent, recipients))
+            .isInstanceOf(InvalidRequestException.class)
+            .hasMessageContaining("subscriberId");
+    }
+
+    @Test
+    void planMixedEmailPlusInAppFanoutBothChannels() {
+        // Same subscribers; both channels selected → 2 email + 2 in-app = 4 targets
+        NotificationIntent intent = intent(new String[] { "email", "in-app" }, null);
+        intent.setIntentId("intent-mixed");
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "sub-A", "a@x.com", null, null, "tr-TR"
+            ),
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "sub-B", "b@x.com", null, null, "tr-TR"
+            )
+        );
+
+        List<DeliveryTarget> targets = service.plan(intent, recipients);
+
+        assertThat(targets).hasSize(4);
+        assertThat(targets).extracting(DeliveryTarget::channel)
+            .containsExactly("email", "email", "in-app", "in-app");
     }
 
     private NotificationIntent intent(String[] channels, Map<String, Object> routing) {

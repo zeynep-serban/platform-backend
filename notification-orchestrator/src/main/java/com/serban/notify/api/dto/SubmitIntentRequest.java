@@ -24,6 +24,9 @@ public record SubmitIntentRequest(
 
     @NotBlank(message = "intent_id required")
     @Size(max = 64)
+    @Pattern(regexp = "^[a-zA-Z0-9_-]+$",
+             message = "intent_id must be alphanumeric + underscore + hyphen "
+                 + "(no special chars like pipe, dot, slash); UUIDs valid")
     String intentId,
 
     @NotBlank(message = "idempotency_key required")
@@ -35,6 +38,9 @@ public record SubmitIntentRequest(
 
     @NotBlank(message = "org_id required")
     @Size(max = 64)
+    @Pattern(regexp = "^[a-zA-Z0-9_-]+$",
+             message = "org_id must be alphanumeric + underscore + hyphen "
+                 + "(slug-like; no pipe, dot, slash)")
     String orgId,
 
     @NotBlank(message = "topic_key required")

@@ -74,11 +74,12 @@ public class IntentSubmissionService {
     /**
      * PR2 Kernel allowed channels (Codex post-impl bulgu #4 absorb).
      * PR3+'da SMTP/Slack/Webhook adapter'lar geldikçe set genişletilir.
-     * push-fcm, push-apns, in-app, web-push, teams, whatsapp, voice
-     * PR3-23.X tier'larında. Faz 23.3.1: sms (NetGSM) eklendi.
+     * push-fcm, push-apns, web-push, teams, whatsapp, voice PR3-23.X
+     * tier'larında. Faz 23.3.1: sms (NetGSM) eklendi.
+     * Faz 23.3 PR-E.2: in-app (inbox) eklendi.
      */
     private static final java.util.Set<String> PR2_ALLOWED_CHANNELS =
-        java.util.Set.of("email", "sms", "slack", "webhook");
+        java.util.Set.of("email", "sms", "in-app", "slack", "webhook");
 
     @Transactional
     public SubmitIntentResponse submit(SubmitIntentRequest request) {
@@ -222,8 +223,11 @@ public class IntentSubmissionService {
         // External recipient with email-only must NOT pass submit gate when
         // SMS channel selected — would later fail at DeliveryPlanService and
         // leave intent in PENDING limbo. Same for phone-only + email channel.
+        // Faz 23.3 PR-E.2: in-app channel requires subscriber type (no
+        // inbox without account); reject external for in-app at submit gate.
         boolean hasSmsChannel = request.channels().contains("sms");
         boolean hasEmailChannel = request.channels().contains("email");
+        boolean hasInAppChannel = request.channels().contains("in-app");
 
         // Recipient type-specific zorunluluk
         for (SubmitIntentRequest.RecipientRef ref : request.recipients()) {
@@ -234,6 +238,14 @@ public class IntentSubmissionService {
                     );
                 }
             } else if (ref.type() == SubmitIntentRequest.RecipientRef.Type.external) {
+                // Faz 23.3 PR-E.2: in-app channel forbids external recipient
+                // (no inbox without subscriber identity). Reject at submit gate.
+                if (hasInAppChannel) {
+                    throw new com.serban.notify.exception.InvalidRequestException(
+                        "in-app channel requires subscriber recipient type "
+                            + "(external recipients have no inbox account)"
+                    );
+                }
                 boolean hasEmail = ref.email() != null && !ref.email().isBlank();
                 boolean hasPhone = ref.phone() != null && !ref.phone().isBlank();
                 if (!hasEmail && !hasPhone) {

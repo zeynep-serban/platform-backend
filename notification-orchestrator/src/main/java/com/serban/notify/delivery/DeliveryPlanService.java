@@ -23,6 +23,8 @@ import java.util.Map;
  * <ul>
  *   <li>email: recipient-addressed → N recipient × 1 target</li>
  *   <li>sms: recipient-addressed → N recipient × 1 target (Faz 23.3.1)</li>
+ *   <li>in-app: recipient-addressed, subscriber-only → N subscribers × 1 target
+ *       (Faz 23.3 PR-E.2)</li>
  *   <li>slack/webhook: target-addressed → 1 target per channel (recipients
  *       become audit context, not delivery rows)</li>
  * </ul>
@@ -92,9 +94,10 @@ public class DeliveryPlanService {
                 );
             }
             switch (channel) {
-                case "email" -> targets.addAll(planEmailTargets(intent, recipients));
-                case "sms"   -> targets.addAll(planSmsTargets(intent, recipients));
-                case "slack" -> targets.add(planSlackTarget(intent));
+                case "email"  -> targets.addAll(planEmailTargets(intent, recipients));
+                case "sms"    -> targets.addAll(planSmsTargets(intent, recipients));
+                case "in-app" -> targets.addAll(planInAppTargets(intent, recipients));
+                case "slack"  -> targets.add(planSlackTarget(intent));
                 case "webhook" -> targets.add(planWebhookTarget(intent));
                 default -> throw new InvalidRequestException(
                     "channel '" + channel + "' planning not implemented"
@@ -178,6 +181,46 @@ public class DeliveryPlanService {
             String hash = piiRedactor.hashRecipient(intent.getOrgId(), type, hashInput);
             result.add(new DeliveryTarget(
                 "sms", type, ref.subscriberId(), hash, phone, "netgsm-default"
+            ));
+        }
+        return result;
+    }
+
+    /**
+     * In-app: recipient-addressed; subscriber-only (Faz 23.3 PR-E.2).
+     *
+     * <p>External recipient type rejected — in-app inbox requires subscriber
+     * identity (no inbox without an account). DTO-side bean validation does
+     * not enforce this; planning-time guard covers it explicitly.
+     *
+     * <p>Target ref encoding: {@code "intentId|orgId"} — InAppInboxAdapter
+     * parses to look up parent intent (topic_key + severity) for the inbox
+     * row insert. Pipe ('|') is invalid in both intent_id (VARCHAR(64),
+     * UUID-like) and org_id (alphanumeric) so collision-safe.
+     */
+    private List<DeliveryTarget> planInAppTargets(
+        NotificationIntent intent, List<SubmitIntentRequest.RecipientRef> recipients
+    ) {
+        List<DeliveryTarget> result = new ArrayList<>(recipients.size());
+        for (SubmitIntentRequest.RecipientRef ref : recipients) {
+            if (ref.type() != SubmitIntentRequest.RecipientRef.Type.subscriber) {
+                throw new InvalidRequestException(
+                    "in-app channel requires subscriber recipient type "
+                        + "(external recipients have no inbox account)"
+                );
+            }
+            if (ref.subscriberId() == null || ref.subscriberId().isBlank()) {
+                throw new InvalidRequestException(
+                    "in-app channel: subscriberId required (was null/blank)"
+                );
+            }
+            String hash = piiRedactor.hashRecipient(
+                intent.getOrgId(), ref.type().name(), ref.subscriberId()
+            );
+            // targetRef = "intentId|orgId" — adapter parses for parent intent lookup.
+            String targetRef = intent.getIntentId() + "|" + intent.getOrgId();
+            result.add(new DeliveryTarget(
+                "in-app", ref.type().name(), ref.subscriberId(), hash, targetRef, "inapp-default"
             ));
         }
         return result;

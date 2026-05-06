@@ -320,6 +320,22 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
     }
 
     @Test
+    void longSubjectAcceptedPostV10TextMigration() {
+        // Codex iter-1 P1.2 absorb (Faz 23.3 PR-E.2): subject TEXT not VARCHAR(500)
+        // — long rendered subjects (substitution-heavy templates) must persist.
+        NotificationInbox row = stub("default", "intent-long-subj", "sub-1");
+        String longSubject = "A".repeat(2000);  // 2000 chars > old 500 limit
+        row.setSubject(longSubject);
+
+        NotificationInbox saved = repo.save(row);
+        repo.flush();
+        // Re-fetch from DB to verify TEXT column round-trip
+        NotificationInbox refetched = repo.findById(saved.getId()).orElseThrow();
+        assertThat(refetched.getSubject()).hasSize(2000);
+        assertThat(refetched.getSubject()).startsWith("AAAA");
+    }
+
+    @Test
     void deleteByOrgIdAndSubscriberIdReturnsZeroWhenNoMatch() {
         repo.save(stub("default", "intent-1", "sub-1"));
 

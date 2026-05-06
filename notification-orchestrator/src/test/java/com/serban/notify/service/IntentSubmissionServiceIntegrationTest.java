@@ -265,6 +265,89 @@ class IntentSubmissionServiceIntegrationTest extends AbstractPostgresTest {
             .hasMessageContaining("phone");
     }
 
+    // ─── Faz 23.3 PR-E.2 in-app channel ────────────────────────────────
+
+    @Test
+    void inAppSubscriberAccepted() {
+        // in-app + subscriber → ACCEPTED at submit gate
+        SubmitIntentRequest req = new SubmitIntentRequest(
+            UUID.randomUUID().toString(),
+            "inapp-sub-ok",
+            "trace-inapp-ok",
+            "default",
+            "auth.password-reset",
+            NotificationIntent.Severity.info,
+            NotificationIntent.DataClassification.security,
+            List.of(new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "1204", null, null, "Halil", "tr-TR"
+            )),
+            new SubmitIntentRequest.TemplateRef("auth-password-reset", null, "tr-TR"),
+            List.of("in-app"),
+            Map.of("user_name", "Halil"),
+            null, null, null, null, null
+        );
+
+        SubmitIntentResponse resp = service.submit(req);
+
+        assertThat(resp.status()).isEqualTo("ACCEPTED");
+        assertThat(resp.intentId()).isEqualTo(req.intentId());
+    }
+
+    @Test
+    void inAppExternalRejectedAtSubmit() {
+        // in-app + external → reject at submit (no inbox account)
+        SubmitIntentRequest req = new SubmitIntentRequest(
+            UUID.randomUUID().toString(),
+            "inapp-ext-fail",
+            "trace-inapp-ext-fail",
+            "default",
+            "auth.password-reset",
+            NotificationIntent.Severity.info,
+            NotificationIntent.DataClassification.security,
+            List.of(new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.external,
+                null, "ext@example.com", null, "External", "tr-TR"
+            )),
+            new SubmitIntentRequest.TemplateRef("auth-password-reset", null, "tr-TR"),
+            List.of("in-app"),
+            Map.of("k", "v"),
+            null, null, null, null, null
+        );
+
+        assertThatThrownBy(() -> service.submit(req))
+            .isInstanceOf(com.serban.notify.exception.InvalidRequestException.class)
+            .hasMessageContaining("in-app")
+            .hasMessageContaining("subscriber");
+    }
+
+    @Test
+    void mixedEmailInAppExternalRejectedAtSubmit() {
+        // Mixed channels: external recipient is fine for email but blocks for in-app
+        // → submit gate rejects (in-app forbids external regardless of other channels)
+        SubmitIntentRequest req = new SubmitIntentRequest(
+            UUID.randomUUID().toString(),
+            "mixed-inapp-ext-fail",
+            "trace-mixed-inapp-ext",
+            "default",
+            "auth.password-reset",
+            NotificationIntent.Severity.info,
+            NotificationIntent.DataClassification.security,
+            List.of(new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.external,
+                null, "ext@example.com", null, "External", "tr-TR"
+            )),
+            new SubmitIntentRequest.TemplateRef("auth-password-reset", null, "tr-TR"),
+            List.of("email", "in-app"),
+            Map.of("k", "v"),
+            null, null, null, null, null
+        );
+
+        assertThatThrownBy(() -> service.submit(req))
+            .isInstanceOf(com.serban.notify.exception.InvalidRequestException.class)
+            .hasMessageContaining("in-app");
+    }
+
     private SubmitIntentRequest newRequest(String intentId, String idemKey) {
         return new SubmitIntentRequest(
             intentId,

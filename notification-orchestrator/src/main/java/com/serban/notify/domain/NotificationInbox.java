@@ -40,7 +40,7 @@ public class NotificationInbox {
     @Column(name = "subscriber_id", nullable = false, length = 128)
     private String subscriberId;
 
-    @Column(length = 500)
+    @Column(columnDefinition = "text")
     private String subject;
 
     @Column(name = "body_text", columnDefinition = "text")
