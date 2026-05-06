@@ -99,6 +99,7 @@ class WorkerIntegrationTest extends AbstractPostgresTest {
         t.setSubject("Sub");
         t.setBodyText("Hello");
         t.setActive(true);
+        t.setExternalAllowed(true);  // PR5 absorb: tests use external recipient
         t.setCreatedBy("test");
         templateRepo.save(t);
     }

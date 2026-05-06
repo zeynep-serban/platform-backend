@@ -12,3 +12,6 @@ docs/deploy/env/*.local
 .vault-dev/
 .vault-dev/**
 **/__pycache__/
+
+# Maven build output
+target/

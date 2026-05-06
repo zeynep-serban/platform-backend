@@ -3,7 +3,9 @@ package com.serban.notify.delivery;
 import com.serban.notify.adapter.ChannelAdapterRegistry;
 import com.serban.notify.api.dto.SubmitIntentRequest;
 import com.serban.notify.domain.NotificationIntent;
+import com.serban.notify.domain.SubscriberContact;
 import com.serban.notify.exception.InvalidRequestException;
+import com.serban.notify.preference.SubscriberPreferenceService;
 import com.serban.notify.redaction.PiiRedactor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +37,7 @@ public class DeliveryPlanService {
 
     private final PiiRedactor piiRedactor;
     private final ChannelAdapterRegistry adapterRegistry;
+    private final SubscriberPreferenceService preferenceService;
 
     /**
      * Default Slack webhook URL (PR3 dev/test). Production Faz 23.2'da
@@ -52,10 +55,12 @@ public class DeliveryPlanService {
 
     public DeliveryPlanService(
         PiiRedactor piiRedactor,
-        ChannelAdapterRegistry adapterRegistry
+        ChannelAdapterRegistry adapterRegistry,
+        SubscriberPreferenceService preferenceService
     ) {
         this.piiRedactor = piiRedactor;
         this.adapterRegistry = adapterRegistry;
+        this.preferenceService = preferenceService;
     }
 
     /**
@@ -109,14 +114,26 @@ public class DeliveryPlanService {
             String address;
             String hashInput;
             if (ref.type() == SubmitIntentRequest.RecipientRef.Type.subscriber) {
-                // PR3 subscriber → email lookup deferred (PR5 SubscriberPreferenceService);
-                // for PR3 dev/test, subscriber recipient must include email field
-                if (ref.email() == null || ref.email().isBlank()) {
-                    throw new InvalidRequestException(
-                        "subscriber recipient requires email field for SMTP channel in PR3 (PR5: SubscriberPreferenceService email lookup)"
+                // PR5 absorb (Codex 019dfaaa lock-in #4): subscriber email
+                // lookup via SubscriberContact projection (planning enrichment).
+                // Fallback to ref.email() if explicitly provided (test fixture
+                // path); else look up from subscriber_contact.
+                if (ref.email() != null && !ref.email().isBlank()) {
+                    address = ref.email();
+                } else {
+                    java.util.Optional<SubscriberContact> contact = preferenceService.findContact(
+                        intent.getOrgId(), ref.subscriberId()
                     );
+                    if (contact.isEmpty() || contact.get().getEmail() == null
+                        || contact.get().getEmail().isBlank()) {
+                        throw new InvalidRequestException(
+                            "subscriber " + ref.subscriberId() + " has no email contact "
+                                + "(orgId=" + intent.getOrgId() + ") and recipient.email "
+                                + "not provided"
+                        );
+                    }
+                    address = contact.get().getEmail();
                 }
-                address = ref.email();
                 hashInput = ref.subscriberId();
             } else {
                 if (ref.email() == null || ref.email().isBlank()) {

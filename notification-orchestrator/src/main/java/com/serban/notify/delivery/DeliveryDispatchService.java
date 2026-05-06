@@ -9,6 +9,7 @@ import com.serban.notify.domain.NotificationTemplate;
 import com.serban.notify.repository.NotificationDeliveryRepository;
 import com.serban.notify.repository.NotificationIntentRepository;
 import com.serban.notify.repository.NotificationTemplateRepository;
+import com.serban.notify.eligibility.DeliveryEligibilityService;
 import com.serban.notify.template.RenderedMessage;
 import com.serban.notify.template.TemplateRenderer;
 import com.serban.notify.worker.BackoffCalculator;
@@ -59,6 +60,7 @@ public class DeliveryDispatchService {
     private final ChannelAdapterRegistry adapterRegistry;
     private final AuditEventPublisher audit;
     private final BackoffCalculator backoffCalculator;
+    private final DeliveryEligibilityService eligibilityService;
     private DeliveryDispatchService self;  // Self-injection for REQUIRES_NEW boundary
 
     public DeliveryDispatchService(
@@ -68,7 +70,8 @@ public class DeliveryDispatchService {
         NotificationDeliveryRepository deliveryRepo,
         ChannelAdapterRegistry adapterRegistry,
         AuditEventPublisher audit,
-        BackoffCalculator backoffCalculator
+        BackoffCalculator backoffCalculator,
+        DeliveryEligibilityService eligibilityService
     ) {
         this.renderer = renderer;
         this.templateRepo = templateRepo;
@@ -77,6 +80,7 @@ public class DeliveryDispatchService {
         this.adapterRegistry = adapterRegistry;
         this.audit = audit;
         this.backoffCalculator = backoffCalculator;
+        this.eligibilityService = eligibilityService;
     }
 
     /**
@@ -133,6 +137,19 @@ public class DeliveryDispatchService {
                 log.info("dispatch skip (already delivered): intentId={} channel={} hash={}",
                     intent.getIntentId(), target.channel(), target.recipientHash());
                 attempted++;
+                continue;
+            }
+
+            // Codex 019dfaaa PR5 absorb: eligibility guard chain BEFORE adapter
+            // call (external policy → preference → authz). Blocked targets get
+            // BLOCKED_* delivery row + DELIVERY_BLOCKED audit; adapter NOT called.
+            DeliveryEligibilityService.EligibilityDecision eligibility =
+                eligibilityService.evaluate(intent, template, target);
+            if (eligibility.blocked()) {
+                self.persistBlockedDelivery(intent, target, eligibility);
+                attempted++;
+                anyFailedPermanent = true;
+                allDelivered = false;
                 continue;
             }
 
@@ -214,6 +231,65 @@ public class DeliveryDispatchService {
      * transaction-boundary and maps to RETRY (PR4 worker re-tries based on
      * next_retry_at; row inserted by concurrent pod is source-of-truth).
      */
+
+    /**
+     * Persist a BLOCKED_* delivery row + DELIVERY_BLOCKED audit (Codex 019dfaaa
+     * PR5 lock-in #5 absorb).
+     *
+     * <p>Adapter NOT invoked. Provider attempt count NOT incremented (it's a
+     * policy decision, not a provider failure). Status set directly to
+     * BLOCKED_BY_PREFERENCE / BLOCKED_BY_AUTHZ / BLOCKED_EXTERNAL_NOT_ALLOWED.
+     *
+     * <p>REQUIRES_NEW transaction (consistent with dispatchSingleTarget) —
+     * one target's blocked persistence does not roll back others.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void persistBlockedDelivery(
+        NotificationIntent intent, DeliveryTarget target,
+        DeliveryEligibilityService.EligibilityDecision eligibility
+    ) {
+        OffsetDateTime now = OffsetDateTime.now();
+
+        // Upsert delivery as BLOCKED_*
+        Optional<NotificationDelivery> existing = deliveryRepo
+            .findByIntentIdAndChannelAndRecipientHash(
+                intent.getIntentId(), target.channel(), target.recipientHash()
+            );
+        NotificationDelivery delivery = existing.orElseGet(NotificationDelivery::new);
+        if (delivery.getId() == null) {
+            delivery.setIntentId(intent.getIntentId());
+            delivery.setChannel(target.channel());
+            delivery.setRecipientType(NotificationDelivery.RecipientType.valueOf(
+                target.recipientType().equals("subscriber") ? "SUBSCRIBER"
+                    : target.recipientType().equals("external") ? "EXTERNAL" : "CHANNEL"
+            ));
+            delivery.setRecipientId(target.recipientId());
+            delivery.setRecipientHash(target.recipientHash());
+            delivery.setProvider(target.providerKey());
+            delivery.setAttemptCount(0);  // policy decision; no provider attempt
+        }
+        delivery.setStatus(eligibility.status());
+        delivery.setFailureReason(eligibility.policy() + ": " + eligibility.reason());
+        delivery.setPermanentFailureAt(now);  // BLOCKED_* are terminal
+        delivery.setNextRetryAt(null);
+        delivery.setProcessingLeaseUntil(null);
+        delivery.setClaimToken(null);
+        deliveryRepo.save(delivery);
+
+        // Audit DELIVERY_BLOCKED (NOT DELIVERY_ATTEMPTED — adapter not called)
+        audit.publish("DELIVERY_BLOCKED", intent, target.recipientHash(), target.channel(),
+            Map.of(
+                "policy", eligibility.policy(),
+                "reason", eligibility.reason(),
+                "status", eligibility.status().name()
+            )
+        );
+
+        log.info("delivery blocked: intentId={} channel={} hash={} status={} policy={}",
+            intent.getIntentId(), target.channel(), target.recipientHash(),
+            eligibility.status(), eligibility.policy());
+    }
+
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public DispatchOutcome dispatchSingleTarget(
         NotificationIntent intent, DeliveryTarget target, RenderedMessage message

@@ -13,6 +13,15 @@ spring:
     default-schema: notify
     schemas: notify
 
+# Codex 019dfaaa PR5 P1 #3 absorb: PR2/PR3/PR4 integration tests authz/preference
+# guard çağırmasın (fail-closed DENY her şeyi BLOCKED yapardı). PR5 guard testleri
+# @TestPropertySource ile explicit aç.
+notify:
+  preferences:
+    enabled: false
+  authz:
+    enabled: false
+
 logging:
   level:
     root: WARN

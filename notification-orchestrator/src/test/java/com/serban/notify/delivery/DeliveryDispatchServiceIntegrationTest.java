@@ -85,6 +85,7 @@ class DeliveryDispatchServiceIntegrationTest extends AbstractPostgresTest {
         t.setSubject("Sub [[${vars.user_name}]]");
         t.setBodyText("Hello [[${vars.user_name}]]");
         t.setActive(true);
+        t.setExternalAllowed(true);  // PR5 absorb: tests use external recipient
         t.setCreatedBy("test");
         templateRepo.save(t);
     }

@@ -51,7 +51,11 @@ class DeliveryPlanServiceTest {
         when(registry.supports("unknown")).thenReturn(false);
         when(registry.supportedChannels()).thenReturn(java.util.Set.of("email", "slack", "webhook"));
 
-        service = new DeliveryPlanService(redactor, registry);
+        // PR5: SubscriberPreferenceService dependency injected; tests provide
+        // ref.email() directly so contact lookup not invoked.
+        com.serban.notify.preference.SubscriberPreferenceService prefService =
+            mock(com.serban.notify.preference.SubscriberPreferenceService.class);
+        service = new DeliveryPlanService(redactor, registry, prefService);
     }
 
     @Test

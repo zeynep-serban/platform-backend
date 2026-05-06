@@ -37,6 +37,7 @@ jobs:
           - permission-service
           - api-gateway
           - discovery-server
+          - notification-orchestrator
 
     steps:
       - name: Checkout

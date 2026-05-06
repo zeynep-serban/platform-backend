@@ -142,6 +142,72 @@ public class OpenFgaAuthzService {
     }
 
     /**
+     * Check authorization with raw principal (Faz 23.1 PR5 — Codex 019dfaaa
+     * lock-in #1 absorb).
+     *
+     * <p>Generic counterpart to {@link #check(String, String, String, String)}
+     * which always prefixes user with {@code "user:"}. This method accepts
+     * arbitrary principal type (e.g., {@code "subscriber:1204"}, {@code "external:hash"}).
+     *
+     * <p>Used by notification-orchestrator authz integration where the
+     * principal is NOT the JWT-resolved user but the notification recipient
+     * (subscriber id or external email hash).
+     *
+     * <p>Example:
+     * <pre>
+     *   checkPrincipal("subscriber:1204", "can_receive", "template", "auth-password-reset")
+     * </pre>
+     *
+     * @param principalRef full OpenFGA user-ref including type prefix
+     *                     (e.g., {@code "subscriber:1204"}, {@code "external:abc123"})
+     * @param relation     OpenFGA relation (e.g., {@code "can_receive"})
+     * @param objectType   OpenFGA object type
+     * @param objectId     OpenFGA object id
+     * @return {@code true} if tuple exists / relation holds; {@code false}
+     *         on deny / circuit-open / exception (fail-closed)
+     */
+    public boolean checkPrincipal(String principalRef, String relation,
+                                   String objectType, String objectId) {
+        if (!enabled) {
+            return true;
+        }
+        String cacheKey = principalRef + ":" + relation + ":" + objectType + ":" + objectId;
+        Boolean cached = checkCache.getIfPresent(cacheKey);
+        if (cached != null) {
+            log.debug("OpenFGA checkPrincipal (cached): {} {} {}:{} → {}",
+                principalRef, relation, objectType, objectId, cached);
+            return cached;
+        }
+        if (!circuitBreaker.allowRequest()) {
+            if (denyCounter != null) denyCounter.increment();
+            log.warn("OpenFGA circuit OPEN — denying: {} {} {}:{}",
+                principalRef, relation, objectType, objectId);
+            return false;
+        }
+        try {
+            var request = new ClientCheckRequest()
+                    .user(principalRef)
+                    .relation(relation)
+                    ._object(objectType + ":" + objectId);
+            var response = client.check(request).get();
+            boolean allowed = Boolean.TRUE.equals(response.getAllowed());
+            checkCache.put(cacheKey, allowed);
+            circuitBreaker.recordSuccess();
+            if (allowed && allowCounter != null) allowCounter.increment();
+            if (!allowed && denyCounter != null) denyCounter.increment();
+            log.debug("OpenFGA checkPrincipal: {} {} {}:{} -> {}",
+                principalRef, relation, objectType, objectId, allowed);
+            return allowed;
+        } catch (Exception e) {
+            circuitBreaker.recordFailure();
+            if (denyCounter != null) denyCounter.increment();
+            log.error("OpenFGA checkPrincipal failed, denying: {} {} {}:{}",
+                principalRef, relation, objectType, objectId, e);
+            return false;
+        }
+    }
+
+    /**
      * List all objects of a type that a user has a relation on.
      * Example: listObjects("1", "viewer", "company") → ["1", "5"]
      * Returns object IDs (without type prefix).

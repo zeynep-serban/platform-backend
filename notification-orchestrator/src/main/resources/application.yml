@@ -79,6 +79,16 @@ notify:
     max-backoff-ms: ${NOTIFY_RETRY_MAX_BACKOFF_MS:3600000}
     # PR4 absorb: ±25% jitter — thundering herd avoidance
     jitter-ratio: ${NOTIFY_RETRY_JITTER_RATIO:0.25}
+  # PR5 preference + authz feature flags (Codex 019dfaaa absorb)
+  # Production default: both enabled. Test profile: false (override per test class).
+  preferences:
+    enabled: ${NOTIFY_PREFERENCES_ENABLED:true}
+  authz:
+    enabled: ${NOTIFY_AUTHZ_ENABLED:true}
+    permission-service:
+      url: ${NOTIFY_AUTHZ_PERMISSION_SERVICE_URL:http://permission-service:8080}
+    # Internal API key — production: Vault/ESO injection
+    internal-api-key: ${NOTIFY_AUTHZ_INTERNAL_API_KEY:dev-only-key-not-for-production}
   # PR4 worker config (Codex 019dfa47 Q2 PARTIAL absorb — config-driven cadence)
   worker:
     poll-delay-ms: ${NOTIFY_WORKER_POLL_DELAY_MS:5000}
