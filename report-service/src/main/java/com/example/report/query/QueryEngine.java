@@ -63,6 +63,55 @@ public class QueryEngine {
         return new PagedData(items, total, page, pageSize);
     }
 
+    /**
+     * Execute a single-level GROUP BY query for AG Grid SSRM (PR-0.2
+     * reporting hardening). The shape of the SQL is documented on
+     * {@link SqlBuilder#buildGroupedQuery(ReportDefinition,
+     * YearlySchemaResolver.ResolvedSchemas, List, String, List, Map,
+     * List, String, MapSqlParameterSource, int, int)}.
+     *
+     * <p>The {@code total} surfaced on the {@link PagedData} is the
+     * number of distinct group buckets, not the source row count, so
+     * AG Grid's SSRM scrollbar reflects how many groups are reachable.
+     */
+    public PagedData executeGroupedQuery(ReportDefinition def,
+                                          AuthzMeResponse authz,
+                                          String groupColumn,
+                                          List<SqlBuilder.GroupedAggregation> aggregations,
+                                          Map<String, Object> agGridFilter,
+                                          List<Map<String, String>> sortModel,
+                                          int page,
+                                          int pageSize) {
+        List<String> visibleColumns = columnFilter.getVisibleColumns(def, authz);
+        RowFilterInjector.RlsResult rls = rowFilterInjector.buildRlsClause(def, authz);
+
+        YearlySchemaResolver.ResolvedSchemas schemas = resolveSchemas(def, authz, agGridFilter);
+
+        SqlBuilder.BuiltQuery dataQuery = sqlBuilder.buildGroupedQuery(
+                def, schemas, visibleColumns, groupColumn, aggregations,
+                agGridFilter, sortModel,
+                rls.whereClause(), rls.params(), page, pageSize);
+
+        log.debug("Grouped report query [{} GROUP BY {}]: {}",
+                def.key(), groupColumn, dataQuery.sql());
+
+        List<Map<String, Object>> items = jdbc.queryForList(dataQuery.sql(), dataQuery.params());
+
+        long total = -1;
+        try {
+            SqlBuilder.BuiltQuery countQuery = sqlBuilder.buildGroupedCountQuery(
+                    def, schemas, visibleColumns, groupColumn, agGridFilter,
+                    rls.whereClause(), rls.params());
+            Long count = jdbc.queryForObject(countQuery.sql(), countQuery.params(), Long.class);
+            total = count != null ? count : -1;
+        } catch (Exception e) {
+            log.warn("Grouped count query failed for report {} (groupBy={}): {}",
+                    def.key(), groupColumn, e.getMessage());
+        }
+
+        return new PagedData(items, total, page, pageSize);
+    }
+
     public SqlBuilder.BuiltQuery buildExportQuery(ReportDefinition def,
                                                     AuthzMeResponse authz,
                                                     Map<String, Object> agGridFilter,

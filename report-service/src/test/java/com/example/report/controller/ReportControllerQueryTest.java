@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
@@ -269,14 +270,259 @@ class ReportControllerQueryTest {
     }
 
     @Nested
+    class GroupingHappyPath {
+
+        @Test
+        void singleLevelGroupBy_dispatchesToExecuteGroupedQuery() {
+            // PR-0.2: when capability is enabled (column.groupable=true)
+            // and the request is exactly a single-level GROUP BY, the
+            // controller routes to QueryEngine.executeGroupedQuery.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "sum")));
+            when(queryEngine.executeGroupedQuery(
+                    any(), any(), eq("category"), any(), any(), any(), eq(1), eq(50)))
+                    .thenReturn(new QueryEngine.PagedData(
+                            List.of(Map.of("category", "FIN", "_rowCount", 42L,
+                                    "amount", 1234.56)),
+                            1L, 1, 50));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum")),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+            PagedResultDto<?> body = assertInstanceOf(PagedResultDto.class, response.getBody());
+            assertEquals(1, body.items().size());
+            verify(queryEngine).executeGroupedQuery(
+                    any(), any(), eq("category"), any(), any(), any(), eq(1), eq(50));
+            verify(queryEngine, never())
+                    .executeQuery(any(), any(), any(), any(), anyInt(), anyInt());
+        }
+
+        @Test
+        void multiLevelGroupBy_stillRejectedAsNotSupported() {
+            // PR-0.2 supports single-level only; rowGroupCols.size() > 1
+            // continues to fail closed.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("region", "Region", "text",
+                                    150, false, true, false, null)));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(
+                            new ColumnVO("category", "Category", "category", null),
+                            new ColumnVO("region", "Region", "region", null)),
+                    null, null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            assertEquals("GROUPING_NOT_SUPPORTED",
+                    assertInstanceOf(ReportQueryErrorDto.class, response.getBody()).code());
+        }
+
+        @Test
+        void groupKeysExpansion_stillRejectedAsNotSupported() {
+            // groupKeys means the user expanded a node — multi-level
+            // expansion is PR-0.3 territory.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null)));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    null, null, false,
+                    List.of("FIN"), null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+        }
+
+        @Test
+        void valueColsNonAggregatableField_returns400Structured() {
+            // PR-0.2 Codex iter-1 absorb: invalid valueCols (field not
+            // marked aggregatable) fail closed with a structured 400
+            // instead of silently dropping the aggregation and returning
+            // 200 with a misleading flat sum.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            // amount is NOT aggregatable
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, false, null)));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum")),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            ReportQueryErrorDto error =
+                    assertInstanceOf(ReportQueryErrorDto.class, response.getBody());
+            assertEquals("INVALID_AGGREGATION_REQUEST", error.code());
+            // SQL must NOT be touched — capability gate short-circuits.
+            verify(queryEngine, never()).executeGroupedQuery(
+                    any(), any(), any(), any(), any(), any(), anyInt(), anyInt());
+        }
+
+        @Test
+        void valueColsInvalidAggFunc_returns400Structured() {
+            // "median" is not in ALLOWED_AGG_FUNCS → fail closed.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "sum")));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "median")),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            ReportQueryErrorDto error =
+                    assertInstanceOf(ReportQueryErrorDto.class, response.getBody());
+            assertEquals("INVALID_AGGREGATION_REQUEST", error.code());
+        }
+
+        @Test
+        void aggFuncFallback_textColumnDefaultsToCount() {
+            // PR-0.2 Codex iter-1 absorb: documentation says "numeric →
+            // sum, others → count". The controller now respects type
+            // when defaultAggFunc is not set on the registry.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("note", "Note", "text",
+                                    150, false, false, true, null)));
+            // The mock's argument captor isn't necessary — we only care
+            // that executeGroupedQuery is reached. The SqlBuilder unit
+            // tests already verify the actual aggregation function in SQL.
+            when(queryEngine.executeGroupedQuery(any(), any(), eq("category"),
+                    org.mockito.ArgumentMatchers.argThat(aggs ->
+                            aggs.size() == 1
+                                    && aggs.get(0).field().equals("note")
+                                    && aggs.get(0).func().equals("count")),
+                    any(), any(), eq(1), eq(50)))
+                    .thenReturn(new QueryEngine.PagedData(
+                            List.of(), 0L, 1, 50));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    // aggFunc null → fallback. note is type=text →
+                    // count (not sum) per documented behaviour.
+                    List.of(new ColumnVO("note", "Note", "note", null)),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+        }
+
+        @Test
+        void aggFuncFallback_numericColumnDefaultsToSum() {
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, null)));
+            when(queryEngine.executeGroupedQuery(any(), any(), eq("category"),
+                    org.mockito.ArgumentMatchers.argThat(aggs ->
+                            aggs.size() == 1
+                                    && aggs.get(0).field().equals("amount")
+                                    && aggs.get(0).func().equals("sum")),
+                    any(), any(), eq(1), eq(50)))
+                    .thenReturn(new QueryEngine.PagedData(
+                            List.of(), 0L, 1, 50));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    // aggFunc null + defaultAggFunc null + type=number → sum.
+                    List.of(new ColumnVO("amount", "Amount", "amount", null)),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+        }
+
+        @Test
+        void groupByNonGroupableColumn_rejectedAsNotSupported() {
+            // Defence-in-depth: a malicious payload requesting GROUP BY
+            // on a non-groupable column must not slip into the grouped
+            // SQL path. PR-0.2 routes it to the rejected bucket because
+            // the field isn't in groupableFields.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            // amount is aggregatable but NOT groupable
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "sum")));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("amount", "Amount", "amount", null)),
+                    null, null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            assertEquals("GROUPING_NOT_SUPPORTED",
+                    assertInstanceOf(ReportQueryErrorDto.class, response.getBody()).code());
+        }
+    }
+
+    @Nested
     class MetadataCapabilities {
 
         @Test
-        void getMetadata_exposesServerSideGroupingFlagAsFalse() {
-            // PR-0.1: capability flag is hard-coded false until PR-0.2 lands.
-            // The frontend reads this to decide whether to expose the
-            // grouping/pivot UI; absent the flag, the platform-web stop-gap
-            // hides everything.
+        void getMetadata_serverSideGroupingFalseWhenNoColumnGroupable() {
+            // PR-0.2: capability flag derived from column flags. A column
+            // with groupable=false (default) means no grouping can be
+            // performed → serverSideGrouping=false, matching the stop-gap UX.
             stubAuthz(true, List.of());
             when(registry.get("any")).thenReturn(Optional.of(report("any")));
             when(columnFilter.getVisibleColumnDefinitions(any(), any()))
@@ -286,11 +532,33 @@ class ReportControllerQueryTest {
 
             assertEquals(200, response.getStatusCode().value());
             ReportMetadataDto body = response.getBody();
-            assertNotNull(body, "Metadata body must not be null");
             ReportCapabilitiesDto caps = body.capabilities();
-            assertNotNull(caps, "capabilities field must be populated");
-            assertFalse(caps.serverSideGrouping(),
-                    "PR-0.1 ships serverSideGrouping=false; PR-0.2 will flip per-report.");
+            assertFalse(caps.serverSideGrouping());
+            assertEquals(List.of(), caps.groupableFields());
+            assertEquals(List.of(), caps.aggregatableFields());
+        }
+
+        @Test
+        void getMetadata_serverSideGroupingTrueWhenAnyColumnGroupable() {
+            // PR-0.2: report registry can opt-in by marking columns
+            // groupable / aggregatable. Capability flag flips to true and
+            // the field lists tell the frontend which columns participate.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "sum")));
+
+            var response = controller.getMetadata("any", testJwt("admin"));
+
+            ReportCapabilitiesDto caps = response.getBody().capabilities();
+            assertTrue(caps.serverSideGrouping(),
+                    "Any column with groupable=true must light up the capability");
+            assertEquals(List.of("category"), caps.groupableFields());
+            assertEquals(List.of("amount"), caps.aggregatableFields());
         }
     }
 

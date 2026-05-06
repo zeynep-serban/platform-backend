@@ -141,6 +141,216 @@ public class SqlBuilder {
         return new BuiltQuery(sql.toString(), params);
     }
 
+    // ── Grouping queries (PR-0.2 single-level GROUP BY) ────────────────
+
+    /**
+     * Allowed AG Grid SSRM aggregation function tokens. Both the request
+     * payload and the column registry's {@code defaultAggFunc} normalise
+     * to lower-case before comparing, so the set is canonical.
+     */
+    private static final Set<String> ALLOWED_AGG_FUNCS = Set.of(
+            "sum", "avg", "min", "max", "count");
+
+    /**
+     * Specifies a single value-column aggregation for
+     * {@link #buildGroupedQuery(ReportDefinition, YearlySchemaResolver.ResolvedSchemas,
+     * List, String, List, Map, List, String, MapSqlParameterSource, int, int)}.
+     * The SQL builder emits {@code <func>([field]) AS [field]} so the
+     * aggregated column shadows the raw field on the response row, matching
+     * AG Grid's convention.
+     *
+     * @param field SQL column name (must be in the visible-columns
+     *              allow-list).
+     * @param func  Aggregation function (sum / avg / min / max / count).
+     */
+    public record GroupedAggregation(String field, String func) {
+        public GroupedAggregation {
+            if (field == null || field.isBlank()) {
+                throw new IllegalArgumentException(
+                        "GroupedAggregation field must not be blank");
+            }
+            if (func == null || func.isBlank()) {
+                throw new IllegalArgumentException(
+                        "GroupedAggregation func must not be blank");
+            }
+            String normalized = func.trim().toLowerCase();
+            if (!ALLOWED_AGG_FUNCS.contains(normalized)) {
+                throw new IllegalArgumentException(
+                        "GroupedAggregation func must be one of "
+                                + ALLOWED_AGG_FUNCS + ", got: " + func);
+            }
+            func = normalized;
+        }
+    }
+
+    /**
+     * Build the SSRM single-level GROUP BY query (PR-0.2 reporting hardening).
+     *
+     * <p>SQL shape (Microsoft SQL Server T-SQL):
+     * <pre>{@code
+     * SELECT [groupColumn] AS [groupColumn],
+     *        COUNT(*) AS [_rowCount],
+     *        SUM([valueA]) AS [valueA],
+     *        AVG([valueB]) AS [valueB]
+     *   FROM <fromClause>
+     *  GROUP BY [groupColumn]
+     *  ORDER BY [groupColumn] ASC
+     *  OFFSET :_offset ROWS FETCH NEXT :_pageSize ROWS ONLY;
+     * }</pre>
+     *
+     * <p>The {@code _rowCount} column is always emitted so AG Grid can
+     * surface the leaf-row count under each group node without a separate
+     * round-trip. Aggregations that target a column already chosen as the
+     * group dimension are silently dropped (they would produce a
+     * tautological {@code GROUP BY x; SUM(x)}).
+     *
+     * <p>Caller contract:
+     * <ul>
+     *   <li>{@code groupColumn} must be in {@code visibleColumns}.</li>
+     *   <li>Each {@link GroupedAggregation#field()} must be in
+     *       {@code visibleColumns}; otherwise it is dropped (defence in
+     *       depth — the controller already enforces this against the
+     *       registry's {@code aggregatable} flag).</li>
+     *   <li>Sort, RLS and filter handling mirror
+     *       {@link #buildDataQuery(ReportDefinition, YearlySchemaResolver.ResolvedSchemas,
+     *       List, Map, List, String, MapSqlParameterSource, int, int)}.</li>
+     * </ul>
+     */
+    public BuiltQuery buildGroupedQuery(ReportDefinition def,
+                                         YearlySchemaResolver.ResolvedSchemas resolvedSchemas,
+                                         List<String> visibleColumns,
+                                         String groupColumn,
+                                         List<GroupedAggregation> aggregations,
+                                         Map<String, Object> agGridFilter,
+                                         List<Map<String, String>> sortModel,
+                                         String rlsWhereClause,
+                                         MapSqlParameterSource rlsParams,
+                                         int page,
+                                         int pageSize) {
+        Set<String> allowedCols = Set.copyOf(visibleColumns);
+        if (groupColumn == null || !allowedCols.contains(groupColumn)) {
+            throw new IllegalArgumentException(
+                    "groupColumn must be one of the visible columns, got: " + groupColumn);
+        }
+
+        // The columns referenced inside the FROM/UNION subquery — must
+        // include the group column and every aggregation target so the
+        // outer GROUP BY/aggregate can reach them.
+        Set<String> projected = new java.util.LinkedHashSet<>();
+        projected.add(groupColumn);
+        List<GroupedAggregation> sanitized = new java.util.ArrayList<>();
+        for (GroupedAggregation a : aggregations != null ? aggregations : List.<GroupedAggregation>of()) {
+            if (!allowedCols.contains(a.field())) continue;
+            if (a.field().equals(groupColumn)) continue; // tautological
+            projected.add(a.field());
+            sanitized.add(a);
+        }
+
+        String selectCols = projected.stream()
+                .map(c -> "[" + c + "]")
+                .collect(Collectors.joining(", "));
+
+        MapSqlParameterSource params = new MapSqlParameterSource();
+        FilterTranslator.FilterResult filterResult = filterTranslator.translate(agGridFilter, allowedCols);
+
+        String fromClause = buildFromClause(def, resolvedSchemas, selectCols,
+                rlsWhereClause, rlsParams, filterResult, params);
+
+        StringBuilder sql = new StringBuilder();
+        sql.append("SELECT [").append(groupColumn).append("]");
+        sql.append(", COUNT(*) AS [_rowCount]");
+        for (GroupedAggregation a : sanitized) {
+            sql.append(", ").append(a.func().toUpperCase())
+               .append("([").append(a.field()).append("])")
+               .append(" AS [").append(a.field()).append("]");
+        }
+        sql.append(" FROM ").append(fromClause);
+        sql.append(" GROUP BY [").append(groupColumn).append("]");
+
+        // The order-by on a grouped query may only reference the group
+        // column or an aggregation alias. PR-0.2 keeps this simple: if
+        // the client picks the group column, honor it; otherwise default
+        // to ascending on the group column for deterministic pagination.
+        String orderBy = translateGroupedSort(sortModel, groupColumn, sanitized);
+        sql.append(" ORDER BY ").append(orderBy);
+
+        int offset = (page - 1) * pageSize;
+        sql.append(" OFFSET :_offset ROWS FETCH NEXT :_pageSize ROWS ONLY");
+        params.addValue("_offset", offset);
+        params.addValue("_pageSize", pageSize);
+
+        return new BuiltQuery(sql.toString(), params);
+    }
+
+    /**
+     * Count of distinct group buckets — used by SSRM to size the
+     * pagination scrollbar. Does NOT count source rows; returns the
+     * cardinality of {@code COUNT(DISTINCT [groupColumn])} via a
+     * subquery wrapper to stay portable across the single-schema and
+     * UNION ALL FROM clauses.
+     */
+    public BuiltQuery buildGroupedCountQuery(ReportDefinition def,
+                                              YearlySchemaResolver.ResolvedSchemas resolvedSchemas,
+                                              List<String> visibleColumns,
+                                              String groupColumn,
+                                              Map<String, Object> agGridFilter,
+                                              String rlsWhereClause,
+                                              MapSqlParameterSource rlsParams) {
+        Set<String> allowedCols = Set.copyOf(visibleColumns);
+        if (groupColumn == null || !allowedCols.contains(groupColumn)) {
+            throw new IllegalArgumentException(
+                    "groupColumn must be one of the visible columns, got: " + groupColumn);
+        }
+
+        String selectCols = "[" + groupColumn + "]";
+
+        MapSqlParameterSource params = new MapSqlParameterSource();
+        FilterTranslator.FilterResult filterResult = filterTranslator.translate(agGridFilter, allowedCols);
+
+        String fromClause = buildFromClause(def, resolvedSchemas, selectCols,
+                rlsWhereClause, rlsParams, filterResult, params);
+
+        StringBuilder sql = new StringBuilder();
+        sql.append("SELECT COUNT(*) FROM (");
+        sql.append("SELECT [").append(groupColumn).append("]");
+        sql.append(" FROM ").append(fromClause);
+        sql.append(" GROUP BY [").append(groupColumn).append("]");
+        sql.append(") AS _g");
+
+        return new BuiltQuery(sql.toString(), params);
+    }
+
+    /**
+     * Resolve the {@code ORDER BY} clause for a grouped query.
+     *
+     * <p>Allowed sort fields are the group column and any aggregation
+     * alias. Unknown / disallowed entries are skipped silently. If the
+     * resulting list is empty, returns an ascending sort on the group
+     * column so paging is deterministic.
+     */
+    private String translateGroupedSort(List<Map<String, String>> sortModel,
+                                         String groupColumn,
+                                         List<GroupedAggregation> aggregations) {
+        if (sortModel == null || sortModel.isEmpty()) {
+            return "[" + groupColumn + "] ASC";
+        }
+        Set<String> allowedSortCols = new java.util.HashSet<>();
+        allowedSortCols.add(groupColumn);
+        for (GroupedAggregation a : aggregations) {
+            allowedSortCols.add(a.field());
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Map<String, String> entry : sortModel) {
+            String colId = entry.get("colId");
+            String dir = entry.get("sort");
+            if (colId == null || !allowedSortCols.contains(colId)) continue;
+            String direction = "desc".equalsIgnoreCase(dir) ? "DESC" : "ASC";
+            if (sb.length() > 0) sb.append(", ");
+            sb.append("[").append(colId).append("] ").append(direction);
+        }
+        return sb.length() == 0 ? "[" + groupColumn + "] ASC" : sb.toString();
+    }
+
     // ── Internal helpers ───────────────────────────────────────────────
 
     /**

@@ -256,4 +256,210 @@ class SqlBuilderTest {
             assertThat(q.sql()).doesNotContain("ORDER BY");
         }
     }
+
+    // ── buildGroupedQuery (PR-0.2) ──────────────────────────────
+
+    @Nested
+    class BuildGroupedQuery {
+
+        @Test
+        void simpleGroupBy_emitsRowCountAndGroupColumn() {
+            // Bare GROUP BY without aggregations should still surface
+            // _rowCount so AG Grid can show the bucket size under each
+            // group node.
+            ReportDefinition def = tableDef("ORDERS", "dbo");
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, VISIBLE_COLS,
+                    "name", List.of(),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.sql()).contains("SELECT [name]");
+            assertThat(q.sql()).contains("COUNT(*) AS [_rowCount]");
+            assertThat(q.sql()).contains("GROUP BY [name]");
+            // Default order by group column ASC for deterministic paging.
+            assertThat(q.sql()).contains("ORDER BY [name] ASC");
+            assertThat(q.sql()).contains("OFFSET :_offset ROWS FETCH NEXT :_pageSize ROWS ONLY");
+            assertThat(q.params().getValue("_offset")).isEqualTo(0);
+            assertThat(q.params().getValue("_pageSize")).isEqualTo(50);
+        }
+
+        @Test
+        void aggregationsEmittedAsAliasedExpressions() {
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false),
+                            new ColumnDefinition("qty", "Qty", "number", 100, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount", "qty"),
+                    "category",
+                    List.of(
+                            new SqlBuilder.GroupedAggregation("amount", "sum"),
+                            new SqlBuilder.GroupedAggregation("qty", "avg")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("SUM([amount]) AS [amount]")
+                    .contains("AVG([qty]) AS [qty]")
+                    .contains("GROUP BY [category]");
+        }
+
+        @Test
+        void aggregationOnGroupColumnDroppedAsTautological() {
+            // GROUP BY x; SUM(x) is the same as the raw value, so the
+            // builder silently drops it instead of producing an
+            // ambiguous SELECT clause.
+            ReportDefinition def = tableDef("ORDERS", "dbo");
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, VISIBLE_COLS,
+                    "name",
+                    List.of(new SqlBuilder.GroupedAggregation("name", "count")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("GROUP BY [name]")
+                    .doesNotContain("COUNT([name]) AS [name]");
+        }
+
+        @Test
+        void aggregationOnHiddenColumnDropped() {
+            // Defence-in-depth: even if the controller forwards an
+            // aggregation against a non-visible column, the builder
+            // refuses to project it so a SQL injection-shaped payload
+            // can't reach a hidden field.
+            ReportDefinition def = tableDef("ORDERS", "dbo");
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, VISIBLE_COLS,
+                    "name",
+                    List.of(new SqlBuilder.GroupedAggregation("hidden", "sum")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.sql()).doesNotContain("[hidden]");
+        }
+
+        @Test
+        void unknownGroupColumnRejected() {
+            ReportDefinition def = tableDef("ORDERS", "dbo");
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildGroupedQuery(
+                            def, null, VISIBLE_COLS,
+                            "ghost", List.of(),
+                            Collections.emptyMap(), Collections.emptyList(),
+                            null, null, 1, 50));
+        }
+
+        @Test
+        void sortModelOnGroupColumnHonored() {
+            ReportDefinition def = tableDef("ORDERS", "dbo");
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, VISIBLE_COLS,
+                    "name", List.of(),
+                    Collections.emptyMap(),
+                    List.of(Map.of("colId", "name", "sort", "desc")),
+                    null, null, 1, 50);
+
+            assertThat(q.sql()).contains("ORDER BY [name] DESC");
+        }
+
+        @Test
+        void sortModelOnAggregationAliasHonored() {
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(),
+                    List.of(Map.of("colId", "amount", "sort", "desc")),
+                    null, null, 1, 50);
+
+            assertThat(q.sql()).contains("ORDER BY [amount] DESC");
+        }
+
+        @Test
+        void sortModelOnUnknownColumnDropped() {
+            // Defensive: a sort entry referencing a non-group, non-agg
+            // column is dropped silently. Falls back to default group
+            // column ASC so paging stays deterministic.
+            ReportDefinition def = tableDef("ORDERS", "dbo");
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, VISIBLE_COLS,
+                    "name", List.of(),
+                    Collections.emptyMap(),
+                    List.of(Map.of("colId", "id", "sort", "asc")),
+                    null, null, 1, 50);
+
+            assertThat(q.sql()).contains("ORDER BY [name] ASC");
+        }
+
+        @Test
+        void groupedCountQueryUsesSubquery() {
+            ReportDefinition def = tableDef("ORDERS", "dbo");
+            SqlBuilder.BuiltQuery q = builder.buildGroupedCountQuery(
+                    def, null, VISIBLE_COLS, "name",
+                    Collections.emptyMap(), null, null);
+
+            // Total = COUNT(*) over the GROUPED inner subquery, NOT
+            // COUNT(DISTINCT) — the latter doesn't compose with the
+            // existing UNION ALL FROM clause used by yearly schemas.
+            assertThat(q.sql())
+                    .contains("SELECT COUNT(*) FROM")
+                    .contains("GROUP BY [name]");
+        }
+
+        @Test
+        void aggregationFunctionNormalizedToLowerCase() {
+            // GroupedAggregation accepts mixed case input but stores
+            // the canonical lower-case form so SQL generation is
+            // deterministic. The SQL itself uppercases for readability.
+            SqlBuilder.GroupedAggregation a =
+                    new SqlBuilder.GroupedAggregation("amount", "SUM");
+            assertThat(a.func()).isEqualTo("sum");
+
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount"),
+                    "category", List.of(a),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.sql()).contains("SUM([amount])");
+        }
+
+        @Test
+        void invalidAggregationFunctionRejected() {
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> new SqlBuilder.GroupedAggregation("col", "median"));
+        }
+
+        @Test
+        void blankAggregationFieldRejected() {
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> new SqlBuilder.GroupedAggregation("", "sum"));
+        }
+    }
 }
