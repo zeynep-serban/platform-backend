@@ -29,7 +29,10 @@ public class CacheConfig {
                 buildCache("contextHealthFiles", Duration.ofSeconds(30), 20),
                 buildCache("contextHealthKpis", Duration.ofSeconds(30), 1),
                 buildCache("contextHealthCharts", Duration.ofSeconds(30), 1),
-                buildCache("contextHealthGrids", Duration.ofSeconds(30), 10)
+                buildCache("contextHealthGrids", Duration.ofSeconds(30), 10),
+                // Workcube CompanyPicker dropdown — global per-cluster catalog,
+                // 5dk TTL (Codex 019dfb15 iter-2 absorb #1).
+                buildCache("companyOptions", Duration.ofMinutes(5), 1)
         ));
         return manager;
     }
