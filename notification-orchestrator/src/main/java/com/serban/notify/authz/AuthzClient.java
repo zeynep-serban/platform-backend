@@ -2,6 +2,7 @@ package com.serban.notify.authz;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.tracing.Tracer;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
 import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
@@ -9,6 +10,7 @@ import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.core5.http.io.entity.StringEntity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -54,6 +56,7 @@ public class AuthzClient {
     private final ObjectMapper objectMapper;
     private final String permissionServiceUrl;
     private final String internalApiKey;
+    private Tracer tracer;  // optional — Codex Q5 absorb
 
     public AuthzClient(
         ObjectMapper objectMapper,
@@ -65,6 +68,16 @@ public class AuthzClient {
         this.objectMapper = objectMapper;
         this.permissionServiceUrl = permissionServiceUrl;
         this.internalApiKey = internalApiKey;
+    }
+
+    /**
+     * Optional Tracer injection (Codex 019dfae5 PR-B Q5 absorb).
+     * Setter injection — null in unit tests; Spring populates with
+     * Micrometer Tracing in production context.
+     */
+    @Autowired(required = false)
+    public void setTracer(Tracer tracer) {
+        this.tracer = tracer;
     }
 
     /**
@@ -96,6 +109,9 @@ public class AuthzClient {
             HttpPost post = new HttpPost(url);
             post.setHeader("Content-Type", "application/json; charset=utf-8");
             post.setHeader("X-Internal-Api-Key", internalApiKey);
+            // Codex 019dfae5 PR-B Q5 absorb: traceparent header propagation
+            // (manual — Apache HttpClient not auto-instrumented).
+            propagateTraceparent(post);
             String json = objectMapper.writeValueAsString(body);
             post.setEntity(new StringEntity(json, StandardCharsets.UTF_8));
 
@@ -118,6 +134,22 @@ public class AuthzClient {
                 e.getMessage(), principalType, principalId, objectType, objectId);
             return AuthzDecision.deny("authz_unreachable");
         }
+    }
+
+    /**
+     * Propagate W3C traceparent header from current span (Codex 019dfae5 PR-B Q5 absorb).
+     * Format: 00-{trace-id}-{span-id}-{flags}
+     * No-op when tracer absent (unit test path) or no current span.
+     */
+    private void propagateTraceparent(HttpPost post) {
+        if (tracer == null) return;
+        var span = tracer.currentSpan();
+        if (span == null) return;
+        var ctx = span.context();
+        if (ctx == null) return;
+        String traceparent = String.format("00-%s-%s-01",
+            ctx.traceId(), ctx.spanId());
+        post.setHeader("traceparent", traceparent);
     }
 
     private static CloseableHttpClient newClient() {

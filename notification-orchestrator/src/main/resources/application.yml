@@ -62,6 +62,15 @@ management:
       probes:
         enabled: true
       show-details: never
+  # Faz 23.2 PR-B: Micrometer Tracing (Codex 019dfae5 Q5 PARTIAL absorb)
+  tracing:
+    sampling:
+      probability: ${MANAGEMENT_TRACING_SAMPLING_PROBABILITY:0.0}  # PR-C activates
+    propagation:
+      type: w3c
+  otlp:
+    tracing:
+      endpoint: ${MANAGEMENT_OTLP_TRACING_ENDPOINT:}  # PR-C: tempo/otel-collector URL
 
 notify:
   # PR2 dispatch.enabled=false default — worker yok, intake-only mode (Codex 019df9ae Q3)

@@ -6,8 +6,10 @@ import com.serban.notify.domain.NotificationDelivery;
 import com.serban.notify.domain.NotificationIntent;
 import com.serban.notify.domain.NotificationTemplate;
 import com.serban.notify.preference.SubscriberPreferenceService;
+import com.serban.notify.worker.WorkerMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -48,6 +50,7 @@ public class DeliveryEligibilityService {
     private final AuthzClient authzClient;
     private final boolean preferencesEnabled;
     private final boolean authzEnabled;
+    private WorkerMetrics workerMetrics;  // optional — Codex Q6 absorb
 
     public DeliveryEligibilityService(
         SubscriberPreferenceService preferenceService,
@@ -61,6 +64,16 @@ public class DeliveryEligibilityService {
         this.authzEnabled = authzEnabled;
         log.info("DeliveryEligibilityService activated: preferences={} authz={}",
             preferencesEnabled, authzEnabled);
+    }
+
+    /**
+     * Optional WorkerMetrics injection (Codex 019dfae5 PR-B Q6 absorb).
+     * Setter injection — null in legacy unit tests; Spring populates in
+     * production context.
+     */
+    @Autowired(required = false)
+    public void setWorkerMetrics(WorkerMetrics workerMetrics) {
+        this.workerMetrics = workerMetrics;
     }
 
     /**
@@ -100,6 +113,13 @@ public class DeliveryEligibilityService {
         // principal — skip authz. Subscriber/external have authz tuples.
         // PR5 D29 scope: subscriber + external authorization. Channel-level authz
         // (slack workspace, webhook endpoint) → Faz 23.2 v2.
+        if (!authzEnabled && !isChannelRecipient(target)) {
+            // Codex 019dfae5 PR-B Q6 absorb: authz disabled bypass counter
+            // (production alert: notify.authz.disabled.bypass rate > 0 → CRITICAL)
+            if (workerMetrics != null) {
+                workerMetrics.authzBypass(target.channel());
+            }
+        }
         if (authzEnabled && !isChannelRecipient(target)) {
             String principalType = isSubscriberRecipient(target) ? "subscriber" : "external";
             String principalId = isSubscriberRecipient(target)

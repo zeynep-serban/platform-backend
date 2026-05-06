@@ -122,4 +122,33 @@ public interface NotificationIntentRepository extends JpaRepository<Notification
            AND i.expireAt <= :now
         """)
     List<NotificationIntent> findExpired(@Param("now") OffsetDateTime now, Pageable pageable);
+
+    /**
+     * Find intents containing a subscriber recipient (KVKK erasure scan).
+     *
+     * <p>Codex 019dfae5 PR-B Q2 absorb: recipients_snapshot JSONB array of
+     * {type:"subscriber",subscriberId:"<id>",...}. PG JSONB containment
+     * operator @&gt; matches intents where the snapshot array contains an
+     * element with the given subscriber.
+     */
+    @Query(value = """
+        SELECT * FROM notify.notification_intent
+         WHERE org_id = :orgId
+           AND recipients_snapshot @> CAST(:snapshotMatch AS JSONB)
+        """, nativeQuery = true)
+    List<NotificationIntent> findIntentsBySubscriberNative(
+        @Param("orgId") String orgId,
+        @Param("snapshotMatch") String snapshotMatch
+    );
+
+    /**
+     * Convenience wrapper for {@link #findIntentsBySubscriberNative} —
+     * builds JSONB containment match.
+     */
+    default List<NotificationIntent> findIntentsBySubscriber(String orgId, String subscriberId) {
+        // [{"type":"subscriber","subscriberId":"<id>"}] containment match
+        String snapshotMatch = "[{\"type\":\"subscriber\",\"subscriberId\":\""
+            + subscriberId.replace("\"", "\\\"") + "\"}]";
+        return findIntentsBySubscriberNative(orgId, snapshotMatch);
+    }
 }

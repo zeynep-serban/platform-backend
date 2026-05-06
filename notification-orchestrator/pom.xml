@@ -95,6 +95,25 @@
              signing follow-up). DkimSigner foundation stub uses JDK PKCS#8 only;
              prod gate disabled via ProductionConfigValidator scope honesty. -->
 
+        <!-- Faz 23.2 PR-B: Micrometer Tracing + OTLP exporter (Codex Q5 PARTIAL absorb).
+             Cross-service traceparent propagation; collector endpoint config PR-C. -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-otel</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-otlp</artifactId>
+        </dependency>
+
+        <!-- Faz 23.2 PR-B iter-1 absorb: Spring Security removed (Codex P0 #2).
+             AdminErasureController auth gateway-level enforce edilir; in-app
+             @PreAuthorize JWT issuer-uri + JwtAuthenticationConverter (realm role
+             extraction) + spring-security-test eksik olduğu için PR-C/follow-up
+             scope'una alındı. Şu an admin endpoint authn = api-gateway path-based
+             ROLE_PRIVACY_OFFICER allowlist. -->
+
+
 
         <dependency>
             <groupId>org.springframework.boot</groupId>

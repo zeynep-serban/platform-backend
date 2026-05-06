@@ -59,7 +59,21 @@ public class PiiRedactor {
         "data_classification",
         "severity",
         "topic_key",
-        "org_id"
+        "org_id",
+        // Faz 23.2 PR-B iter-1 absorb: KVKK erasure audit fields (Codex Q3+P1)
+        "erasure_reason",            // KVKK §11 reason (subject_request, expired_consent)
+        "evidence_ref",              // ticket/letter/audit operator reference
+        "subscriber_id",             // erasure target (NOT email/phone — pseudonymous boundary)
+        "deliveries_anonymized",     // count of recipient_id null'lanan delivery row
+        "policy",                    // PR5 absorb: BLOCKED_* policy identifier
+        "reason",                    // PR5 absorb: human-readable detail
+        "status",                    // PR5 absorb: BLOCKED_* status
+        "dlq_reason",                // PR4 absorb: max_attempts | expired
+        "delivery_id",               // PR4 absorb: numeric id (not PII)
+        "last_failure_reason",       // PR4 absorb: provider error string
+        "provider",                  // PR3 absorb: provider key
+        "provider_response_code",    // PR3 absorb: HTTP / SMTP code
+        "expire_at"                  // PR4 absorb: intent expiration
     );
 
     private final NotifyConfig.RedactionConfig redactionConfig;
