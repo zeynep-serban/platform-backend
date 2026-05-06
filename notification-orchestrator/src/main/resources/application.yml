@@ -63,14 +63,24 @@ management:
         enabled: true
       show-details: never
   # Faz 23.2 PR-B: Micrometer Tracing (Codex 019dfae5 Q5 PARTIAL absorb)
+  # Faz 23.2 PR-C (Codex 019dfc3e iter-2 absorb): readiness only — runtime
+  # activation requires Tempo / OTel collector deploy in gitops repo (PR-D).
   tracing:
     sampling:
-      probability: ${MANAGEMENT_TRACING_SAMPLING_PROBABILITY:0.0}  # PR-C activates
+      probability: ${MANAGEMENT_TRACING_SAMPLING_PROBABILITY:0.0}  # PR-D: 0.1 prod
     propagation:
       type: w3c
   otlp:
     tracing:
-      endpoint: ${MANAGEMENT_OTLP_TRACING_ENDPOINT:}  # PR-C: tempo/otel-collector URL
+      endpoint: ${MANAGEMENT_OTLP_TRACING_ENDPOINT:}  # PR-D: http://tempo.monitoring.svc:4318/v1/traces
+  # Faz 23.2 PR-C (Codex 019dfc3e Q4 absorb): histogram percentiles for
+  # PrometheusRule p99 latency alarms (notify_intent_processing_duration_seconds_bucket).
+  metrics:
+    distribution:
+      percentiles-histogram:
+        notify.intent.processing.duration: true
+      percentiles:
+        notify.intent.processing.duration: 0.5, 0.95, 0.99
 
 notify:
   # PR2 dispatch.enabled=false default — worker yok, intake-only mode (Codex 019df9ae Q3)

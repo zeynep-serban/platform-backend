@@ -137,9 +137,17 @@ public class AuthzClient {
     }
 
     /**
-     * Propagate W3C traceparent header from current span (Codex 019dfae5 PR-B Q5 absorb).
-     * Format: 00-{trace-id}-{span-id}-{flags}
-     * No-op when tracer absent (unit test path) or no current span.
+     * Propagate W3C traceparent header from current span (Codex 019dfae5 PR-B Q5 absorb;
+     * 019dfc3e PR-C Q2 absorb — sampled flag fix).
+     *
+     * <p>Format: {@code 00-{trace-id}-{span-id}-{flags}} where flags byte's lowest
+     * bit indicates sampled. Hard-coding {@code 01} (sampled) was misleading;
+     * receivers can mistake unsampled traces as sampled and over-record.
+     *
+     * <p>Now reads {@link io.micrometer.tracing.TraceContext#sampled()} (Boolean —
+     * {@code true} → flag {@code 01}, {@code false}/{@code null} → {@code 00}).
+     *
+     * <p>No-op when tracer absent (unit test path) or no current span.
      */
     private void propagateTraceparent(HttpPost post) {
         if (tracer == null) return;
@@ -147,8 +155,10 @@ public class AuthzClient {
         if (span == null) return;
         var ctx = span.context();
         if (ctx == null) return;
-        String traceparent = String.format("00-%s-%s-01",
-            ctx.traceId(), ctx.spanId());
+        Boolean sampled = ctx.sampled();
+        String flags = (sampled != null && sampled) ? "01" : "00";
+        String traceparent = String.format("00-%s-%s-%s",
+            ctx.traceId(), ctx.spanId(), flags);
         post.setHeader("traceparent", traceparent);
     }
 

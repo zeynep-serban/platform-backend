@@ -2,12 +2,18 @@ package com.serban.notify.authz;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.TraceContext;
+import io.micrometer.tracing.Tracer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.mockito.Mockito;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.absent;
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalToJson;
+import static com.github.tomakehurst.wiremock.client.WireMock.matching;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
@@ -119,6 +125,115 @@ class AuthzClientTest {
                  "relation":"can_receive","object_type":"template",
                  "object_id":"marketing-promo"}
                 """)));
+    }
+
+    // Codex 019dfc3e PR-C Q2 absorb — traceparent sampled flag fix.
+
+    @Test
+    void traceparentHeaderAbsentWhenNoTracer() {
+        permissionService.stubFor(post(urlEqualTo("/api/v1/internal/authz/check"))
+            .willReturn(aResponse().withStatus(200)
+                .withBody("{\"allowed\":true,\"reason\":\"tuple_match\"}")));
+
+        AuthzClient client = client();
+        client.check("subscriber", "1204", "can_receive", "template", "auth-password-reset");
+
+        permissionService.verify(postRequestedFor(urlEqualTo("/api/v1/internal/authz/check"))
+            .withHeader("traceparent", absent()));
+    }
+
+    @Test
+    void traceparentHeaderAbsentWhenTracerHasNoCurrentSpan() {
+        permissionService.stubFor(post(urlEqualTo("/api/v1/internal/authz/check"))
+            .willReturn(aResponse().withStatus(200)
+                .withBody("{\"allowed\":true,\"reason\":\"tuple_match\"}")));
+
+        Tracer tracer = Mockito.mock(Tracer.class);
+        Mockito.when(tracer.currentSpan()).thenReturn(null);
+
+        AuthzClient client = client();
+        client.setTracer(tracer);
+        client.check("subscriber", "1204", "can_receive", "template", "auth-password-reset");
+
+        permissionService.verify(postRequestedFor(urlEqualTo("/api/v1/internal/authz/check"))
+            .withHeader("traceparent", absent()));
+    }
+
+    @Test
+    void traceparentSampledFlag01WhenSpanSampled() {
+        permissionService.stubFor(post(urlEqualTo("/api/v1/internal/authz/check"))
+            .willReturn(aResponse().withStatus(200)
+                .withBody("{\"allowed\":true,\"reason\":\"tuple_match\"}")));
+
+        // Simulate a sampled span
+        TraceContext ctx = Mockito.mock(TraceContext.class);
+        Mockito.when(ctx.traceId()).thenReturn("0af7651916cd43dd8448eb211c80319c");
+        Mockito.when(ctx.spanId()).thenReturn("b7ad6b7169203331");
+        Mockito.when(ctx.sampled()).thenReturn(Boolean.TRUE);
+
+        Span span = Mockito.mock(Span.class);
+        Mockito.when(span.context()).thenReturn(ctx);
+
+        Tracer tracer = Mockito.mock(Tracer.class);
+        Mockito.when(tracer.currentSpan()).thenReturn(span);
+
+        AuthzClient client = client();
+        client.setTracer(tracer);
+        client.check("subscriber", "1204", "can_receive", "template", "auth-password-reset");
+
+        permissionService.verify(postRequestedFor(urlEqualTo("/api/v1/internal/authz/check"))
+            .withHeader("traceparent",
+                equalTo("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")));
+    }
+
+    @Test
+    void traceparentSampledFlag00WhenSpanNotSampled() {
+        permissionService.stubFor(post(urlEqualTo("/api/v1/internal/authz/check"))
+            .willReturn(aResponse().withStatus(200)
+                .withBody("{\"allowed\":true,\"reason\":\"tuple_match\"}")));
+
+        TraceContext ctx = Mockito.mock(TraceContext.class);
+        Mockito.when(ctx.traceId()).thenReturn("0af7651916cd43dd8448eb211c80319c");
+        Mockito.when(ctx.spanId()).thenReturn("b7ad6b7169203331");
+        Mockito.when(ctx.sampled()).thenReturn(Boolean.FALSE);
+
+        Span span = Mockito.mock(Span.class);
+        Mockito.when(span.context()).thenReturn(ctx);
+
+        Tracer tracer = Mockito.mock(Tracer.class);
+        Mockito.when(tracer.currentSpan()).thenReturn(span);
+
+        AuthzClient client = client();
+        client.setTracer(tracer);
+        client.check("subscriber", "1204", "can_receive", "template", "auth-password-reset");
+
+        permissionService.verify(postRequestedFor(urlEqualTo("/api/v1/internal/authz/check"))
+            .withHeader("traceparent", matching("00-.*-00")));
+    }
+
+    @Test
+    void traceparentSampledFlag00WhenSampledNull() {
+        permissionService.stubFor(post(urlEqualTo("/api/v1/internal/authz/check"))
+            .willReturn(aResponse().withStatus(200)
+                .withBody("{\"allowed\":true,\"reason\":\"tuple_match\"}")));
+
+        TraceContext ctx = Mockito.mock(TraceContext.class);
+        Mockito.when(ctx.traceId()).thenReturn("0af7651916cd43dd8448eb211c80319c");
+        Mockito.when(ctx.spanId()).thenReturn("b7ad6b7169203331");
+        Mockito.when(ctx.sampled()).thenReturn(null);  // null = unknown → 00
+
+        Span span = Mockito.mock(Span.class);
+        Mockito.when(span.context()).thenReturn(ctx);
+
+        Tracer tracer = Mockito.mock(Tracer.class);
+        Mockito.when(tracer.currentSpan()).thenReturn(span);
+
+        AuthzClient client = client();
+        client.setTracer(tracer);
+        client.check("subscriber", "1204", "can_receive", "template", "auth-password-reset");
+
+        permissionService.verify(postRequestedFor(urlEqualTo("/api/v1/internal/authz/check"))
+            .withHeader("traceparent", matching("00-.*-00")));
     }
 
     private AuthzClient client() {
