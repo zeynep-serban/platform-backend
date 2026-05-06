@@ -105,11 +105,6 @@
   "access": {
     "permission": "REPORT_VIEW",
     "columnRestrictions": {},
-    "reportGroup": "FINANCE_REPORTS",
-    "rowFilter": {
-      "column": "OUR_COMPANY_ID",
-      "scopeType": "COMPANY",
-      "bypassPermission": "reports.fin.all-companies"
-    }
+    "reportGroup": "FINANCE_REPORTS"
   }
 }
