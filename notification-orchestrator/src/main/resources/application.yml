@@ -128,6 +128,15 @@ notify:
       # Q3 PARTIAL: kid-aware HMAC registry (active + next; rotation)
       hmac-registry:
         enabled: ${NOTIFY_WEBHOOK_HMAC_REGISTRY_ENABLED:false}
+    # Faz 23.3.1 SMS adapter (NetGSM REST v2). Production: Vault/ESO injection
+    # for username/password (kv/platform/notify @ /sms/netgsm). Dev/test:
+    # missing credentials → adapter returns FAILED before HTTP call (smoke OK).
+    sms:
+      netgsm:
+        api-url: ${NOTIFY_ADAPTERS_SMS_NETGSM_API_URL:https://api.netgsm.com.tr/sms/rest/v2/send}
+        username: ${NOTIFY_ADAPTERS_SMS_NETGSM_USERNAME:}
+        password: ${NOTIFY_ADAPTERS_SMS_NETGSM_PASSWORD:}
+        msgheader: ${NOTIFY_ADAPTERS_SMS_NETGSM_MSGHEADER:Notify}
 
   # PR5 preference + authz feature flags (Codex 019dfaaa absorb)
   # Production default: both enabled. Test profile: false (override per test class).

@@ -74,11 +74,11 @@ public class IntentSubmissionService {
     /**
      * PR2 Kernel allowed channels (Codex post-impl bulgu #4 absorb).
      * PR3+'da SMTP/Slack/Webhook adapter'lar geldikçe set genişletilir.
-     * sms, push-fcm, push-apns, in-app, web-push, teams, whatsapp, voice
-     * PR3-23.X tier'larında.
+     * push-fcm, push-apns, in-app, web-push, teams, whatsapp, voice
+     * PR3-23.X tier'larında. Faz 23.3.1: sms (NetGSM) eklendi.
      */
     private static final java.util.Set<String> PR2_ALLOWED_CHANNELS =
-        java.util.Set.of("email", "slack", "webhook");
+        java.util.Set.of("email", "sms", "slack", "webhook");
 
     @Transactional
     public SubmitIntentResponse submit(SubmitIntentRequest request) {
@@ -218,6 +218,13 @@ public class IntentSubmissionService {
             }
         }
 
+        // Channel-specific addressing requirements (Codex iter-2 P1 absorb).
+        // External recipient with email-only must NOT pass submit gate when
+        // SMS channel selected — would later fail at DeliveryPlanService and
+        // leave intent in PENDING limbo. Same for phone-only + email channel.
+        boolean hasSmsChannel = request.channels().contains("sms");
+        boolean hasEmailChannel = request.channels().contains("email");
+
         // Recipient type-specific zorunluluk
         for (SubmitIntentRequest.RecipientRef ref : request.recipients()) {
             if (ref.type() == SubmitIntentRequest.RecipientRef.Type.subscriber) {
@@ -232,6 +239,17 @@ public class IntentSubmissionService {
                 if (!hasEmail && !hasPhone) {
                     throw new com.serban.notify.exception.InvalidRequestException(
                         "recipient.email or recipient.phone required when type=external"
+                    );
+                }
+                // Channel-specific gate: SMS requires phone; email requires email.
+                if (hasSmsChannel && !hasPhone) {
+                    throw new com.serban.notify.exception.InvalidRequestException(
+                        "external recipient requires phone (E.164) when channels include 'sms'"
+                    );
+                }
+                if (hasEmailChannel && !hasEmail) {
+                    throw new com.serban.notify.exception.InvalidRequestException(
+                        "external recipient requires email when channels include 'email'"
                     );
                 }
             }

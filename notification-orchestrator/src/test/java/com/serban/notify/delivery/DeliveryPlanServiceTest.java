@@ -21,11 +21,13 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * DeliveryPlanService unit test (Codex 019df9ae Q2 PARTIAL absorb).
+ * DeliveryPlanService unit test (Codex 019df9ae Q2 PARTIAL absorb +
+ * Faz 23.3.1 SMS extension).
  *
  * <p>Test edilen contract:
  * <ul>
  *   <li>email: recipient-addressed → N recipient × 1 target</li>
+ *   <li>sms: recipient-addressed → N recipient × 1 target (Faz 23.3.1)</li>
  *   <li>slack: target-addressed → 1 target per intent (channel_routing.slack.webhookUrl)</li>
  *   <li>webhook: target-addressed → 1 target per intent (channel_routing.webhook.targetUrl)</li>
  *   <li>missing channel routing → InvalidRequestException</li>
@@ -36,6 +38,7 @@ class DeliveryPlanServiceTest {
 
     private PiiRedactor redactor;
     private ChannelAdapterRegistry registry;
+    private com.serban.notify.preference.SubscriberPreferenceService prefService;
     private DeliveryPlanService service;
 
     @BeforeEach
@@ -46,15 +49,16 @@ class DeliveryPlanServiceTest {
             .thenReturn("hash-mock");
         // All test channels are supported by registry
         when(registry.supports("email")).thenReturn(true);
+        when(registry.supports("sms")).thenReturn(true);
         when(registry.supports("slack")).thenReturn(true);
         when(registry.supports("webhook")).thenReturn(true);
         when(registry.supports("unknown")).thenReturn(false);
-        when(registry.supportedChannels()).thenReturn(java.util.Set.of("email", "slack", "webhook"));
+        when(registry.supportedChannels())
+            .thenReturn(java.util.Set.of("email", "sms", "slack", "webhook"));
 
         // PR5: SubscriberPreferenceService dependency injected; tests provide
-        // ref.email() directly so contact lookup not invoked.
-        com.serban.notify.preference.SubscriberPreferenceService prefService =
-            mock(com.serban.notify.preference.SubscriberPreferenceService.class);
+        // ref.email() / ref.phone() directly when contact lookup not desired.
+        prefService = mock(com.serban.notify.preference.SubscriberPreferenceService.class);
         service = new DeliveryPlanService(redactor, registry, prefService);
     }
 
@@ -248,6 +252,147 @@ class DeliveryPlanServiceTest {
 
         assertThat(targets).hasSize(1);
         assertThat(targets.get(0).targetRef()).isEqualTo("param@x.com");
+    }
+
+    // ─── Faz 23.3.1 SMS tests ─────────────────────────────────────────────
+
+    @Test
+    void planSmsFanoutPerRecipientWithExplicitPhone() {
+        // Subscriber + external; both provide phone explicitly → no contact
+        // lookup. Validates recipient-addressed pattern parallel to email.
+        NotificationIntent intent = intent(new String[] { "sms" }, null);
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "1", null, "+905321111111", "A", "tr-TR"
+            ),
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.external,
+                null, null, "+905322222222", "B", "tr-TR"
+            )
+        );
+
+        List<DeliveryTarget> targets = service.plan(intent, recipients);
+
+        assertThat(targets).hasSize(2);
+        assertThat(targets).extracting(DeliveryTarget::channel)
+            .containsExactly("sms", "sms");
+        assertThat(targets).extracting(DeliveryTarget::targetRef)
+            .containsExactly("+905321111111", "+905322222222");
+        assertThat(targets).extracting(DeliveryTarget::recipientType)
+            .containsExactly("subscriber", "external");
+        assertThat(targets).extracting(DeliveryTarget::providerKey)
+            .containsExactly("netgsm-default", "netgsm-default");
+    }
+
+    @Test
+    void planSmsSubscriberLooksUpPhoneFromContactWhenRefMissing() {
+        // Subscriber without ref.phone() → DeliveryPlanService resolves via
+        // SubscriberPreferenceService.findContact (PR5 projection pattern).
+        NotificationIntent intent = intent(new String[] { "sms" }, null);
+        com.serban.notify.domain.SubscriberContact contact =
+            new com.serban.notify.domain.SubscriberContact();
+        contact.setOrgId("default");
+        contact.setSubscriberId("42");
+        contact.setPhone("+905333333333");
+        when(prefService.findContact("default", "42"))
+            .thenReturn(java.util.Optional.of(contact));
+
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "42", null, null, null, "tr-TR"
+            )
+        );
+
+        List<DeliveryTarget> targets = service.plan(intent, recipients);
+
+        assertThat(targets).hasSize(1);
+        assertThat(targets.get(0).channel()).isEqualTo("sms");
+        assertThat(targets.get(0).targetRef()).isEqualTo("+905333333333");
+        assertThat(targets.get(0).recipientId()).isEqualTo("42");
+    }
+
+    @Test
+    void planSmsSubscriberMissingPhoneFails() {
+        // Subscriber, no ref.phone() and contact lookup empty → fail-fast.
+        NotificationIntent intent = intent(new String[] { "sms" }, null);
+        when(prefService.findContact(anyString(), anyString()))
+            .thenReturn(java.util.Optional.empty());
+
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "no-phone-sub", null, null, null, "tr-TR"
+            )
+        );
+
+        assertThatThrownBy(() -> service.plan(intent, recipients))
+            .isInstanceOf(InvalidRequestException.class)
+            .hasMessageContaining("phone");
+    }
+
+    @Test
+    void planSmsExternalWithoutPhoneFails() {
+        NotificationIntent intent = intent(new String[] { "sms" }, null);
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.external,
+                null, "x@y.z", null, null, "tr-TR"
+            )
+        );
+
+        assertThatThrownBy(() -> service.plan(intent, recipients))
+            .isInstanceOf(InvalidRequestException.class)
+            .hasMessageContaining("phone");
+    }
+
+    @Test
+    void planSmsRejectsNonE164PhoneFromContactProjection() {
+        // Codex iter-1 P2 absorb: subscriber contact may carry legacy/non-E.164
+        // phone (Workcube ETL); plan-time fail-fast prevents PII leak via
+        // adapter error path.
+        NotificationIntent intent = intent(new String[] { "sms" }, null);
+        com.serban.notify.domain.SubscriberContact contact =
+            new com.serban.notify.domain.SubscriberContact();
+        contact.setOrgId("default");
+        contact.setSubscriberId("legacy-fmt");
+        contact.setPhone("05321234567");  // legacy local format, no "+"
+        when(prefService.findContact("default", "legacy-fmt"))
+            .thenReturn(java.util.Optional.of(contact));
+
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "legacy-fmt", null, null, null, "tr-TR"
+            )
+        );
+
+        assertThatThrownBy(() -> service.plan(intent, recipients))
+            .isInstanceOf(InvalidRequestException.class)
+            .hasMessageContaining("E.164");
+    }
+
+    @Test
+    void planMixedEmailPlusSmsFanoutBothChannels() {
+        // Same recipients, both channels selected → 2 email + 2 sms = 4 targets.
+        NotificationIntent intent = intent(new String[] { "email", "sms" }, null);
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "1", "a@x.com", "+905321111111", null, "tr-TR"
+            ),
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.external,
+                null, "b@x.com", "+905322222222", null, "tr-TR"
+            )
+        );
+
+        List<DeliveryTarget> targets = service.plan(intent, recipients);
+
+        assertThat(targets).hasSize(4);
+        assertThat(targets).extracting(DeliveryTarget::channel)
+            .containsExactly("email", "email", "sms", "sms");
     }
 
     private NotificationIntent intent(String[] channels, Map<String, Object> routing) {

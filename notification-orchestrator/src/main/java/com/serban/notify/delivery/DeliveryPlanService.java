@@ -22,6 +22,7 @@ import java.util.Map;
  * <p>Channel addressing semantics:
  * <ul>
  *   <li>email: recipient-addressed → N recipient × 1 target</li>
+ *   <li>sms: recipient-addressed → N recipient × 1 target (Faz 23.3.1)</li>
  *   <li>slack/webhook: target-addressed → 1 target per channel (recipients
  *       become audit context, not delivery rows)</li>
  * </ul>
@@ -92,16 +93,94 @@ public class DeliveryPlanService {
             }
             switch (channel) {
                 case "email" -> targets.addAll(planEmailTargets(intent, recipients));
+                case "sms"   -> targets.addAll(planSmsTargets(intent, recipients));
                 case "slack" -> targets.add(planSlackTarget(intent));
                 case "webhook" -> targets.add(planWebhookTarget(intent));
                 default -> throw new InvalidRequestException(
-                    "channel '" + channel + "' planning not implemented in PR3"
+                    "channel '" + channel + "' planning not implemented"
                 );
             }
         }
         log.debug("delivery plan: intentId={} channels={} target_count={}",
             intent.getIntentId(), java.util.Arrays.toString(intent.getChannels()), targets.size());
         return targets;
+    }
+
+    /** E.164 phone format (matches DTO bean validation pattern). */
+    private static final java.util.regex.Pattern E164 =
+        java.util.regex.Pattern.compile("^\\+[1-9][0-9]{7,14}$");
+
+    /**
+     * SMS: recipient-addressed; one target per eligible recipient
+     * (Faz 23.3.1 — Production MVP geniş scope).
+     *
+     * <p>Target ref: E.164 phone number (e.g. +905321234567); NetGsmSmsAdapter
+     * strips leading "+" before sending to provider REST v2 endpoint.
+     *
+     * <p>Subscriber type: phone resolved from {@link SubscriberContact} (PR5
+     * projection). Optional explicit {@code ref.phone()} fallback (test fixture
+     * / external override).
+     *
+     * <p>External type: {@code ref.phone()} required; DTO bean validation
+     * already enforces E.164 pattern.
+     *
+     * <p>Plan-time E.164 validation (Codex iter-1 P2 absorb): subscriber
+     * contact projection may carry legacy/non-E.164 phone (Workcube ETL
+     * source). Fail-fast at planning time so PII never leaks into adapter
+     * error path.
+     */
+    private List<DeliveryTarget> planSmsTargets(
+        NotificationIntent intent, List<SubmitIntentRequest.RecipientRef> recipients
+    ) {
+        List<DeliveryTarget> result = new ArrayList<>(recipients.size());
+        for (SubmitIntentRequest.RecipientRef ref : recipients) {
+            String type = ref.type().name();
+            String phone;
+            String hashInput;
+            if (ref.type() == SubmitIntentRequest.RecipientRef.Type.subscriber) {
+                if (ref.phone() != null && !ref.phone().isBlank()) {
+                    phone = ref.phone();
+                } else {
+                    java.util.Optional<SubscriberContact> contact = preferenceService.findContact(
+                        intent.getOrgId(), ref.subscriberId()
+                    );
+                    if (contact.isEmpty() || contact.get().getPhone() == null
+                        || contact.get().getPhone().isBlank()) {
+                        throw new InvalidRequestException(
+                            "subscriber " + ref.subscriberId() + " has no phone contact "
+                                + "(orgId=" + intent.getOrgId() + ") and recipient.phone "
+                                + "not provided"
+                        );
+                    }
+                    phone = contact.get().getPhone();
+                }
+                hashInput = ref.subscriberId();
+            } else {
+                if (ref.phone() == null || ref.phone().isBlank()) {
+                    throw new InvalidRequestException(
+                        "external recipient requires phone (E.164) for SMS channel"
+                    );
+                }
+                phone = ref.phone();
+                hashInput = ref.phone();
+            }
+            // Codex iter-1 P2 absorb: plan-time E.164 validation (fail-fast,
+            // no raw phone in adapter error path even when contact is bad).
+            if (!E164.matcher(phone).matches()) {
+                String safeRef = ref.type() == SubmitIntentRequest.RecipientRef.Type.subscriber
+                    ? "subscriber " + ref.subscriberId()
+                    : "external recipient";
+                throw new InvalidRequestException(
+                    safeRef + " has invalid phone format (must be E.164: + + 8-15 digits) "
+                        + "for SMS channel"
+                );
+            }
+            String hash = piiRedactor.hashRecipient(intent.getOrgId(), type, hashInput);
+            result.add(new DeliveryTarget(
+                "sms", type, ref.subscriberId(), hash, phone, "netgsm-default"
+            ));
+        }
+        return result;
     }
 
     /** Email: recipient-addressed; one target per eligible recipient. */

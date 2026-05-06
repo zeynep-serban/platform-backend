@@ -130,7 +130,8 @@ class IntentSubmissionServiceIntegrationTest extends AbstractPostgresTest {
 
     @Test
     void unsupportedChannelRejected() {
-        // Codex post-impl bulgu #4 absorb: PR2 channels = email/slack/webhook only
+        // Faz 23.3.1: SMS now first-class (PR2 kernel = email/sms/slack/webhook).
+        // Use "push-fcm" as canonical not-yet-implemented channel for this gate.
         SubmitIntentRequest req = new SubmitIntentRequest(
             UUID.randomUUID().toString(),
             "ch-key",
@@ -144,13 +145,13 @@ class IntentSubmissionServiceIntegrationTest extends AbstractPostgresTest {
                 "1204", null, null, "Halil", "tr-TR"
             )),
             new SubmitIntentRequest.TemplateRef("auth-password-reset", null, "tr-TR"),
-            List.of("sms"),  // SMS not in PR2 kernel
+            List.of("push-fcm"),  // not in PR2/Faz23.3.1 kernel
             Map.of("k", "v"),
             null, null, null, null, null
         );
         assertThatThrownBy(() -> service.submit(req))
             .isInstanceOf(com.serban.notify.exception.InvalidRequestException.class)
-            .hasMessageContaining("sms");
+            .hasMessageContaining("push-fcm");
     }
 
     @Test
@@ -177,6 +178,91 @@ class IntentSubmissionServiceIntegrationTest extends AbstractPostgresTest {
         assertThatThrownBy(() -> service.submit(req))
             .isInstanceOf(com.serban.notify.exception.InvalidRequestException.class)
             .hasMessageContaining("email or recipient.phone");
+    }
+
+    @Test
+    void smsExternalWithPhoneAccepted() {
+        // Faz 23.3.1 (Codex iter-2 P1 absorb): channels=["sms"] external
+        // recipient with E.164 phone → ACCEPTED at submit gate.
+        SubmitIntentRequest req = new SubmitIntentRequest(
+            UUID.randomUUID().toString(),
+            "sms-ext-ok-key",
+            "trace-sms-ok",
+            "default",
+            "auth.password-reset",
+            NotificationIntent.Severity.info,
+            NotificationIntent.DataClassification.security,
+            List.of(new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.external,
+                null, null, "+905321234567", "External SMS", "tr-TR"
+            )),
+            new SubmitIntentRequest.TemplateRef("auth-password-reset", null, "tr-TR"),
+            List.of("sms"),
+            Map.of("user_name", "Halil"),
+            null, null, null, null, null
+        );
+
+        SubmitIntentResponse resp = service.submit(req);
+
+        assertThat(resp.status()).isEqualTo("ACCEPTED");
+        assertThat(resp.intentId()).isEqualTo(req.intentId());
+    }
+
+    @Test
+    void smsExternalWithoutPhoneRejectedAtSubmit() {
+        // Faz 23.3.1 (Codex iter-2 P1 absorb): channels=["sms"] external
+        // recipient with email-only must be rejected at submit gate, NOT
+        // accepted-then-fail-at-plan (would leave intent in PENDING limbo).
+        SubmitIntentRequest req = new SubmitIntentRequest(
+            UUID.randomUUID().toString(),
+            "sms-ext-fail-key",
+            "trace-sms-fail",
+            "default",
+            "auth.password-reset",
+            NotificationIntent.Severity.info,
+            NotificationIntent.DataClassification.security,
+            List.of(new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.external,
+                null, "ext@example.com", null, "External Email Only", "tr-TR"
+            )),
+            new SubmitIntentRequest.TemplateRef("auth-password-reset", null, "tr-TR"),
+            List.of("sms"),
+            Map.of("k", "v"),
+            null, null, null, null, null
+        );
+
+        assertThatThrownBy(() -> service.submit(req))
+            .isInstanceOf(com.serban.notify.exception.InvalidRequestException.class)
+            .hasMessageContaining("phone")
+            .hasMessageContaining("sms");
+    }
+
+    @Test
+    void mixedEmailSmsExternalEmailOnlyRejectedAtSubmit() {
+        // Mixed channel intent: external recipient must satisfy ALL channels.
+        // email-only would let email dispatch but block sms; this would
+        // partial-deliver — rejected at submit gate.
+        SubmitIntentRequest req = new SubmitIntentRequest(
+            UUID.randomUUID().toString(),
+            "mixed-ext-fail-key",
+            "trace-mixed-fail",
+            "default",
+            "auth.password-reset",
+            NotificationIntent.Severity.info,
+            NotificationIntent.DataClassification.security,
+            List.of(new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.external,
+                null, "ext@example.com", null, "External Email Only", "tr-TR"
+            )),
+            new SubmitIntentRequest.TemplateRef("auth-password-reset", null, "tr-TR"),
+            List.of("email", "sms"),
+            Map.of("k", "v"),
+            null, null, null, null, null
+        );
+
+        assertThatThrownBy(() -> service.submit(req))
+            .isInstanceOf(com.serban.notify.exception.InvalidRequestException.class)
+            .hasMessageContaining("phone");
     }
 
     private SubmitIntentRequest newRequest(String intentId, String idemKey) {
