@@ -26,4 +26,19 @@ public interface ProviderConfigRepository extends JpaRepository<ProviderConfig, 
         @Param("channel") String channel,
         @Param("env") String environment
     );
+
+    /**
+     * Org-aware lookup (Codex 019dfae5 PR-A Q4 absorb): org-specific override
+     * varsa onu seç, yoksa default org_id='*' fallback. priority ASC ordering
+     * ile failover sırası belirlenir.
+     */
+    @Query("SELECT pc FROM ProviderConfig pc WHERE pc.channel = :channel " +
+           "AND pc.environment = :env AND pc.active = true " +
+           "AND (pc.orgId = :orgId OR pc.orgId = '*') " +
+           "ORDER BY CASE WHEN pc.orgId = :orgId THEN 0 ELSE 1 END ASC, pc.priority ASC")
+    List<ProviderConfig> findActiveByOrgChannelOrderByPriority(
+        @Param("orgId") String orgId,
+        @Param("channel") String channel,
+        @Param("env") String environment
+    );
 }

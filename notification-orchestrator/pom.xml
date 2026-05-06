@@ -91,6 +91,11 @@
             <version>2.6.0</version>
         </dependency>
 
+        <!-- Faz 23.2 PR-A iter-1 absorb: BouncyCastle removed (DKIM full RFC 6376
+             signing follow-up). DkimSigner foundation stub uses JDK PKCS#8 only;
+             prod gate disabled via ProductionConfigValidator scope honesty. -->
+
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

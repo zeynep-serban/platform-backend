@@ -72,7 +72,9 @@ class WebhookEgressAdapterTest {
         long timestamp = Long.parseLong(tsHeader);
         assertThat(timestamp).isBetween(beforeSec, afterSec);
 
-        assertThat(sigHeader).matches("t=\\d+,v1=[0-9a-f]{64}");
+        // Codex 019dfae5 iter-1 absorb: kid-aware header scheme
+        // (t=<ts>,kid=<active-kid>,v1=<sig>)
+        assertThat(sigHeader).matches("t=\\d+,kid=[a-zA-Z0-9_-]+,v1=[0-9a-f]{64}");
         assertThat(webhookId).startsWith("wh-");
 
         // Verify signature is valid: HMAC-SHA256(secret, timestamp + "." + body)
@@ -145,7 +147,8 @@ class WebhookEgressAdapterTest {
         wm.verify(1, postRequestedFor(urlEqualTo("/inbox"))
             .withHeader("Content-Type", matching("application/json.*"))
             .withHeader("X-Notify-Timestamp", matching("\\d+"))
-            .withHeader("X-Notify-Signature", matching("t=\\d+,v1=[0-9a-f]{64}"))
+            .withHeader("X-Notify-Signature",
+                matching("t=\\d+,kid=[a-zA-Z0-9_-]+,v1=[0-9a-f]{64}"))
             .withHeader("X-Notify-Webhook-Id", matching("wh-[0-9a-f-]+")));
     }
 

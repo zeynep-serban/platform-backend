@@ -79,6 +79,30 @@ notify:
     max-backoff-ms: ${NOTIFY_RETRY_MAX_BACKOFF_MS:3600000}
     # PR4 absorb: ±25% jitter — thundering herd avoidance
     jitter-ratio: ${NOTIFY_RETRY_JITTER_RATIO:0.25}
+  # Faz 23.2 PR-A production security foundation (Codex 019dfae5 absorb).
+  # Production profile (prod / production) ProductionConfigValidator fail-closed
+  # gates aşağıdaki guard'ları zorunlu kılar.
+  dkim:
+    # Q1 PARTIAL: app-side DKIM default (production); test/dev: false
+    enabled: ${NOTIFY_DKIM_ENABLED:false}
+    selector: ${NOTIFY_DKIM_SELECTOR:default}
+    domain: ${NOTIFY_DKIM_DOMAIN:testai.acik.com}
+    private-key-pem: ${NOTIFY_DKIM_PRIVATE_KEY_PEM:}
+  smtp:
+    tls:
+      # Q2 AGREE: production STARTTLS required; test profile false (Mailpit plaintext)
+      enforce: ${NOTIFY_SMTP_TLS_ENFORCE:false}
+      min-protocol: ${NOTIFY_SMTP_TLS_MIN_PROTOCOL:TLSv1.2}
+      check-server-identity: ${NOTIFY_SMTP_TLS_CHECK_SERVER_IDENTITY:true}
+  provider:
+    # Q4 REVISE: dynamic config + cache + failover
+    cache-ttl-seconds: ${NOTIFY_PROVIDER_CACHE_TTL_SECONDS:30}
+  adapters:
+    webhook:
+      # Q3 PARTIAL: kid-aware HMAC registry (active + next; rotation)
+      hmac-registry:
+        enabled: ${NOTIFY_WEBHOOK_HMAC_REGISTRY_ENABLED:false}
+
   # PR5 preference + authz feature flags (Codex 019dfaaa absorb)
   # Production default: both enabled. Test profile: false (override per test class).
   preferences:

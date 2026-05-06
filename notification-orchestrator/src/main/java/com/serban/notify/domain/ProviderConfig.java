@@ -13,13 +13,20 @@ import java.util.Objects;
  */
 @Entity
 @Table(name = "provider_config", schema = "notify",
-       uniqueConstraints = @UniqueConstraint(name = "uq_provider_version",
-                                              columnNames = {"provider_key", "environment", "version"}))
+       uniqueConstraints = @UniqueConstraint(name = "uq_provider_org_version",
+                                              columnNames = {"org_id", "provider_key", "environment", "version"}))
 public class ProviderConfig {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
+
+    /**
+     * Multi-tenant org_id (Codex 019dfae5 PR-A Q4 absorb). Default {@code "*"}
+     * tüm orgs için; org-specific override için ayrı row.
+     */
+    @Column(name = "org_id", nullable = false, length = 64)
+    private String orgId = "*";
 
     @Column(name = "provider_key", nullable = false, length = 64)
     private String providerKey;
@@ -59,6 +66,8 @@ public class ProviderConfig {
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
+    public String getOrgId() { return orgId; }
+    public void setOrgId(String orgId) { this.orgId = orgId; }
     public String getProviderKey() { return providerKey; }
     public void setProviderKey(String providerKey) { this.providerKey = providerKey; }
     public String getChannel() { return channel; }

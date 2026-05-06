@@ -3,6 +3,7 @@ package com.serban.notify.adapter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.serban.notify.config.NotifyConfig;
 import com.serban.notify.delivery.DeliveryTarget;
+import com.serban.notify.provider.WebhookHmacKeyRegistry;
 import com.serban.notify.template.RenderedMessage;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
 import org.apache.hc.client5.http.config.RequestConfig;
@@ -49,16 +50,30 @@ public class WebhookEgressAdapter implements ChannelAdapter {
     private static final int RESPONSE_TIMEOUT_SEC = 10;
 
     private final ObjectMapper objectMapper;
-    private final String webhookSecret;
+    private final WebhookHmacKeyRegistry hmacRegistry;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public WebhookEgressAdapter(
         ObjectMapper objectMapper,
-        @Value("${notify.adapters.webhook.signing-secret:dev-only-secret-not-for-production}")
-            String webhookSecret
+        WebhookHmacKeyRegistry hmacRegistry
     ) {
         this.objectMapper = objectMapper;
-        this.webhookSecret = webhookSecret;
+        this.hmacRegistry = hmacRegistry;
+        this.legacySecretForTest = null;
     }
+
+    /**
+     * Test-only constructor — direct legacy secret without registry (Faz 23.2 PR-A
+     * absorb iter-1: tests still construct adapter directly without Spring context).
+     * NOT Spring-autowired (production constructor has @Autowired explicitly).
+     */
+    public WebhookEgressAdapter(ObjectMapper objectMapper, String legacySecret) {
+        this.objectMapper = objectMapper;
+        this.hmacRegistry = null;
+        this.legacySecretForTest = legacySecret;
+    }
+
+    private final String legacySecretForTest;
 
     @Override
     public String channelKey() {
@@ -81,15 +96,30 @@ public class WebhookEgressAdapter implements ChannelAdapter {
             );
             String rawBody = objectMapper.writeValueAsString(body);
 
+            // Codex 019dfae5 PR-A iter-1 absorb: kid-aware signing via registry.
+            // Header scheme: t=<ts>,kid=<active-kid>,v1=<sig>
+            String activeKid;
+            String activeSecret;
+            if (hmacRegistry != null) {
+                WebhookHmacKeyRegistry.ActiveKey active = hmacRegistry.resolveActive();
+                activeKid = active.kid();
+                activeSecret = active.secret();
+            } else {
+                activeKid = "legacy";
+                activeSecret = legacySecretForTest != null
+                    ? legacySecretForTest : "dev-only-secret-not-for-production";
+            }
+
             // Sign: timestamp.rawBody
             String signedPayload = timestamp + "." + rawBody;
-            String signature = hmacSha256(webhookSecret, signedPayload);
+            String signature = hmacSha256(activeSecret, signedPayload);
 
             try (CloseableHttpClient client = newClient()) {
                 HttpPost post = new HttpPost(target.targetRef());
                 post.setHeader("Content-Type", "application/json; charset=utf-8");
                 post.setHeader("X-Notify-Timestamp", String.valueOf(timestamp));
-                post.setHeader("X-Notify-Signature", "t=" + timestamp + ",v1=" + signature);
+                post.setHeader("X-Notify-Signature",
+                    "t=" + timestamp + ",kid=" + activeKid + ",v1=" + signature);
                 post.setHeader("X-Notify-Webhook-Id", providerMsgId);
                 post.setEntity(new StringEntity(rawBody, StandardCharsets.UTF_8));
 

@@ -1,0 +1,15 @@
+# gitleaks ignore — false-positive fingerprints
+#
+# Format: <commit-sha>:<file>:<rule-id>:<line>
+#
+# Faz 23.2 PR-A — DkimSigner.java contains "-----BEGIN PRIVATE KEY-----" and
+# "-----BEGIN RSA PRIVATE KEY-----" string literals as PEM header markers
+# for parsePrivateKey() helper. These are NOT leaked secrets; they are PEM
+# format constants used in .replace() / .contains() calls. The actual
+# private key content arrives via Vault/ESO injection at runtime
+# (notify.dkim.private-key-pem env). Subsequent commit (9ecc38c+) refactored
+# to string concatenation to avoid pattern match. These fingerprints cover
+# the prior commits in the same PR history.
+6b4f59359a909f7c8452c4b2db29d84290f16480:notification-orchestrator/src/main/java/com/serban/notify/provider/DkimSigner.java:private-key:117
+4c7228e1f901bd0446c9795707322429361d8b7b:notification-orchestrator/src/main/java/com/serban/notify/provider/DkimSigner.java:private-key:102
+4c7228e1f901bd0446c9795707322429361d8b7b:notification-orchestrator/src/main/java/com/serban/notify/provider/DkimSigner.java:private-key:109
