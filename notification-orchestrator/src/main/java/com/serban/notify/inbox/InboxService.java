@@ -47,9 +47,14 @@ public class InboxService {
     private static final int DEFAULT_PAGE_SIZE = 20;
 
     private final NotificationInboxRepository inboxRepository;
+    private final InboxEventPublisher eventPublisher;
 
-    public InboxService(NotificationInboxRepository inboxRepository) {
+    public InboxService(
+        NotificationInboxRepository inboxRepository,
+        InboxEventPublisher eventPublisher
+    ) {
         this.inboxRepository = inboxRepository;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
@@ -108,6 +113,11 @@ public class InboxService {
         int affected = inboxRepository.markAsRead(orgId, id, subscriberId, OffsetDateTime.now());
         log.info("inbox.mark_read: orgId={} subscriberId={} id={} affected={}",
             orgId, subscriberId, id, affected);
+        // PR-E.3: emit event (badge count changed; SSE controller broadcasts).
+        // Only on actual mutation (affected > 0); idempotent re-call no-op.
+        if (affected > 0) {
+            eventPublisher.publishInboxUpdated(orgId, subscriberId);
+        }
         // Re-fetch for post-state (trigger may have set read_at).
         return inboxRepository.findByOrgIdAndIdAndSubscriberId(orgId, id, subscriberId);
     }
@@ -129,6 +139,11 @@ public class InboxService {
         int affected = inboxRepository.archive(orgId, id, subscriberId, OffsetDateTime.now());
         log.info("inbox.archive: orgId={} subscriberId={} id={} affected={}",
             orgId, subscriberId, id, affected);
+        // PR-E.3: emit event if state actually transitioned (UNREAD → ARCHIVED
+        // changes badge count; READ → ARCHIVED doesn't but list shrinks)
+        if (affected > 0) {
+            eventPublisher.publishInboxUpdated(orgId, subscriberId);
+        }
         return inboxRepository.findByOrgIdAndIdAndSubscriberId(orgId, id, subscriberId);
     }
 

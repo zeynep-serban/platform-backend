@@ -35,12 +35,14 @@ import static org.mockito.Mockito.*;
 class InboxServiceUnitTest {
 
     private NotificationInboxRepository repository;
+    private InboxEventPublisher eventPublisher;
     private InboxService service;
 
     @BeforeEach
     void setUp() {
         repository = mock(NotificationInboxRepository.class);
-        service = new InboxService(repository);
+        eventPublisher = mock(InboxEventPublisher.class);
+        service = new InboxService(repository, eventPublisher);
     }
 
     // ─── Tenancy guard ───────────────────────────────────────────────────
@@ -171,6 +173,8 @@ class InboxServiceUnitTest {
 
         assertThat(result).isPresent();
         verify(repository).markAsRead(eq("default"), eq(42L), eq("sub-1"), any());
+        // PR-E.3: badge event published on actual mutation
+        verify(eventPublisher).publishInboxUpdated("default", "sub-1");
     }
 
     @Test
@@ -187,6 +191,8 @@ class InboxServiceUnitTest {
 
         // Re-fetch returns row (still READ). Operation idempotent — no exception.
         assertThat(result).isPresent();
+        // PR-E.3: NO event when state didn't actually mutate (affected=0)
+        verify(eventPublisher, never()).publishInboxUpdated(anyString(), anyString());
     }
 
     @Test
@@ -221,6 +227,7 @@ class InboxServiceUnitTest {
 
         assertThat(result).isPresent();
         verify(repository).archive(eq("default"), eq(42L), eq("sub-1"), any());
+        verify(eventPublisher).publishInboxUpdated("default", "sub-1");
     }
 
     @Test
@@ -235,6 +242,7 @@ class InboxServiceUnitTest {
         Optional<NotificationInbox> result = service.archive("default", 42L, "sub-1");
 
         assertThat(result).isPresent();  // re-fetch still returns ARCHIVED row
+        verify(eventPublisher, never()).publishInboxUpdated(anyString(), anyString());
     }
 
     @Test

@@ -4,6 +4,7 @@ import com.serban.notify.adapter.ChannelAdapter;
 import com.serban.notify.delivery.DeliveryTarget;
 import com.serban.notify.domain.NotificationInbox;
 import com.serban.notify.domain.NotificationIntent;
+import com.serban.notify.inbox.InboxEventPublisher;
 import com.serban.notify.repository.NotificationInboxRepository;
 import com.serban.notify.repository.NotificationIntentRepository;
 import com.serban.notify.template.RenderedMessage;
@@ -60,13 +61,16 @@ public class InAppInboxAdapter implements ChannelAdapter {
 
     private final NotificationInboxRepository inboxRepository;
     private final NotificationIntentRepository intentRepository;
+    private final InboxEventPublisher eventPublisher;
 
     public InAppInboxAdapter(
         NotificationInboxRepository inboxRepository,
-        NotificationIntentRepository intentRepository
+        NotificationIntentRepository intentRepository,
+        InboxEventPublisher eventPublisher
     ) {
         this.inboxRepository = inboxRepository;
         this.intentRepository = intentRepository;
+        this.eventPublisher = eventPublisher;
     }
 
     @Override
@@ -148,6 +152,9 @@ public class InAppInboxAdapter implements ChannelAdapter {
 
         log.info("inapp DELIVERED: id={} subscriberHash={} intent={}",
             saved.getId(), target.recipientHash(), intentId);
+
+        // PR-E.3: badge SSE event (new inbox row → unread count incremented)
+        eventPublisher.publishInboxUpdated(orgId, subscriberId);
 
         return DeliveryAttemptResult.delivered("inbox-" + saved.getId());
     }

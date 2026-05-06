@@ -4,6 +4,7 @@ import com.serban.notify.adapter.ChannelAdapter;
 import com.serban.notify.delivery.DeliveryTarget;
 import com.serban.notify.domain.NotificationInbox;
 import com.serban.notify.domain.NotificationIntent;
+import com.serban.notify.inbox.InboxEventPublisher;
 import com.serban.notify.repository.NotificationInboxRepository;
 import com.serban.notify.repository.NotificationIntentRepository;
 import com.serban.notify.template.RenderedMessage;
@@ -35,13 +36,15 @@ class InAppInboxAdapterTest {
 
     private NotificationInboxRepository inboxRepository;
     private NotificationIntentRepository intentRepository;
+    private InboxEventPublisher eventPublisher;
     private InAppInboxAdapter adapter;
 
     @BeforeEach
     void setUp() {
         inboxRepository = mock(NotificationInboxRepository.class);
         intentRepository = mock(NotificationIntentRepository.class);
-        adapter = new InAppInboxAdapter(inboxRepository, intentRepository);
+        eventPublisher = mock(InboxEventPublisher.class);
+        adapter = new InAppInboxAdapter(inboxRepository, intentRepository, eventPublisher);
     }
 
     @Test
@@ -89,6 +92,8 @@ class InAppInboxAdapterTest {
         assertThat(saved.getTopicKey()).isEqualTo("auth.password-reset");
         assertThat(saved.getSeverity()).isEqualTo("info");
         assertThat(saved.getState()).isEqualTo(NotificationInbox.State.UNREAD);
+        // PR-E.3: badge SSE event published on row insert
+        verify(eventPublisher).publishInboxUpdated("default", "sub-1");
     }
 
     @Test
@@ -140,6 +145,8 @@ class InAppInboxAdapterTest {
         verify(inboxRepository, never()).save(any());
         // Intent lookup also short-circuited (idempotent path)
         verify(intentRepository, never()).findByIntentIdAndOrgId(anyString(), anyString());
+        // PR-E.3: NO event when row already existed (badge already correct)
+        verify(eventPublisher, never()).publishInboxUpdated(anyString(), anyString());
     }
 
     // ─── Pre-flight validation ───────────────────────────────────────────

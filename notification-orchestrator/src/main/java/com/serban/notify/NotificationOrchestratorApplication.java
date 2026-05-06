@@ -2,6 +2,7 @@ package com.serban.notify;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
@@ -17,6 +18,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  */
 @SpringBootApplication
 @EnableScheduling
+@EnableAsync  // Faz 23.3 PR-E.3: SSE event listener async dispatch (InboxSseController)
 public class NotificationOrchestratorApplication {
 
     public static void main(String[] args) {
