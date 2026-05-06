@@ -106,18 +106,30 @@
             <artifactId>opentelemetry-exporter-otlp</artifactId>
         </dependency>
 
-        <!-- Faz 23.2 PR-B iter-1 absorb: Spring Security removed (Codex P0 #2).
-             AdminErasureController auth gateway-level enforce edilir; in-app
-             @PreAuthorize JWT issuer-uri + JwtAuthenticationConverter (realm role
-             extraction) + spring-security-test eksik olduğu için PR-C/follow-up
-             scope'una alındı. Şu an admin endpoint authn = api-gateway path-based
-             ROLE_PRIVACY_OFFICER allowlist. -->
-
-
+        <!-- Faz 23.2 PR-D.3.x: Spring Security re-added.
+             - JWT decoder (issuer-uri based; KC realm 'serban')
+             - JwtAuthenticationConverter (realm_access.roles → ROLE_* authorities)
+             - @PreAuthorize on AdminErasureController (ROLE_PRIVACY_OFFICER gate)
+             - /actuator/health, /actuator/prometheus permitAll
+             api-gateway zaten authenticated() bayrağı koruyor; backend role gate
+             defense-in-depth (gateway compromise scenario için). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

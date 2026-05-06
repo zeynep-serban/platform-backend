@@ -45,6 +45,13 @@ spring:
     default-schema: ${NOTIFY_DB_SCHEMA:notify}
     schemas: ${NOTIFY_DB_SCHEMA:notify}
     locations: classpath:db/migration
+  # Faz 23.2 PR-D.3.x: Spring Security re-introduced.
+  # JWT issuer-uri = Keycloak realm `serban`. Test/local override via env.
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${SECURITY_JWT_ISSUER_URI:http://localhost:8081/realms/serban}
 
 server:
   port: ${SERVER_PORT:8089}

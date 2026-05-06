@@ -12,6 +12,7 @@ import jakarta.validation.constraints.Size;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -57,17 +58,21 @@ public class AdminErasureController {
     }
 
     @PostMapping
+    @PreAuthorize("hasAuthority('ROLE_PRIVACY_OFFICER')")
     @Operation(
         summary = "Erase subscriber PII",
         description = "Sync KVKK erasure: payload + recipients_snapshot + metadata "
             + "+ preference_override null'lanan; delivery.recipient_id null. "
-            + "recipient_hash KORUNUR (operational analytics). Audit trail append-only."
+            + "recipient_hash KORUNUR (operational analytics). Audit trail append-only. "
+            + "Faz 23.2 PR-D.3.x: ROLE_PRIVACY_OFFICER role gate enforced."
     )
     @ApiResponses({
         @ApiResponse(responseCode = "200",
             description = "Erasure complete (idempotent)"),
+        @ApiResponse(responseCode = "401",
+            description = "Authentication required (JWT missing/invalid)"),
         @ApiResponse(responseCode = "403",
-            description = "Authorization failed (role missing)"),
+            description = "Authorization failed (ROLE_PRIVACY_OFFICER missing)"),
         @ApiResponse(responseCode = "400",
             description = "Validation failed")
     })
