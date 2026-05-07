@@ -1,0 +1,10 @@
+[
+  {
+    "id": "EXCEPTION-001",
+    "ruleIds": ["RC-003"],
+    "reportKey": "legacy-stok-rapor",
+    "reason": "Legacy hardcoded workcube_mikrolink_2024_35 — Faz 19.MSSQL.B sırasında migrate edilecek",
+    "owner": "halilkocoglu@example.com",
+    "expiresAt": "2026-08-01T00:00:00Z"
+  }
+]
