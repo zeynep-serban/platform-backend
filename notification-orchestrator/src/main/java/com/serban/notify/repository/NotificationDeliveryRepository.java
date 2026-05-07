@@ -1,6 +1,8 @@
 package com.serban.notify.repository;
 
 import com.serban.notify.domain.NotificationDelivery;
+import com.serban.notify.repository.projection.DeliveryLogRow;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
@@ -141,5 +143,97 @@ public interface NotificationDeliveryRepository extends JpaRepository<Notificati
         """)
     List<NotificationDelivery> findExhaustedRetries(
         @Param("maxAttempts") int maxAttempts, Pageable pageable
+    );
+
+    /**
+     * Intent-scoped delivery log query (Faz 23.5 PR6).
+     *
+     * <p>JOIN'lı constructor projection {@link DeliveryLogRow}'a; intent
+     * org_id boundary {@link com.serban.notify.api.NotifyOrgAccessGuard}
+     * tarafından doğrulanır, sonra burada filtre olarak da uygulanır
+     * (defense-in-depth: guard atlanırsa boş Page döner).
+     *
+     * <p>{@code activityAt = COALESCE(permanentFailureAt, deliveredAt,
+     * lastAttemptAt, updatedAt, createdAt)} — geç-DLR safe (Codex
+     * thread {@code 019e0289}).
+     *
+     * <p>Sort: {@code id DESC} (intent-scoped scope dar; {@code activityAt}
+     * order admin-wide search'in işi).
+     */
+    @Query(value = """
+        SELECT new com.serban.notify.repository.projection.DeliveryLogRow(
+            d.id, d.intentId, i.orgId, i.topicKey, i.correlationId,
+            d.channel, d.recipientType, d.recipientHash, d.recipientId,
+            d.provider, d.providerMsgId, d.status, d.attemptCount,
+            d.failureReason, d.claimToken, d.processingLeaseUntil,
+            d.lastAttemptAt, d.deliveredAt, d.permanentFailureAt,
+            d.nextRetryAt, d.createdAt, d.updatedAt,
+            COALESCE(d.permanentFailureAt, d.deliveredAt, d.lastAttemptAt, d.updatedAt, d.createdAt)
+        )
+        FROM NotificationDelivery d
+        JOIN NotificationIntent i ON i.intentId = d.intentId
+        WHERE i.intentId = :intentId AND i.orgId = :orgId
+        ORDER BY d.id DESC
+        """,
+        countQuery = """
+        SELECT COUNT(d)
+        FROM NotificationDelivery d
+        JOIN NotificationIntent i ON i.intentId = d.intentId
+        WHERE i.intentId = :intentId AND i.orgId = :orgId
+        """)
+    Page<DeliveryLogRow> findDeliveryLogByIntentIdAndOrgId(
+        @Param("intentId") String intentId,
+        @Param("orgId") String orgId,
+        Pageable pageable
+    );
+
+    /**
+     * Admin-wide delivery search (Faz 23.5 PR6).
+     *
+     * <p>Filters: org_id (mandatory), status, channel, provider — null'lar
+     * predicate'i devre dışı bırakır. Time window {@code activityAt BETWEEN
+     * :from AND :to} zorunlu — admin endpoint default 24h, max 7d
+     * range guard controller seviyesinde.
+     *
+     * <p>Sort: {@code activityAt DESC, id DESC} — geç-DLR'li row'lar üstte;
+     * stable secondary sort id desc.
+     */
+    @Query(value = """
+        SELECT new com.serban.notify.repository.projection.DeliveryLogRow(
+            d.id, d.intentId, i.orgId, i.topicKey, i.correlationId,
+            d.channel, d.recipientType, d.recipientHash, d.recipientId,
+            d.provider, d.providerMsgId, d.status, d.attemptCount,
+            d.failureReason, d.claimToken, d.processingLeaseUntil,
+            d.lastAttemptAt, d.deliveredAt, d.permanentFailureAt,
+            d.nextRetryAt, d.createdAt, d.updatedAt,
+            COALESCE(d.permanentFailureAt, d.deliveredAt, d.lastAttemptAt, d.updatedAt, d.createdAt)
+        )
+        FROM NotificationDelivery d
+        JOIN NotificationIntent i ON i.intentId = d.intentId
+        WHERE i.orgId = :orgId
+          AND (:status IS NULL OR d.status = :status)
+          AND (:channel IS NULL OR d.channel = :channel)
+          AND (:provider IS NULL OR d.provider = :provider)
+          AND COALESCE(d.permanentFailureAt, d.deliveredAt, d.lastAttemptAt, d.updatedAt, d.createdAt) BETWEEN :fromTs AND :toTs
+        ORDER BY COALESCE(d.permanentFailureAt, d.deliveredAt, d.lastAttemptAt, d.updatedAt, d.createdAt) DESC, d.id DESC
+        """,
+        countQuery = """
+        SELECT COUNT(d)
+        FROM NotificationDelivery d
+        JOIN NotificationIntent i ON i.intentId = d.intentId
+        WHERE i.orgId = :orgId
+          AND (:status IS NULL OR d.status = :status)
+          AND (:channel IS NULL OR d.channel = :channel)
+          AND (:provider IS NULL OR d.provider = :provider)
+          AND COALESCE(d.permanentFailureAt, d.deliveredAt, d.lastAttemptAt, d.updatedAt, d.createdAt) BETWEEN :fromTs AND :toTs
+        """)
+    Page<DeliveryLogRow> searchAdminDeliveryLog(
+        @Param("orgId") String orgId,
+        @Param("status") NotificationDelivery.Status status,
+        @Param("channel") String channel,
+        @Param("provider") String provider,
+        @Param("fromTs") OffsetDateTime fromTs,
+        @Param("toTs") OffsetDateTime toTs,
+        Pageable pageable
     );
 }

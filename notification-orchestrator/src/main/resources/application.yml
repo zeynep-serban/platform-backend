@@ -187,6 +187,13 @@ notify:
   inbox:
     cross-pod-enabled: ${NOTIFY_INBOX_CROSS_POD_ENABLED:true}
 
+  # Faz 23.5 PR6 — NotifyOrgAccessGuard single-tenant fallback.
+  # default-org-id: requestedOrgId == defaultOrgId ise JWT claim'i aranmaksızın
+  # geçer (single-tenant deployment kolaylığı). Multi-tenant'ta boş bırakılır;
+  # her zaman JWT org_id / tenant_id / allowed_orgs claim'lerinden çözülür.
+  security:
+    default-org-id: ${NOTIFY_SECURITY_DEFAULT_ORG_ID:default}
+
 logging:
   level:
     root: ${LOGGING_LEVEL_ROOT:INFO}

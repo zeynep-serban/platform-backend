@@ -22,7 +22,8 @@ class PiiRedactorTest {
             new NotifyConfig.RetryConfig(5, 30000L, 2.5, 3600000L, 0.25),
             new NotifyConfig.AuditConfig(90, false, "0 0 2 * * *", 24, false, 3, true),
             new NotifyConfig.RedactionConfig("test-pepper-fixed"),
-            new NotifyConfig.WorkerConfig(5000L, 25, 50, 60000L, "")
+            new NotifyConfig.WorkerConfig(5000L, 25, 50, 60000L, ""),
+            new NotifyConfig.SecurityConfig("default")
         );
         redactor = new PiiRedactor(config);
     }

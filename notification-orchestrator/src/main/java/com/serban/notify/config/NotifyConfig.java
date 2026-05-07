@@ -27,7 +27,8 @@ public record NotifyConfig(
     @NotNull RetryConfig retry,
     @NotNull AuditConfig audit,
     @NotNull RedactionConfig redaction,
-    @NotNull WorkerConfig worker
+    @NotNull WorkerConfig worker,
+    @NotNull SecurityConfig security
 ) {
 
     public record DispatchConfig(
@@ -100,5 +101,21 @@ public record NotifyConfig(
         @Min(1) @DefaultValue("50") int retryBatchSize,
         @Min(1000) @DefaultValue("60000") long leaseDurationMs,
         @DefaultValue("") String owner
+    ) {}
+
+    /**
+     * Faz 23.5 PR6 security knob — single-tenant default org fallback for
+     * {@code NotifyOrgAccessGuard}.
+     *
+     * <p>Resolve order claim &gt; tenant &gt; allowed_orgs &gt;
+     * {@code defaultOrgId}. Default-org fallback yalnızca
+     * {@code requestedOrgId == defaultOrgId} eşitliğinde geçerli; "her org'a
+     * izin" semantiği YASAK (Codex 019e0289 iter-3 AGREE absorb).
+     *
+     * <p>{@code defaultOrgId} boş bırakılırsa fallback devre dışı; multi-tenant
+     * deployment'larda her zaman JWT claim'lerinden çözülmesi zorlanır.
+     */
+    public record SecurityConfig(
+        @DefaultValue("default") String defaultOrgId
     ) {}
 }
