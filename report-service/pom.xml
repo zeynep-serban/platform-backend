@@ -151,6 +151,36 @@
             <artifactId>spring-security-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!--
+        PR-0.5 (2026-05) reporting hardening: MSSQL Testcontainers
+        integration tests for SqlBuilder. The integration test class
+        is gated by JUnit 5 @Tag("integration") + Surefire excludedGroups
+        (default lifecycle skips it). Activate with:
+            ./mvnw -pl report-service test -Pintegration-tests
+        @Testcontainers(disabledWithoutDocker = true) on the test class
+        provides a second-line guard so the class is visibly disabled
+        (not erroring) when Docker is absent. Container image
+        mcr.microsoft.com/mssql/server:2022-latest matches the
+        production T-SQL dialect surface used by the live ERP source.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>1.20.4</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>1.20.4</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>mssqlserver</artifactId>
+            <version>1.20.4</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <dependencyManagement>
@@ -191,6 +221,21 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
+            <!--
+            PR-0.5 (2026-05): Surefire excludes the @Tag("integration")
+            group from the default lifecycle so `mvn test` runs the fast
+            unit slice (no Docker required); the integration tests are
+            visibly skipped, not silently filtered. Activate with the
+            `integration-tests` profile (defined below).
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.1.2</version>
+                <configuration>
+                    <excludedGroups>integration</excludedGroups>
+                </configuration>
+            </plugin>
             <!-- JaCoCo: baseline coverage report (no threshold) — CNS-003 PR2 -->
             <plugin>
                 <groupId>org.jacoco</groupId>
@@ -209,4 +254,42 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+        PR-0.5 (2026-05) reporting hardening: opt-in profile that flips
+        Surefire's group filter from "exclude integration" to "include
+        ONLY @Tag('integration') tests". Used by the
+        `report-service-mssql-integration-test` CI job and by developers:
+            ./mvnw -pl report-service test -Pintegration-tests
+        Codex iter-1 absorb on PR #88: prior comment claimed "include
+        everything (tagged + untagged)", but the configuration below
+        sets <groups>integration</groups> which restricts the run to
+        @Tag('integration')-only — comment now matches behavior.
+        -->
+        <profile>
+            <id>integration-tests</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration combine.self="override">
+                            <!--
+                            combine.self="override" forces this configuration
+                            to fully replace the parent <configuration> block
+                            from the default lifecycle, instead of merging.
+                            Without it, the empty <excludedGroups/> would keep
+                            the parent's "integration" exclusion in place
+                            because Maven merges nested element values rather
+                            than treating an empty element as "clear this".
+                            -->
+                            <excludedGroups></excludedGroups>
+                            <groups>integration</groups>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>
