@@ -171,4 +171,70 @@ public class SchemaTruthService {
             return result;
         }
     }
+
+    /**
+     * Phase 2 Program 8e — schema fetch with tier provenance for endpoint
+     * X-Schema-Truth-Tier header (Codex iter-1 §3 absorb — facade owned tier
+     * orchestration; controller bypass YOK; 8d metrics/MDC korunur).
+     *
+     * @param ctx          lookup context (policy + reportKey + schemaMode + consumer)
+     * @param schemaName   workcube schema adı
+     * @return {@link SchemaTruthResult} snapshot Optional + tier string
+     */
+    public SchemaTruthResult fetchSnapshotWithTier(SchemaTruthLookupContext ctx, String schemaName) {
+        if (ctx == null) {
+            throw new IllegalArgumentException("ctx must not be null");
+        }
+        SchemaTruthMetrics metrics = metricsProvider.getIfAvailable();
+        if (metrics != null) {
+            metrics.recordLookup(ctx);
+        }
+
+        switch (ctx.policy()) {
+            case BUILD_DETERMINISTIC:
+                try (var mdc = SchemaTruthLogContext.enter(ctx, "tier_2")) {
+                    Optional<SchemaSnapshot> snap = committedSnapshotLoader.lookup(ctx, schemaName);
+                    return snap.isPresent()
+                            ? new SchemaTruthResult(snap, SchemaTruthResult.TIER_COMMITTED_SNAPSHOT)
+                            : new SchemaTruthResult(Optional.empty(), SchemaTruthResult.TIER_MISS);
+                }
+
+            case RUNTIME_STRICT_EXISTENCE:
+                try (var mdc = SchemaTruthLogContext.enter(ctx, "tier_1")) {
+                    Optional<SchemaSnapshot> snap = schemaServiceClient.fetchSnapshot(ctx, schemaName);
+                    return snap.isPresent()
+                            ? new SchemaTruthResult(snap, SchemaTruthResult.TIER_SCHEMA_SERVICE)
+                            : new SchemaTruthResult(Optional.empty(), SchemaTruthResult.TIER_MISS);
+                }
+
+            case RUNTIME_DEGRADED_TYPE:
+                try (var mdc = SchemaTruthLogContext.enter(ctx, "tier_1")) {
+                    try {
+                        Optional<SchemaSnapshot> tier1 = schemaServiceClient.fetchSnapshot(ctx, schemaName);
+                        if (tier1.isPresent()) {
+                            return new SchemaTruthResult(tier1, SchemaTruthResult.TIER_SCHEMA_SERVICE);
+                        }
+                    } catch (RuntimeException e) {
+                        log.warn("Tier 1 fail-soft, falling to Tier 2: schema={} error={}",
+                                schemaName, e.getMessage());
+                    }
+                }
+                try (var mdc = SchemaTruthLogContext.enter(ctx, "tier_2")) {
+                    Optional<SchemaSnapshot> tier2 = committedSnapshotLoader.lookup(ctx, schemaName);
+                    if (tier2.isPresent()) {
+                        if (metrics != null) {
+                            metrics.recordFallback(ctx, "committed_snapshot");
+                        }
+                        return new SchemaTruthResult(tier2, SchemaTruthResult.TIER_COMMITTED_SNAPSHOT);
+                    }
+                }
+                if (metrics != null) {
+                    metrics.recordFallback(ctx, "registry_type");
+                }
+                return new SchemaTruthResult(Optional.empty(), SchemaTruthResult.TIER_REGISTRY_TYPE);
+
+            default:
+                throw new IllegalStateException("Unknown policy: " + ctx.policy());
+        }
+    }
 }
