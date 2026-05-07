@@ -102,6 +102,81 @@ class DeliveryLogRedactorTest {
     }
 
     @Test
+    void classify_netgsmDlrCode_recipientRejectedFamily() {
+        // Codex thread 019e036c absorb: canonical deterministic mapping
+        // ahead of the keyword heuristics. Codes 04/05/16 land in
+        // RECIPIENT_REJECTED — see DlrIngestService.NETGSM_PERMANENT_FAILURE_CODES.
+        assertThat(redactor.classify("dlr netgsm code=04"))
+            .isEqualTo("RECIPIENT_REJECTED");
+        assertThat(redactor.classify("dlr netgsm code=05"))
+            .isEqualTo("RECIPIENT_REJECTED");
+        assertThat(redactor.classify("dlr netgsm code=16"))
+            .isEqualTo("RECIPIENT_REJECTED");
+    }
+
+    @Test
+    void classify_netgsmDlrCode_recipientBlockedFamily() {
+        // KVKK / IYS opt-out — operator must back off; map to BLOCKED.
+        assertThat(redactor.classify("dlr netgsm code=17"))
+            .isEqualTo("RECIPIENT_BLOCKED");
+        assertThat(redactor.classify("dlr netgsm code=70"))
+            .isEqualTo("RECIPIENT_BLOCKED");
+    }
+
+    @Test
+    void classify_netgsmDlrCode_unknownCodeStaysUnknown() {
+        // Unrecognised carrier code does not leak through as a guessed
+        // category; UI surfaces PROVIDER_FAILURE_REDACTED via the summary
+        // key fallback.
+        assertThat(redactor.classify("dlr netgsm code=99"))
+            .isEqualTo("UNKNOWN");
+    }
+
+    @Test
+    void classify_netgsmDlrCode_caseInsensitive_andSpaceTolerant() {
+        // The regex was deliberately made tolerant so we don't depend on
+        // the exact whitespace / casing emitted by DlrIngestService.
+        assertThat(redactor.classify("DLR NETGSM CODE=17"))
+            .isEqualTo("RECIPIENT_BLOCKED");
+        assertThat(redactor.classify("dlr  netgsm  code = 04"))
+            .isEqualTo("RECIPIENT_REJECTED");
+    }
+
+    @Test
+    void classify_keywordHeuristics_stillWorkForNonCarrierIdioms() {
+        // Regression: explicit-text idioms continue to flow through the
+        // keyword heuristics that ship with the redactor today.
+        assertThat(redactor.classify("Recipient is on the blacklist"))
+            .isEqualTo("RECIPIENT_BLOCKED");
+    }
+
+    @Test
+    void toResponse_netgsmDlrCode_emitsDeterministicSummaryKeys() {
+        // toResponse round-trip pin: classify outcome -> summary key map.
+        OffsetDateTime now = OffsetDateTime.parse("2026-05-07T08:00:00Z");
+        DeliveryLogResponse rejected = redactor.toResponse(sampleRow(
+            now, "netgsm-12345", "1204", "dlr netgsm code=04"
+        ));
+        assertThat(rejected.failureCategory()).isEqualTo("RECIPIENT_REJECTED");
+        assertThat(rejected.failureSummaryRedacted())
+            .isEqualTo("provider.failure.recipient_rejected");
+
+        DeliveryLogResponse blocked = redactor.toResponse(sampleRow(
+            now, "netgsm-12345", "1204", "dlr netgsm code=17"
+        ));
+        assertThat(blocked.failureCategory()).isEqualTo("RECIPIENT_BLOCKED");
+        assertThat(blocked.failureSummaryRedacted())
+            .isEqualTo("provider.failure.recipient_blocked");
+
+        DeliveryLogResponse unknown = redactor.toResponse(sampleRow(
+            now, "netgsm-12345", "1204", "dlr netgsm code=99"
+        ));
+        assertThat(unknown.failureCategory()).isEqualTo("UNKNOWN");
+        assertThat(unknown.failureSummaryRedacted())
+            .isEqualTo("PROVIDER_FAILURE_REDACTED");
+    }
+
+    @Test
     void toResponse_dropsRawFieldsAndAppliesMaskAndCategory() {
         OffsetDateTime now = OffsetDateTime.parse("2026-05-07T08:00:00Z");
         DeliveryLogRow row = sampleRow(now,

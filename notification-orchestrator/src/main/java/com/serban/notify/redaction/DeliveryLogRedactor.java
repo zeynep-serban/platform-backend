@@ -7,6 +7,7 @@ import org.springframework.stereotype.Component;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -81,6 +82,35 @@ public class DeliveryLogRedactor {
     );
     private static final Pattern P_AUTH = Pattern.compile(
         "(?i)(unauthori[sz]ed|forbidden|invalid[- ]?token|invalid[- ]?credential|401|403)"
+    );
+
+    /**
+     * Faz 23.5 post-impl absorb (Codex thread {@code 019e036c}): canonical
+     * deterministic match for the {@code "dlr netgsm code=NN"} payload
+     * {@code DlrIngestService} writes on terminal NetGSM failures. Runs
+     * <i>before</i> the keyword heuristics so the operator-facing
+     * category stays accurate even when the carrier text happens to match
+     * a generic word in {@link #P_REJECTED} / {@link #P_BLOCKED}.
+     */
+    private static final Pattern P_NETGSM_DLR_CODE = Pattern.compile(
+        "(?i)\\bdlr\\s+netgsm\\s+code\\s*=\\s*(\\d{2})\\b"
+    );
+
+    /**
+     * Mapping NetGSM permanent failure codes (see
+     * {@code DlrIngestService.NETGSM_PERMANENT_FAILURE_CODES}) to the
+     * redactor's whitelist. Codes 17 / 70 are KVKK / IYS opt-out signals
+     * (operator must back off); 04 / 05 are carrier rejection idioms;
+     * 16 is "expired in carrier queue" — Codex iter-2 absorb prefers
+     * {@code RECIPIENT_REJECTED} over {@code INVALID_TARGET} so the UI
+     * does not over-state the cause.
+     */
+    private static final Map<String, String> NETGSM_DLR_FAILURE_CATEGORY = Map.of(
+        "04", "RECIPIENT_REJECTED",
+        "05", "RECIPIENT_REJECTED",
+        "16", "RECIPIENT_REJECTED",
+        "17", "RECIPIENT_BLOCKED",
+        "70", "RECIPIENT_BLOCKED"
     );
 
     /**
@@ -161,6 +191,16 @@ public class DeliveryLogRedactor {
     public String classify(String failureReason) {
         if (failureReason == null || failureReason.isBlank()) {
             return "UNKNOWN";
+        }
+        // Codex thread `019e036c` iter-2 absorb: deterministic carrier-code
+        // match takes priority over the keyword heuristics so canonical
+        // payloads always classify the same way (the regex matchers are
+        // order-sensitive and would mis-categorise some codes by accident).
+        Matcher netgsmDlrCode = P_NETGSM_DLR_CODE.matcher(failureReason);
+        if (netgsmDlrCode.find()) {
+            return NETGSM_DLR_FAILURE_CATEGORY.getOrDefault(
+                netgsmDlrCode.group(1), "UNKNOWN"
+            );
         }
         String lower = failureReason.toLowerCase(Locale.ROOT);
         if (P_AUTH.matcher(lower).find()) return "AUTH_FAILURE";
