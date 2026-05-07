@@ -1,0 +1,71 @@
+{
+  "artifactVersion": 1,
+  "generatedAt": "2026-05-07T12:00:00Z",
+  "crawlScope": "yearly",
+  "schemaPattern": "workcube_mikrolink_{year}_{companyId}",
+  "filters": {
+    "years": [2025, 2026],
+    "companyIds": ["1", "35"]
+  },
+  "schemas": [
+    {
+      "schema": "workcube_mikrolink_2026_1",
+      "year": 2026,
+      "companyId": "1",
+      "status": "covered",
+      "tables": {
+        "INVOICE": {
+          "columns": [
+            {"name": "INVOICE_ID", "dataType": "int", "nullable": false},
+            {"name": "COMPANY_ID", "dataType": "int", "nullable": false},
+            {"name": "INVOICE_DATE", "dataType": "datetime", "nullable": true}
+          ]
+        },
+        "INVOICE_ROW": {
+          "columns": [
+            {"name": "INVOICE_ROW_ID", "dataType": "int", "nullable": false},
+            {"name": "COMPANY_ID", "dataType": "int", "nullable": false},
+            {"name": "INVOICE_DATE", "dataType": "datetime", "nullable": true}
+          ]
+        },
+        "CARI_ROWS": {
+          "columns": [
+            {"name": "CARI_ROW_ID", "dataType": "int", "nullable": false},
+            {"name": "FROM_CMP_ID", "dataType": "int", "nullable": true},
+            {"name": "OUR_COMPANY_ID", "dataType": "int", "nullable": false},
+            {"name": "ACTION_DATE", "dataType": "datetime", "nullable": true}
+          ]
+        }
+      }
+    },
+    {
+      "schema": "workcube_mikrolink_2026_35",
+      "year": 2026,
+      "companyId": "35",
+      "status": "covered",
+      "tables": {
+        "INVOICE": {
+          "columns": [
+            {"name": "INVOICE_ID", "dataType": "int", "nullable": false},
+            {"name": "COMPANY_ID", "dataType": "int", "nullable": false},
+            {"name": "INVOICE_DATE", "dataType": "datetime", "nullable": true}
+          ]
+        }
+      }
+    },
+    {
+      "schema": "workcube_mikrolink_2025_1",
+      "year": 2025,
+      "companyId": "1",
+      "status": "covered",
+      "tables": {
+        "INVOICE": {
+          "columns": [
+            {"name": "INVOICE_ID", "dataType": "int", "nullable": false},
+            {"name": "COMPANY_ID", "dataType": "int", "nullable": false}
+          ]
+        }
+      }
+    }
+  ]
+}

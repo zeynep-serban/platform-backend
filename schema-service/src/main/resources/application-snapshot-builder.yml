@@ -1,0 +1,39 @@
+# Phase 2 Program 2b — snapshot-builder profile (Codex iter-16 §2b absorb).
+#
+# Activated only when generating workcube-schema-yearly-coverage.json
+# artifact via YearlySchemaCoverageExporter CommandLineRunner. Boots as
+# a non-web application so the runner's run() exit terminates the JVM
+# deterministically (default web profile would keep Tomcat alive).
+#
+# Activation:
+#   ./mvnw -pl schema-service spring-boot:run \
+#       -Dspring-boot.run.profiles=snapshot-builder \
+#       -Dsnapshot.yearly.output-path=workcube-schema-yearly-coverage.json
+#
+# Or via java -jar:
+#   java -jar -Dspring.profiles.active=snapshot-builder \
+#        -Dsnapshot.yearly.years=2024,2025,2026 \
+#        -Dsnapshot.yearly.company-ids=1,35 \
+#        schema-service-*.jar
+
+spring:
+  main:
+    web-application-type: none
+  cloud:
+    discovery:
+      enabled: false
+    service-registry:
+      auto-registration:
+        enabled: false
+
+management:
+  endpoints:
+    enabled-by-default: false
+
+# Eureka client disabled in CLI mode (no service registration when
+# running as a one-shot artifact generator).
+eureka:
+  client:
+    enabled: false
+    register-with-eureka: false
+    fetch-registry: false
