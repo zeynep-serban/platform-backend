@@ -37,7 +37,10 @@ public class SecurityConfig {
     }
 
     @Bean
-    public SecurityWebFilterChain springSecurityFilterChain(ServerHttpSecurity http, ReactiveJwtDecoder jwtDecoder) {
+    public SecurityWebFilterChain springSecurityFilterChain(
+            ServerHttpSecurity http,
+            ReactiveJwtDecoder jwtDecoder,
+            CookieAwareBearerTokenConverter sseCookieConverter) {
         http
             .cors(cors -> {})
             .csrf(ServerHttpSecurity.CsrfSpec::disable)
@@ -56,7 +59,18 @@ public class SecurityConfig {
                 .pathMatchers(HttpMethod.GET, "/api/v1/theme-registry", "/api/v1/theme-registry/**").permitAll()
                 .anyExchange().authenticated()
             )
-            .oauth2ResourceServer(oauth -> oauth.jwt(jwt -> jwt.jwtDecoder(jwtDecoder)));
+            .oauth2ResourceServer(oauth -> oauth
+                // Faz 23.6 hardening (Codex thread `019e0494` AGREE iter-1):
+                // SSE auth fix. Browsers cannot attach an Authorization
+                // header to native EventSource connections, so the
+                // /api/v1/notify/inbox/me/stream endpoint accepts the
+                // erp_access_token HttpOnly cookie as the bearer source.
+                // Every other authenticated route keeps the standard
+                // header-only contract — see CookieAwareBearerTokenConverter
+                // for the narrow path scope and rationale.
+                .bearerTokenConverter(sseCookieConverter)
+                .jwt(jwt -> jwt.jwtDecoder(jwtDecoder))
+            );
         return http.build();
     }
 

@@ -88,6 +88,18 @@ class GatewaySecurityTest {
                             .addHeader("Content-Type", "application/json")
                             .setBody("[]");
                 }
+                // Faz 23.6 hardening (Codex `019e0494` AGREE iter-1):
+                // notification-orchestrator inbox SSE stream stub.
+                // Native browser EventSource cannot send Authorization
+                // headers, so the gateway lets the bearer token come
+                // from the erp_access_token HttpOnly cookie for this
+                // exact path. Stub returns text/event-stream so the
+                // status-code propagation matches the live behaviour.
+                if (path != null && path.startsWith("/api/v1/notify/inbox/me/stream")) {
+                    return new MockResponse().setResponseCode(200)
+                            .addHeader("Content-Type", "text/event-stream")
+                            .setBody(": connected\n\nevent: unread-count\ndata: {\"count\":0}\n\n");
+                }
                 return new MockResponse().setResponseCode(404);
             }
         };
@@ -109,6 +121,12 @@ class GatewaySecurityTest {
         reg.add("spring.cloud.gateway.server.webflux.routes[1].id", () -> "variant-service-route");
         reg.add("spring.cloud.gateway.server.webflux.routes[1].uri", () -> stub.url("/").toString());
         reg.add("spring.cloud.gateway.server.webflux.routes[1].predicates[0]", () -> "Path=/api/variants/**");
+
+        // Faz 23.6 hardening: notify SSE route exposed on stub for the
+        // CookieAwareBearerTokenConverter contract tests below.
+        reg.add("spring.cloud.gateway.server.webflux.routes[2].id", () -> "notification-orchestrator-v1-route");
+        reg.add("spring.cloud.gateway.server.webflux.routes[2].uri", () -> stub.url("/").toString());
+        reg.add("spring.cloud.gateway.server.webflux.routes[2].predicates[0]", () -> "Path=/api/v1/notify/**");
 
         reg.add("SECURITY_JWT_ISSUER", () -> "auth-service");
         reg.add("SECURITY_JWT_AUDIENCE", () -> "user-service,frontend");
@@ -224,6 +242,116 @@ class GatewaySecurityTest {
                     assertThat(body).contains("AUTHZ_DEGRADED");
                     assertThat(body).contains("authz service degraded");
                 });
+    }
+
+    // ─── Faz 23.6 hardening (Codex `019e0494` AGREE iter-1) ─────────────
+    // SSE inbox stream uses the erp_access_token HttpOnly cookie as the
+    // bearer source because native browser EventSource cannot send the
+    // Authorization header. The CookieAwareBearerTokenConverter scopes
+    // the cookie fallback strictly to GET /api/v1/notify/inbox/me/stream.
+
+    /**
+     * Faz 23.6 hardening: SSE cookie auth tests. The
+     * {@link CookieAwareBearerTokenConverter} only operates under the
+     * production-like {@link SecurityConfig} (profile {@code !local & !dev}).
+     * In the {@code local} / {@code dev} profile {@link SecurityConfigLocal}
+     * applies and {@code permitAll}s every route, so the cookie path is
+     * effectively a no-op there. Each test below mirrors the existing
+     * profile-aware pattern (see {@link #users_requires_jwt()}) so the
+     * suite passes in both profile contexts and the contract is asserted
+     * where it actually applies.
+     */
+    private boolean isLocalProfile() {
+        return environment.acceptsProfiles(org.springframework.core.env.Profiles.of("local", "dev"));
+    }
+
+    @Test
+    void inbox_stream_returns_401_when_no_auth_at_all() {
+        if (isLocalProfile()) {
+            webClient.get().uri("http://localhost:" + port + "/api/v1/notify/inbox/me/stream?orgId=default&subscriberId=1")
+                    .exchange()
+                    .expectStatus().isOk();
+        } else {
+            webClient.get().uri("http://localhost:" + port + "/api/v1/notify/inbox/me/stream?orgId=default&subscriberId=1")
+                    .exchange()
+                    .expectStatus().isUnauthorized();
+        }
+    }
+
+    @Test
+    void inbox_stream_authenticates_via_erp_access_token_cookie() {
+        String t = token();
+        // Both profile branches expect 200; the production branch proves
+        // the cookie fallback works end-to-end, the local branch proves
+        // the same path is permitAll-friendly under the dev config.
+        webClient.get().uri("http://localhost:" + port + "/api/v1/notify/inbox/me/stream?orgId=default&subscriberId=1")
+                .cookie("erp_access_token", t)
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().contentType("text/event-stream");
+    }
+
+    @Test
+    void inbox_stream_rejects_invalid_cookie_token() {
+        // In the local profile every request is permitAll'd so even a
+        // garbage cookie reaches the stub and gets 200; this test only
+        // asserts the production-path contract.
+        if (isLocalProfile()) {
+            return;
+        }
+        webClient.get().uri("http://localhost:" + port + "/api/v1/notify/inbox/me/stream?orgId=default&subscriberId=1")
+                .cookie("erp_access_token", "not-a-real-jwt")
+                .exchange()
+                .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void inbox_stream_authorization_header_takes_precedence_over_cookie() {
+        // Header is the canonical bearer source; cookie fallback only
+        // fires when the header is absent. A garbage cookie next to a
+        // valid header MUST NOT 401 (otherwise existing fetch-based
+        // calls would break). 200 expected in both profile branches.
+        String t = token();
+        webClient.get().uri("http://localhost:" + port + "/api/v1/notify/inbox/me/stream?orgId=default&subscriberId=1")
+                .header("Authorization", "Bearer " + t)
+                .cookie("erp_access_token", "garbage")
+                .exchange()
+                .expectStatus().isOk();
+    }
+
+    @Test
+    void cookie_fallback_does_not_authenticate_other_notify_paths() {
+        // Strict path scope: even POSTing to a notify path with a valid
+        // cookie does NOT authenticate. The cookie fallback is reserved
+        // for the SSE stream path only because that is the unique case
+        // where the browser cannot attach a header. Missing-or-invalid
+        // token paths still 401 as before — but only under the prod
+        // profile; local profile permitAll's everything.
+        if (isLocalProfile()) {
+            return;
+        }
+        String t = token();
+        webClient.post().uri("http://localhost:" + port + "/api/v1/notify/inbox/me/mark-all-read")
+                .cookie("erp_access_token", t)
+                .exchange()
+                .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void inbox_stream_no_cookie_no_header_returns_401_not_500() {
+        // Defensive: the converter must NOT crash when the cookie is
+        // missing. Cookie fallback returns Mono.empty(), the security
+        // filter chain proceeds to the standard "no credentials" path,
+        // and the configured authenticationEntryPoint emits a JSON 401.
+        if (isLocalProfile()) {
+            return;
+        }
+        webClient.get().uri("http://localhost:" + port + "/api/v1/notify/inbox/me/stream?orgId=default&subscriberId=1")
+                .exchange()
+                .expectStatus().isUnauthorized()
+                .expectHeader().contentType("application/json")
+                .expectBody()
+                .jsonPath("$.error").isEqualTo("unauthorized");
     }
 
     @Test
