@@ -1,11 +1,14 @@
 package com.example.report.schema;
 
+import com.example.report.schema.observability.SchemaTruthLogContext;
+import com.example.report.schema.observability.SchemaTruthMetrics;
 import com.example.report.schema.tier.CommittedSnapshotLoader;
 import com.example.report.schema.tier.RegistryTypeFallback;
 import com.example.report.schema.tier.SchemaServiceClient;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 /**
@@ -43,13 +46,18 @@ public class SchemaTruthService {
     // wire'lı olur (column type registry-scoped); facade fetchSnapshot
     // semantik'i schema-level olduğu için Tier 3 burada uygulanmaz.
     private final RegistryTypeFallback registryTypeFallback;
+    // 8d: Metrics + MDC observability (ObjectProvider null-safe — test/dev
+    // context'inde MeterRegistry yokken no-op).
+    private final ObjectProvider<SchemaTruthMetrics> metricsProvider;
 
     public SchemaTruthService(SchemaServiceClient schemaServiceClient,
                                CommittedSnapshotLoader committedSnapshotLoader,
-                               RegistryTypeFallback registryTypeFallback) {
+                               RegistryTypeFallback registryTypeFallback,
+                               ObjectProvider<SchemaTruthMetrics> metricsProvider) {
         this.schemaServiceClient = schemaServiceClient;
         this.committedSnapshotLoader = committedSnapshotLoader;
         this.registryTypeFallback = registryTypeFallback;
+        this.metricsProvider = metricsProvider;
     }
 
     /**
@@ -77,39 +85,57 @@ public class SchemaTruthService {
             throw new IllegalArgumentException("ctx must not be null");
         }
 
+        SchemaTruthMetrics metrics = metricsProvider.getIfAvailable();
+        if (metrics != null) {
+            metrics.recordLookup(ctx);
+        }
+
         switch (ctx.policy()) {
             case BUILD_DETERMINISTIC:
                 // Tier 2 primary; CI deterministic, no network dependency.
-                log.debug("schema-truth BUILD_DETERMINISTIC Tier 2 lookup: schema={} consumer={}",
-                        schemaName, ctx.consumer());
-                return committedSnapshotLoader.lookup(ctx, schemaName);
+                try (var mdc = SchemaTruthLogContext.enter(ctx, "tier_2")) {
+                    log.debug("schema-truth BUILD_DETERMINISTIC Tier 2 lookup: schema={} consumer={}",
+                            schemaName, ctx.consumer());
+                    return committedSnapshotLoader.lookup(ctx, schemaName);
+                }
 
             case RUNTIME_STRICT_EXISTENCE:
                 // Tier 1 only; fail-soft → exception propagates (caller 503).
-                log.debug("schema-truth RUNTIME_STRICT_EXISTENCE Tier 1 lookup: schema={} consumer={}",
-                        schemaName, ctx.consumer());
-                return schemaServiceClient.fetchSnapshot(ctx, schemaName);
+                // Codex iter-1 §1 absorb: cache_hit_total Tier 1 success'tan
+                // değil Caffeine native stats'tan ölçülür (SchemaTruthMetrics).
+                try (var mdc = SchemaTruthLogContext.enter(ctx, "tier_1")) {
+                    log.debug("schema-truth RUNTIME_STRICT_EXISTENCE Tier 1 lookup: schema={} consumer={}",
+                            schemaName, ctx.consumer());
+                    return schemaServiceClient.fetchSnapshot(ctx, schemaName);
+                }
 
             case RUNTIME_DEGRADED_TYPE:
                 // Tier 1 → Tier 2 fallback. Tier 3 sadece column-level lookup'ta
                 // (8c ColumnTypeRegistry consumer; schema-level değil).
-                log.debug("schema-truth RUNTIME_DEGRADED_TYPE Tier 1 lookup: schema={} consumer={}",
-                        schemaName, ctx.consumer());
-                try {
-                    Optional<SchemaSnapshot> tier1 = schemaServiceClient.fetchSnapshot(ctx, schemaName);
-                    if (tier1.isPresent()) {
-                        return tier1;
-                    }
-                } catch (RuntimeException e) {
-                    log.warn("Tier 1 fail-soft, falling to Tier 2: schema={} error={}",
-                            schemaName, e.getMessage());
-                }
-                Optional<SchemaSnapshot> tier2 = committedSnapshotLoader.lookup(ctx, schemaName);
-                if (tier2.isPresent()) {
-                    log.info("Tier 2 committed snapshot served: schema={} consumer={}",
+                try (var mdc = SchemaTruthLogContext.enter(ctx, "tier_1")) {
+                    log.debug("schema-truth RUNTIME_DEGRADED_TYPE Tier 1 lookup: schema={} consumer={}",
                             schemaName, ctx.consumer());
+                    try {
+                        Optional<SchemaSnapshot> tier1 = schemaServiceClient.fetchSnapshot(ctx, schemaName);
+                        if (tier1.isPresent()) {
+                            return tier1;
+                        }
+                    } catch (RuntimeException e) {
+                        log.warn("Tier 1 fail-soft, falling to Tier 2: schema={} error={}",
+                                schemaName, e.getMessage());
+                    }
                 }
-                return tier2;
+                try (var mdc = SchemaTruthLogContext.enter(ctx, "tier_2")) {
+                    Optional<SchemaSnapshot> tier2 = committedSnapshotLoader.lookup(ctx, schemaName);
+                    if (tier2.isPresent()) {
+                        log.info("Tier 2 committed snapshot served: schema={} consumer={}",
+                                schemaName, ctx.consumer());
+                        if (metrics != null) {
+                            metrics.recordFallback(ctx, "committed_snapshot");
+                        }
+                    }
+                    return tier2;
+                }
 
             default:
                 throw new IllegalStateException("Unknown policy: " + ctx.policy());
@@ -134,6 +160,15 @@ public class SchemaTruthService {
         if (ctx == null) {
             return Optional.empty();
         }
-        return registryTypeFallback.lookupColumnType(ctx, fieldName);
+        try (var mdc = SchemaTruthLogContext.enter(ctx, "tier_3")) {
+            Optional<String> result = registryTypeFallback.lookupColumnType(ctx, fieldName);
+            if (result.isPresent()) {
+                SchemaTruthMetrics metrics = metricsProvider.getIfAvailable();
+                if (metrics != null) {
+                    metrics.recordFallback(ctx, "registry_type");
+                }
+            }
+            return result;
+        }
     }
 }

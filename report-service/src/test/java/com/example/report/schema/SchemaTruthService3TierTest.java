@@ -40,11 +40,17 @@ class SchemaTruthService3TierTest {
     private static final String SCHEMA = "workcube_mikrolink_2026_35";
 
     @BeforeEach
+    @SuppressWarnings("unchecked")
     void setUp() {
         tier1 = mock(SchemaServiceClient.class);
         tier2 = mock(CommittedSnapshotLoader.class);
         tier3 = mock(RegistryTypeFallback.class);
-        service = new SchemaTruthService(tier1, tier2, tier3);
+        // 8d: ObjectProvider<SchemaTruthMetrics> null-safe (metrics absent in unit tests)
+        org.springframework.beans.factory.ObjectProvider<com.example.report.schema.observability.SchemaTruthMetrics> metricsProvider =
+                (org.springframework.beans.factory.ObjectProvider<com.example.report.schema.observability.SchemaTruthMetrics>)
+                        mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(metricsProvider.getIfAvailable()).thenReturn(null);
+        service = new SchemaTruthService(tier1, tier2, tier3, metricsProvider);
     }
 
     @Test
