@@ -10,9 +10,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -43,6 +46,15 @@ public final class ExceptionsRegistry {
     private static final Logger log = LoggerFactory.getLogger(ExceptionsRegistry.class);
 
     public static final long MAX_HORIZON_DAYS = 90L;
+
+    /**
+     * Phase 2 Program 1d (Codex iter-4 §1d-AGREE absorb): suppress eligibility regex.
+     * Only RC-XXX semantic rule namespace (3-digit RC-000..RC-999) is suppressible.
+     * Meta-violations (REPORT_*, EXCEPTION_*, RULE_EXECUTION_ERROR) are NOT
+     * suppressible — exception entries cannot bypass governance artifact
+     * integrity violations or rule execution failures.
+     */
+    static final Pattern SUPPRESSIBLE_RULE_ID = Pattern.compile("^RC-\\d{3}$");
 
     private final ResourceLoader resourceLoader;
     private final ObjectMapper objectMapper;
@@ -143,6 +155,13 @@ public final class ExceptionsRegistry {
 
         List<ContractViolation> result = new ArrayList<>();
         for (ContractViolation v : violations) {
+            // Phase 2 Program 1d (Codex iter-4 §1d-AGREE absorb): meta-violations
+            // (REPORT_*, EXCEPTION_*, RULE_EXECUTION_ERROR) are NOT suppressible.
+            // Only RC-XXX semantic rule namespace can be bypassed.
+            if (!isSuppressible(v)) {
+                result.add(v);
+                continue;
+            }
             ContractExceptionEntry covering = findValidException(
                     v.reportKey(), v.ruleId(), now, horizon);
             if (covering != null) {
@@ -158,6 +177,37 @@ public final class ExceptionsRegistry {
         // Codex iter-1 BLOCKING absorb: surface load/parse errors fail-closed
         result.addAll(loadViolations);
         return result;
+    }
+
+    /**
+     * Phase 2 Program 1d (Codex iter-4 §1d-AGREE absorb): determine if a
+     * violation can be suppressed by an exception entry.
+     *
+     * <p>Suppressible: only {@code RC-XXX} (3-digit) semantic rule violations.
+     * NOT suppressible:
+     * <ul>
+     *   <li>Meta-violations: {@code REPORT_*} (REPORT_SCHEMA_INVALID,
+     *       REPORT_FILE_LOAD_ERROR, REPORT_KEY_DUPLICATE)</li>
+     *   <li>Exception integrity: {@code EXCEPTION_*}</li>
+     *   <li>Rule execution failures: {@code RULE_EXECUTION_ERROR} message
+     *       prefix on any rule (infrastructure bug masking guard)</li>
+     * </ul>
+     */
+    static boolean isSuppressible(ContractViolation v) {
+        if (v == null || v.ruleId() == null) {
+            return false;
+        }
+        if (!SUPPRESSIBLE_RULE_ID.matcher(v.ruleId()).matches()) {
+            return false;
+        }
+        // Even RC-XXX rules with RULE_EXECUTION_ERROR message are NOT suppressible
+        // (Codex iter-4 §1d-AGREE: ContractValidator catches rule crashes and
+        // emits RC-XXX FAIL with "RULE_EXECUTION_ERROR" message — masking this
+        // would hide infrastructure bugs).
+        if (v.message() != null && v.message().startsWith("RULE_EXECUTION_ERROR")) {
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -222,6 +272,24 @@ public final class ExceptionsRegistry {
                                     + "no contract bypass beyond 90-day max (Codex iter-3 absorb)"));
                 }
                 // Past expiresAt → silently ignored (entry inert, underlying violation surfaces)
+                // Phase 2 Program 1d (Codex iter-4 §1d-AGREE absorb): non-RC ruleIds
+                // surface as integrity meta-violation (entries can only target
+                // RC-XXX semantic rule namespace).
+                Set<String> invalidRuleIds = new HashSet<>();
+                for (String rid : entry.ruleIds()) {
+                    if (rid == null || !SUPPRESSIBLE_RULE_ID.matcher(rid).matches()) {
+                        invalidRuleIds.add(rid == null ? "null" : rid);
+                    }
+                }
+                if (!invalidRuleIds.isEmpty()) {
+                    meta.add(ContractViolation.fail(
+                            "EXCEPTION_INVALID_RULE_ID",
+                            entry.reportKey(), "exceptions[" + entry.id() + "].ruleIds",
+                            "Exception entry '" + entry.id() + "' contains non-RC ruleIds "
+                                    + invalidRuleIds + " — only RC-XXX (3-digit) semantic rule "
+                                    + "namespace is suppressible; meta-violations cannot be bypassed "
+                                    + "(Codex iter-4 §1d-AGREE absorb)"));
+                }
             }
         }
         return meta;

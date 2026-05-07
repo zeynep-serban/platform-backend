@@ -14,6 +14,7 @@ import com.example.report.contract.rules.RC007ColumnFieldExistsInSourceQuery;
 import com.example.report.contract.rules.RC008SchemaResolverRegistered;
 import com.example.report.contract.rules.RC009ActionScopeValid;
 import com.example.report.contract.rules.RC010DestructiveActionRequiresPermissionAndConfirm;
+import com.example.report.contract.schema.TenantColumnAllowlist;
 import com.example.report.registry.ReportDefinition;
 import java.util.ArrayList;
 import java.util.List;
@@ -46,15 +47,31 @@ public final class ContractValidator {
     }
 
     /**
-     * Default rule set: 11 RC rules (RC-000..RC-010) wired in spec order.
+     * Default rule set with empty allowlist (1a backward compat). RC-004 with
+     * an empty allowlist behaves as deny-all for COMPANY rowFilter columns —
+     * production gate uses {@link #withDefaultRules(TenantColumnAllowlist)}
+     * with the real allowlist; this overload exists for 1a unit fixtures that
+     * pre-date allowlist injection and don't trip RC-004.
      */
     public static ContractValidator withDefaultRules() {
+        return withDefaultRules(new TenantColumnAllowlist(java.util.Map.of()));
+    }
+
+    /**
+     * Phase 2 Program 1d (Codex iter-4 §1d-AGREE absorb): default rule set
+     * with injected tenant column allowlist for RC-004. Production gate uses
+     * this overload via {@code ReportContractGate}; 1a tests retain
+     * {@link #withDefaultRules()} for empty-allowlist behavior.
+     *
+     * @param allowlist tenant column allowlist (RC-004 input)
+     */
+    public static ContractValidator withDefaultRules(TenantColumnAllowlist allowlist) {
         return new ContractValidator(List.of(
                 new RC000SchemaModeEnumValid(),
                 new RC001YearlyRequiresYearColumn(),
                 new RC002YearlySourceQueryRequiresPlaceholder(),
                 new RC003HardcodedSchemaForbidden(),
-                new RC004RowFilterColumnAllowlisted(),
+                new RC004RowFilterColumnAllowlisted(allowlist),
                 new RC005SchemaModePlusRowFilterForbidden(),
                 new RC006NoneModeForbidsTenantFactTables(),
                 new RC007ColumnFieldExistsInSourceQuery(),

@@ -38,11 +38,15 @@ public final class RegistrySweep {
     private final String reportsPattern;
 
     /**
-     * Default sweep over classpath:reports/&#42;.json (excluding exceptions.json).
+     * Default sweep over classpath*:reports/&#42;.json (excluding exceptions.json).
+     * Phase 2 Program 1d fix: {@code classpath:} prefix returns only the first
+     * classpath entry — under Surefire test classpath, this yielded only
+     * {@code exceptions-test.json}. {@code classpath*:} enumerates all entries
+     * (production main + test resources).
      */
     public RegistrySweep(ObjectMapper objectMapper,
                           ReportDefinitionSchemaValidator schemaValidator) {
-        this(objectMapper, schemaValidator, "classpath:reports/*.json");
+        this(objectMapper, schemaValidator, "classpath*:reports/*.json");
     }
 
     public RegistrySweep(ObjectMapper objectMapper,

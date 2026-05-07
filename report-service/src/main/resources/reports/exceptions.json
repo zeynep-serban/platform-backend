@@ -1,1 +1,212 @@
-[]
+[
+  {
+    "id": "EXC-1d-001-RC004-hr-bordro-detay",
+    "ruleIds": [
+      "RC-004"
+    ],
+    "reportKey": "hr-bordro-detay",
+    "reason": "rowFilter scopeType=COMPANY but column DEPARTMENT_ID is department-level (EMPLOYEES_PUANTAJ_ROWS); semantic fix scopeType=DEPARTMENT review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-002-RC004-hr-giris-cikis",
+    "ruleIds": [
+      "RC-004"
+    ],
+    "reportKey": "hr-giris-cikis",
+    "reason": "rowFilter scopeType=COMPANY but column BRANCH_ID is branch-level (EMPLOYEES_IN_OUT); semantic fix scopeType=BRANCH review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-003-RC004-hr-izin-raporu",
+    "ruleIds": [
+      "RC-004"
+    ],
+    "reportKey": "hr-izin-raporu",
+    "reason": "rowFilter scopeType=COMPANY but column EMPLOYEE_ID is employee-level (OFFTIME); semantic fix scopeType=EMPLOYEE review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-004-RC004-hr-maas-gecmisi",
+    "ruleIds": [
+      "RC-004"
+    ],
+    "reportKey": "hr-maas-gecmisi",
+    "reason": "rowFilter scopeType=COMPANY but column EMPLOYEE_ID is employee-level (EMPLOYEES_SALARY_HISTORY); semantic fix scopeType=EMPLOYEE review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-005-RC004-hr-maas-raporu",
+    "ruleIds": [
+      "RC-004"
+    ],
+    "reportKey": "hr-maas-raporu",
+    "reason": "rowFilter scopeType=COMPANY but column EMPLOYEE_ID is employee-level (EMPLOYEES_SALARY); semantic fix scopeType=EMPLOYEE review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-006-RC004-hr-puantaj",
+    "ruleIds": [
+      "RC-004"
+    ],
+    "reportKey": "hr-puantaj",
+    "reason": "rowFilter scopeType=COMPANY but column BRANCH_ID is branch-level (EMPLOYEE_DAILY_IN_OUT); semantic fix scopeType=BRANCH review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-007-RC004-stok-durum",
+    "ruleIds": [
+      "RC-004"
+    ],
+    "reportKey": "stok-durum",
+    "reason": "rowFilter scopeType=COMPANY but column ORDER_ID is order-level (ORDER_ROW); semantic fix scopeType review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-008-RC001-fin-alacak-yaslandirma",
+    "ruleIds": [
+      "RC-001"
+    ],
+    "reportKey": "fin-alacak-yaslandirma",
+    "reason": "schemaMode=yearly but no obvious year column in registry (source=COMPANY_REMAINDER, columns=COMPANY_ID/BAKIYE only); domain SQL review required to assign yearColumn — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-009-RC001-fin-borc-yaslandirma",
+    "ruleIds": [
+      "RC-001"
+    ],
+    "reportKey": "fin-borc-yaslandirma",
+    "reason": "schemaMode=yearly but no obvious year column in registry (source=COMPANY_REMAINDER, columns=COMPANY_ID/BAKIYE only); domain SQL review required to assign yearColumn — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-010-RC005-fin-alacak-yaslandirma",
+    "ruleIds": [
+      "RC-005"
+    ],
+    "reportKey": "fin-alacak-yaslandirma",
+    "reason": "schemaMode=yearly + rowFilter.scopeType=COMPANY redundant (yearly schema already isolates tenant); semantic fix Phase 2 Program 2 §3.2 review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-011-RC005-fin-banka-hareketleri",
+    "ruleIds": [
+      "RC-005"
+    ],
+    "reportKey": "fin-banka-hareketleri",
+    "reason": "schemaMode=yearly + rowFilter.scopeType=COMPANY redundant (yearly schema already isolates tenant); semantic fix Phase 2 Program 2 §3.2 review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-012-RC005-fin-borc-yaslandirma",
+    "ruleIds": [
+      "RC-005"
+    ],
+    "reportKey": "fin-borc-yaslandirma",
+    "reason": "schemaMode=yearly + rowFilter.scopeType=COMPANY redundant (yearly schema already isolates tenant); semantic fix Phase 2 Program 2 §3.2 review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-013-RC005-fin-cari-hareketler",
+    "ruleIds": [
+      "RC-005"
+    ],
+    "reportKey": "fin-cari-hareketler",
+    "reason": "schemaMode=yearly + rowFilter.scopeType=COMPANY redundant (yearly schema already isolates tenant); semantic fix Phase 2 Program 2 §3.2 review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-014-RC005-fin-cari-islemler",
+    "ruleIds": [
+      "RC-005"
+    ],
+    "reportKey": "fin-cari-islemler",
+    "reason": "schemaMode=yearly + rowFilter.scopeType=COMPANY redundant (yearly schema already isolates tenant); semantic fix Phase 2 Program 2 §3.2 review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-015-RC005-fin-cari-mutabakat",
+    "ruleIds": [
+      "RC-005"
+    ],
+    "reportKey": "fin-cari-mutabakat",
+    "reason": "schemaMode=yearly + rowFilter.scopeType=COMPANY redundant (yearly schema already isolates tenant); semantic fix Phase 2 Program 2 §3.2 review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-016-RC005-fin-cek-senet",
+    "ruleIds": [
+      "RC-005"
+    ],
+    "reportKey": "fin-cek-senet",
+    "reason": "schemaMode=yearly + rowFilter.scopeType=COMPANY redundant (yearly schema already isolates tenant); semantic fix Phase 2 Program 2 §3.2 review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-017-RC005-fin-cek-vade-takip",
+    "ruleIds": [
+      "RC-005"
+    ],
+    "reportKey": "fin-cek-vade-takip",
+    "reason": "schemaMode=yearly + rowFilter.scopeType=COMPANY redundant (yearly schema already isolates tenant); semantic fix Phase 2 Program 2 §3.2 review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-018-RC005-fin-fatura-satirlari",
+    "ruleIds": [
+      "RC-005"
+    ],
+    "reportKey": "fin-fatura-satirlari",
+    "reason": "schemaMode=yearly + rowFilter.scopeType=COMPANY redundant (yearly schema already isolates tenant); semantic fix Phase 2 Program 2 §3.2 review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-019-RC005-fin-faturalar",
+    "ruleIds": [
+      "RC-005"
+    ],
+    "reportKey": "fin-faturalar",
+    "reason": "schemaMode=yearly + rowFilter.scopeType=COMPANY redundant (yearly schema already isolates tenant); semantic fix Phase 2 Program 2 §3.2 review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-020-RC005-fin-kasa-hareketleri",
+    "ruleIds": [
+      "RC-005"
+    ],
+    "reportKey": "fin-kasa-hareketleri",
+    "reason": "schemaMode=yearly + rowFilter.scopeType=COMPANY redundant (yearly schema already isolates tenant); semantic fix Phase 2 Program 2 §3.2 review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  },
+  {
+    "id": "EXC-1d-021-RC005-fin-nakit-akis-ozet",
+    "ruleIds": [
+      "RC-005"
+    ],
+    "reportKey": "fin-nakit-akis-ozet",
+    "reason": "schemaMode=yearly + rowFilter.scopeType=COMPANY redundant (yearly schema already isolates tenant); semantic fix Phase 2 Program 2 §3.2 review pending — Phase 2 Program 1d governance debt",
+    "owner": "halil@platform.local",
+    "expiresAt": "2026-08-05T00:00:00Z"
+  }
+]

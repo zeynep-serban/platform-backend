@@ -8,6 +8,7 @@
   "source": "ACCOUNT_CARD_ROWS",
   "sourceSchema": "workcube_mikrolink_2026_1",
   "schemaMode": "yearly",
+  "yearColumn": "RECORD_DATE",
   "tenantBoundary": {
     "mode": "schema",
     "scopeType": "tenant",

@@ -118,6 +118,78 @@ class ExceptionsRegistryTest {
         assertThat(filtered).isEmpty();
     }
 
+    @Test
+    void rejectsNonRcRuleId_metaViolationFail() throws Exception {
+        // Phase 2 Program 1d (Codex iter-5 §1d-AGREE absorb): non-RC ruleId
+        // entries → EXCEPTION_INVALID_RULE_ID FAIL meta-violation, entry inert.
+        String json = "[{\"id\":\"X-META\",\"ruleIds\":[\"REPORT_SCHEMA_INVALID\"],"
+                + "\"reportKey\":\"r\",\"reason\":\"meta bypass attempt\","
+                + "\"owner\":\"o\",\"expiresAt\":\"2026-08-01T00:00:00Z\"}]";
+        ExceptionsRegistry registry = loadFromInline(json, FIXED_CLOCK);
+
+        List<ContractViolation> filtered = registry.apply(List.of());
+
+        assertThat(filtered).anyMatch(v ->
+                "EXCEPTION_INVALID_RULE_ID".equals(v.ruleId())
+                        && v.severity() == ContractViolation.Severity.FAIL
+                        && v.message().contains("REPORT_SCHEMA_INVALID"));
+    }
+
+    @Test
+    void metaViolationNotSuppressible_evenIfExceptionEntryTargetsIt() throws Exception {
+        // Even if exception entry tried to target REPORT_SCHEMA_INVALID by listing
+        // it as a ruleId (non-suppressible namespace), a raw REPORT_SCHEMA_INVALID
+        // input violation must NEVER be suppressed.
+        String json = "[{\"id\":\"X-META\",\"ruleIds\":[\"RC-003\"],"
+                + "\"reportKey\":\"r\",\"reason\":\"valid RC entry\","
+                + "\"owner\":\"o\",\"expiresAt\":\"2026-08-01T00:00:00Z\"}]";
+        ExceptionsRegistry registry = loadFromInline(json, FIXED_CLOCK);
+
+        List<ContractViolation> input = List.of(
+                ContractViolation.fail("REPORT_SCHEMA_INVALID", "r", "/columns",
+                        "shape mismatch — meta-violation"));
+        List<ContractViolation> filtered = registry.apply(input);
+
+        assertThat(filtered).anyMatch(v -> "REPORT_SCHEMA_INVALID".equals(v.ruleId()));
+    }
+
+    @Test
+    void ruleExecutionErrorNotSuppressible_evenWithValidRcException() throws Exception {
+        // RC-XXX rule crashed; ContractValidator emits RC-XXX FAIL with
+        // RULE_EXECUTION_ERROR message prefix (infra bug). Even with a valid
+        // RC-004 exception entry, this must NEVER be suppressed.
+        String json = "[{\"id\":\"X-VALID\",\"ruleIds\":[\"RC-004\"],"
+                + "\"reportKey\":\"r\",\"reason\":\"legit RC-004 suppression\","
+                + "\"owner\":\"o\",\"expiresAt\":\"2026-08-01T00:00:00Z\"}]";
+        ExceptionsRegistry registry = loadFromInline(json, FIXED_CLOCK);
+
+        List<ContractViolation> input = List.of(
+                ContractViolation.fail("RC-004", "r", "rowFilter.column",
+                        "RULE_EXECUTION_ERROR: rule threw RuntimeException: NPE — validator failed closed"));
+        List<ContractViolation> filtered = registry.apply(input);
+
+        assertThat(filtered).anyMatch(v ->
+                "RC-004".equals(v.ruleId())
+                        && v.message().startsWith("RULE_EXECUTION_ERROR"));
+    }
+
+    @Test
+    void rcRuleIdSuppressionWorksAsBefore_normalRc004Path() throws Exception {
+        // Sanity: valid RC-004 exception still suppresses RC-004 underlying violation
+        // (positive control alongside the non-suppressible guards).
+        String json = "[{\"id\":\"X-VALID\",\"ruleIds\":[\"RC-004\"],"
+                + "\"reportKey\":\"r\",\"reason\":\"legit RC-004 suppression\","
+                + "\"owner\":\"o\",\"expiresAt\":\"2026-08-01T00:00:00Z\"}]";
+        ExceptionsRegistry registry = loadFromInline(json, FIXED_CLOCK);
+
+        List<ContractViolation> input = List.of(
+                ContractViolation.fail("RC-004", "r", "rowFilter.column",
+                        "Column 'X' not in tenant column allowlist"));
+        List<ContractViolation> filtered = registry.apply(input);
+
+        assertThat(filtered).noneMatch(v -> "RC-004".equals(v.ruleId()));
+    }
+
     private ExceptionsRegistry loadFromTestResource(String classpathPath, Clock clock) {
         ExceptionsRegistry registry = new ExceptionsRegistry(
                 new DefaultResourceLoader(),

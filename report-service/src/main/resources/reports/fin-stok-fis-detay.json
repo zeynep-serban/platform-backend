@@ -8,6 +8,7 @@
   "source": "STOCK_FIS_ROW",
   "sourceSchema": "workcube_mikrolink_2026_1",
   "schemaMode": "yearly",
+  "yearColumn": "FIS_DATE",
   "tenantBoundary": {
     "mode": "schema",
     "scopeType": "tenant",

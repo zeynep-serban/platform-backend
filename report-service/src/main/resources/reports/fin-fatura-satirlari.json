@@ -8,6 +8,7 @@
   "source": "INVOICE_ROW",
   "sourceSchema": "workcube_mikrolink_2026_1",
   "schemaMode": "yearly",
+  "yearColumn": "INVOICE_DATE",
   "tenantBoundary": {
     "mode": "schema",
     "scopeType": "tenant",
