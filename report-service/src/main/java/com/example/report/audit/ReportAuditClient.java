@@ -56,11 +56,37 @@ public class ReportAuditClient {
             return;
         }
 
+        /*
+         * Resolve the numeric performedBy when the upstream userId is a
+         * Long (e.g. user-service / auth-service principals). Keycloak
+         * realm UUIDs (super-admin and similar) fall through the catch,
+         * leaving performedBy=null. Codex iter-1 absorb: in that case
+         * we MUST still persist the immutable actor identifier in audit
+         * metadata so the audit DB row isn't anonymous (userEmail can
+         * change; correlationId is just a trace bond).
+         */
         Long performedBy = null;
+        String actorKind = "unknown";
         try {
             performedBy = Long.parseLong(userId);
+            actorKind = "numeric_user_id";
         } catch (NumberFormatException e) {
-            // userId might be a UUID string
+            if (StringUtils.hasText(userId)) {
+                actorKind = "keycloak_sub";
+            }
+        }
+
+        Map<String, Object> auditMetadata = new java.util.LinkedHashMap<>();
+        if (metadata != null) {
+            auditMetadata.putAll(metadata);
+        }
+        if (StringUtils.hasText(userId)) {
+            // Stable, immutable identifier of the actor — survives email
+            // changes and is the canonical reference into authz/me. The
+            // audit read API already redacts strings under "identifier"
+            // keys, so PII risk stays bounded.
+            auditMetadata.put("actorIdentifier", userId);
+            auditMetadata.put("actorKind", actorKind);
         }
 
         var request = new AuditEventIngestRequest(
@@ -72,7 +98,7 @@ public class ReportAuditClient {
                 "INFO",
                 eventType,
                 resolveCorrelationId(),
-                metadata,
+                auditMetadata,
                 null,
                 null,
                 Instant.now()

@@ -28,6 +28,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -157,6 +158,54 @@ class AuditEventServiceTest {
         assertThat(saved.getCorrelationId()).isEqualTo("corr-auth-1");
         assertThat(saved.getMetadata()).contains("permissionCount");
         verify(repository).save(any(PermissionAuditEvent.class));
+    }
+
+    /**
+     * Codex iter-1 absorb on PR #87 — service-level proof that a
+     * mirrored event with {@code performedBy=null} actually reaches
+     * the JPA save() with null preserved (the controller-slice test
+     * only proved the validation pass, not the storage path).
+     *
+     * <p>Closes the live audit-trail gap on testai where every
+     * {@code REPORT_ACCESS} event from a UUID-actor admin was being
+     * rejected at validation; with this PR they now persist with
+     * NULL performedBy + actor metadata captured upstream by
+     * report-service's ReportAuditClient.
+     */
+    @Test
+    void recordMirroredEvent_persistsNullPerformedBy_whenActorIsKeycloakUuid() {
+        AuditEventIngestRequestDto request = new AuditEventIngestRequestDto();
+        request.setEventType("REPORT_ACCESS");
+        // performedBy intentionally not set — UUID-only actor case.
+        request.setUserEmail("admin@example.com");
+        request.setService("report-service");
+        request.setLevel("INFO");
+        request.setAction("REPORT_ACCESS");
+        request.setDetails("fin-muhasebe-detay report accessed");
+        request.setCorrelationId("trace-uuid-1");
+        request.setMetadata(Map.of(
+                "reportKey", "fin-muhasebe-detay",
+                "actorIdentifier", "3520324b-3035-4510-8fca-a8a18dbd1da2",
+                "actorKind", "keycloak_sub"));
+        request.setOccurredAt(Instant.parse("2026-05-07T05:35:32Z"));
+
+        when(repository.save(any(PermissionAuditEvent.class))).thenAnswer(invocation -> {
+            PermissionAuditEvent event = invocation.getArgument(0);
+            event.setId(78L);
+            return event;
+        });
+
+        PermissionAuditEvent saved = auditEventService.recordMirroredEvent(request);
+
+        assertThat(saved.getId()).isEqualTo(78L);
+        assertThat(saved.getPerformedBy()).isNull();
+        assertThat(saved.getUserEmail()).isEqualTo("admin@example.com");
+        assertThat(saved.getCorrelationId()).isEqualTo("trace-uuid-1");
+        // actor identity survives in metadata even though performedBy is null.
+        assertThat(saved.getMetadata()).contains("actorIdentifier");
+        assertThat(saved.getMetadata()).contains("3520324b-3035-4510-8fca-a8a18dbd1da2");
+        assertThat(saved.getMetadata()).contains("keycloak_sub");
+        verify(repository).save(argThat(event -> event.getPerformedBy() == null));
     }
 
     @Test

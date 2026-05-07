@@ -76,4 +76,37 @@ class InternalAuditEventControllerSecurityTest {
                 .andExpect(jsonPath("$.status").value("accepted"))
                 .andExpect(jsonPath("$.auditId").value("77"));
     }
+
+    /**
+     * Closes the live {@code 400 VALIDATION_ERROR} loop seen on testai
+     * (2026-05-07) where {@code REPORT_ACCESS} mirrored events were
+     * rejected because the report-service caller couldn't resolve a
+     * numeric {@code performedBy} from the JWT {@code sub} UUID. The
+     * DB column is nullable; the DTO now matches.
+     */
+    @Test
+    void ingestEvent_acceptsNullPerformedBy() throws Exception {
+        PermissionAuditEvent saved = new PermissionAuditEvent();
+        saved.setId(78L);
+        saved.setOccurredAt(Instant.parse("2026-05-07T05:35:32Z"));
+        when(auditEventService.recordMirroredEvent(any())).thenReturn(saved);
+
+        mockMvc.perform(post("/api/v1/internal/audit/events")
+                        .header("X-Internal-Api-Key", "test-internal-key")
+                        .contentType("application/json")
+                        .content("""
+                                {
+                                  "eventType": "REPORT_ACCESS",
+                                  "userEmail": "user@example.com",
+                                  "service": "report-service",
+                                  "level": "INFO",
+                                  "action": "REPORT_ACCESS",
+                                  "details": "fin-muhasebe-detay report accessed",
+                                  "correlationId": "trace-abc"
+                                }
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("accepted"))
+                .andExpect(jsonPath("$.auditId").value("78"));
+    }
 }

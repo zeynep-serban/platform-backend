@@ -4,14 +4,29 @@ import java.time.Instant;
 import java.util.Map;
 
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
 
 public class AuditEventIngestRequestDto {
 
     @NotBlank
     private String eventType;
 
-    @NotNull
+    /**
+     * Numeric user id of the actor performing the audited event, when the
+     * caller has resolved one. Optional because some upstream services
+     * (e.g. report-service) only have the JWT {@code sub} claim, which is a
+     * UUID for Keycloak realm users — no numeric mapping is available
+     * synchronously at the audit dispatch site. The DB column
+     * {@code permission_audit_events.performed_by} is also nullable, so a
+     * mirrored event with {@code null} performedBy is a valid record;
+     * {@code userEmail} + {@code correlationId} carry the actor identity
+     * when this field is absent.
+     *
+     * <p>Removing the previous {@code @NotNull} also closes a live
+     * {@code 400 VALIDATION_ERROR} loop on
+     * {@code POST /api/v1/internal/audit/events} where every
+     * {@code REPORT_ACCESS} mirror was being rejected; report-service
+     * caught the failure but the audit trail was lost.
+     */
     private Long performedBy;
 
     private String details;
