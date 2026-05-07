@@ -127,7 +127,7 @@
     "columnRestrictions": {},
     "rowFilter": {
       "column": "BRANCH_ID",
-      "scopeType": "COMPANY",
+      "scopeType": "BRANCH",
       "bypassPermission": "reports.hr.all-companies"
     },
     "reportGroup": "HR_REPORTS"

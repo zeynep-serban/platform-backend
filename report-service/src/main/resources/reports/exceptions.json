@@ -10,16 +10,6 @@
     "expiresAt": "2026-08-05T00:00:00Z"
   },
   {
-    "id": "EXC-1d-002-RC004-hr-giris-cikis",
-    "ruleIds": [
-      "RC-004"
-    ],
-    "reportKey": "hr-giris-cikis",
-    "reason": "rowFilter scopeType=COMPANY but column BRANCH_ID is branch-level (EMPLOYEES_IN_OUT); semantic fix scopeType=BRANCH review pending — Phase 2 Program 1d governance debt",
-    "owner": "halil@platform.local",
-    "expiresAt": "2026-08-05T00:00:00Z"
-  },
-  {
     "id": "EXC-1d-003-RC004-hr-izin-raporu",
     "ruleIds": [
       "RC-004"
@@ -46,16 +36,6 @@
     ],
     "reportKey": "hr-maas-raporu",
     "reason": "rowFilter scopeType=COMPANY but column EMPLOYEE_ID is employee-level (EMPLOYEES_SALARY); semantic fix scopeType=EMPLOYEE review pending — Phase 2 Program 1d governance debt",
-    "owner": "halil@platform.local",
-    "expiresAt": "2026-08-05T00:00:00Z"
-  },
-  {
-    "id": "EXC-1d-006-RC004-hr-puantaj",
-    "ruleIds": [
-      "RC-004"
-    ],
-    "reportKey": "hr-puantaj",
-    "reason": "rowFilter scopeType=COMPANY but column BRANCH_ID is branch-level (EMPLOYEE_DAILY_IN_OUT); semantic fix scopeType=BRANCH review pending — Phase 2 Program 1d governance debt",
     "owner": "halil@platform.local",
     "expiresAt": "2026-08-05T00:00:00Z"
   },

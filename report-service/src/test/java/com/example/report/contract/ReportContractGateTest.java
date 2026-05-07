@@ -27,13 +27,14 @@ import org.springframework.core.io.Resource;
  * <ul>
  *   <li>Default {@code mvn test} run completes deterministically.</li>
  *   <li>All known RC-001 + RC-004 governance debt is suppressed by the
- *       9 exception entries (Phase 2 Program 2d cleaned up 12 RC-005
- *       entries by removing the redundant yearly+rowFilter pairs).</li>
+ *       7 exception entries (2d cleaned 12 RC-005 by removing redundant
+ *       yearly+rowFilter pairs; 2e/BRANCH migrated 2 RC-004 reports to
+ *       scopeType=BRANCH).</li>
  *   <li>{@code hr-personel-listesi} (legitimate {@code OUR_COMPANY_ID})
  *       is NOT in the exception list.</li>
  *   <li>No unsuppressed FAILs remain in the gate output.</li>
- *   <li>Exception inventory exact: 9 entries (2× RC-001, 7× RC-004);
- *       RC-005 namespace eliminated by 2d.</li>
+ *   <li>Exception inventory exact: 7 entries (2× RC-001, 5× RC-004);
+ *       RC-005 eliminated by 2d, 2 BRANCH-able RC-004 migrated by 2e.</li>
  * </ul>
  */
 class ReportContractGateTest {
@@ -117,8 +118,8 @@ class ReportContractGateTest {
         ContractExceptionEntry[] entries = loadExceptions();
 
         assertThat(entries)
-                .as("Total governance debt entries (Phase 2 Program 2d cleaned RC-005×12)")
-                .hasSize(9);
+                .as("Total governance debt entries (2d cleaned RC-005×12; 2e migrated 2 BRANCH)")
+                .hasSize(7);
 
         Map<String, Long> byRule = Arrays.stream(entries)
                 .flatMap(e -> e.ruleIds().stream())
@@ -128,8 +129,8 @@ class ReportContractGateTest {
                 .as("RC-001 debt: yearColumn ambiguous reports")
                 .isEqualTo(2L);
         assertThat(byRule.get("RC-004"))
-                .as("RC-004 debt: HR + ORDER scopeType=COMPANY misclassified")
-                .isEqualTo(7L);
+                .as("RC-004 debt: HR/ORDER scopeType=COMPANY misclassified (-2 from 2e BRANCH)")
+                .isEqualTo(5L);
         // RC-005 eliminated by Phase 2 Program 2d (rowFilter removed from 12
         // yearly reports; 2a runtime tenant guard hardening provides the
         // fail-closed precondition).
