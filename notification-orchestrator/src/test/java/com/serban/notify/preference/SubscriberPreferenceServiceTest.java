@@ -272,4 +272,147 @@ class SubscriberPreferenceServiceTest {
             anyString(), anyString(), anyString(), any()
         );
     }
+
+    // ── Faz 23.6 PR-A2 — channel mute ─────────────────────────────────────
+
+    @Test
+    void muteChannel_writesWildcardDenyAndDeletesExactOverridesAndAudits() {
+        // Wildcard upsert finder + topic-wide allow finder both stubbed.
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyIsNullAndChannel(
+            "default", "1204", "email"
+        )).thenReturn(Optional.empty());
+        when(prefRepo.findTopicWideAllowRows("default", "1204"))
+            .thenReturn(java.util.List.of());
+        when(prefRepo.save(any(SubscriberPreference.class))).thenAnswer(invocation -> {
+            SubscriberPreference incoming = invocation.getArgument(0);
+            incoming.setId(101L);
+            return incoming;
+        });
+        when(prefRepo.deleteSameChannelExactOverrides("default", "1204", "email"))
+            .thenReturn(3);
+
+        SubscriberPreferenceService.MuteChannelResult result =
+            service.muteChannel("default", "1204", "email");
+
+        assertThat(result.deletedOverrideCount()).isEqualTo(3);
+        assertThat(result.shadowDenyCount()).isEqualTo(0);
+
+        @SuppressWarnings("unchecked")
+        org.mockito.ArgumentCaptor<Map<String, Object>> details =
+            org.mockito.ArgumentCaptor.forClass(Map.class);
+        verify(auditPublisher).publishStandalone(
+            eq("PREFERENCE_MUTE_CHANNEL"),
+            eq("default"),
+            anyString(),
+            details.capture()
+        );
+        assertThat(details.getValue())
+            .containsEntry("channel", "email")
+            .containsEntry("deleted_override_count", 3)
+            .containsEntry("shadow_deny_count", 0)
+            .containsEntry("subscriber_id", "1204");
+    }
+
+    @Test
+    void muteChannel_zeroOverrides_stillWritesWildcardAndAudits() {
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyIsNullAndChannel(
+            "default", "1204", "sms"
+        )).thenReturn(Optional.empty());
+        when(prefRepo.findTopicWideAllowRows("default", "1204"))
+            .thenReturn(java.util.List.of());
+        when(prefRepo.save(any(SubscriberPreference.class))).thenAnswer(invocation -> {
+            SubscriberPreference incoming = invocation.getArgument(0);
+            incoming.setId(102L);
+            return incoming;
+        });
+        when(prefRepo.deleteSameChannelExactOverrides(anyString(), anyString(), anyString()))
+            .thenReturn(0);
+
+        SubscriberPreferenceService.MuteChannelResult result =
+            service.muteChannel("default", "1204", "sms");
+
+        assertThat(result.deletedOverrideCount()).isEqualTo(0);
+        assertThat(result.shadowDenyCount()).isEqualTo(0);
+        verify(auditPublisher, times(1)).publishStandalone(
+            eq("PREFERENCE_MUTE_CHANNEL"),
+            eq("default"),
+            anyString(),
+            any()
+        );
+    }
+
+    @Test
+    void muteChannel_topicWideAllowShadowedWithExactDeny_P1Absorb() {
+        // Codex thread 019e0387 P1 absorb: a topic-wide allow row
+        // (topic=auth, channel=null, enabled=true) would otherwise
+        // shadow our wildcard deny because the resolver reads
+        // exact > topic+channel=null > topic=null+channel.
+        // muteChannel must write a channel-specific exact deny per
+        // topic-wide allow so dispatch actually mutes the channel.
+        SubscriberPreference topicWideAllow = new SubscriberPreference();
+        topicWideAllow.setOrgId("default");
+        topicWideAllow.setSubscriberId("1204");
+        topicWideAllow.setTopicKey("auth.password-reset");
+        topicWideAllow.setChannel(null);
+        topicWideAllow.setEnabled(true);
+
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyIsNullAndChannel(
+            "default", "1204", "email"
+        )).thenReturn(Optional.empty());
+        when(prefRepo.findTopicWideAllowRows("default", "1204"))
+            .thenReturn(java.util.List.of(topicWideAllow));
+        // Each upsert finder hit returns empty (insert path).
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyAndChannel(
+            anyString(), anyString(), anyString(), anyString()
+        )).thenReturn(Optional.empty());
+        when(prefRepo.save(any(SubscriberPreference.class))).thenAnswer(invocation -> {
+            SubscriberPreference incoming = invocation.getArgument(0);
+            incoming.setId(System.identityHashCode(incoming) & 0x7fffffffL);
+            return incoming;
+        });
+        when(prefRepo.deleteSameChannelExactOverrides(anyString(), anyString(), anyString()))
+            .thenReturn(0);
+
+        SubscriberPreferenceService.MuteChannelResult result =
+            service.muteChannel("default", "1204", "email");
+
+        assertThat(result.deletedOverrideCount()).isEqualTo(0);
+        assertThat(result.shadowDenyCount()).isEqualTo(1);
+
+        @SuppressWarnings("unchecked")
+        org.mockito.ArgumentCaptor<Map<String, Object>> details =
+            org.mockito.ArgumentCaptor.forClass(Map.class);
+        verify(auditPublisher).publishStandalone(
+            eq("PREFERENCE_MUTE_CHANNEL"),
+            eq("default"),
+            anyString(),
+            details.capture()
+        );
+        assertThat(details.getValue())
+            .containsEntry("shadow_deny_count", 1);
+    }
+
+    @Test
+    void muteChannel_blankInputs_throwIllegalArgument() {
+        try {
+            service.muteChannel("", "1204", "email");
+            assertThat(false).as("should have thrown").isTrue();
+        } catch (IllegalArgumentException e) {
+            assertThat(e.getMessage()).contains("required");
+        }
+        try {
+            service.muteChannel("default", "", "email");
+            assertThat(false).as("should have thrown").isTrue();
+        } catch (IllegalArgumentException expected) {
+            // ok
+        }
+        try {
+            service.muteChannel("default", "1204", "");
+            assertThat(false).as("should have thrown").isTrue();
+        } catch (IllegalArgumentException expected) {
+            // ok
+        }
+        verify(prefRepo, org.mockito.Mockito.never())
+            .deleteSameChannelExactOverrides(anyString(), anyString(), anyString());
+    }
 }

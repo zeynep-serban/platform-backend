@@ -208,6 +208,48 @@ public class PreferenceController {
         );
     }
 
+    /**
+     * POST /api/v1/notify/preferences/me/mute-channel — atomic
+     * channel-level mute (Faz 23.6 PR-A2 — Codex thread {@code 019e0387}
+     * `N` decision).
+     *
+     * <p>Writes a channel-wildcard deny rule
+     * ({@code topicKey IS NULL, channel=:channel, enabled=false,
+     * bypassForCritical=true}) and atomically deletes every same-channel
+     * exact override so the wildcard actually wins the dispatch
+     * resolver precedence (resolver order: exact &gt; channel-wildcard
+     * &gt; topic-wildcard &gt; both-null).
+     *
+     * <p>Critical bypass stays on by default — the operator can flip it
+     * with a per-row PUT after the mute lands. Returns the number of
+     * exact override rows removed for audit / UX feedback.
+     */
+    @org.springframework.web.bind.annotation.PostMapping("/me/mute-channel")
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "Channel muted; wildcard deny in place"),
+        @ApiResponse(responseCode = "400", description = "Validation error (channel missing or unknown)"),
+        @ApiResponse(responseCode = "401", description = "Authentication required"),
+        @ApiResponse(responseCode = "403", description = "Org or subscriber identity mismatch"),
+        @ApiResponse(responseCode = "503", description = "Preference feature disabled")
+    })
+    public ResponseEntity<com.serban.notify.api.dto.PreferenceMuteChannelResponse> muteChannel(
+        @RequestHeader(name = "X-Org-Id", required = true) @NotBlank String callerOrgId,
+        @RequestHeader(name = "X-Subscriber-Id", required = true) @NotBlank String subscriberId,
+        @Valid @RequestBody com.serban.notify.api.dto.PreferenceMuteChannelRequest request
+    ) {
+        requireFeatureEnabled();
+        notifyOrgAccessGuard.requireOrgAccessOrThrow(callerOrgId);
+        subscriberIdentityGuard.requireMatchOrThrow(subscriberId);
+        if (request == null) {
+            throw new InvalidRequestException("request body required");
+        }
+        com.serban.notify.preference.SubscriberPreferenceService.MuteChannelResult result =
+            preferenceService.muteChannel(callerOrgId, subscriberId, request.channel());
+        return ResponseEntity.ok(new com.serban.notify.api.dto.PreferenceMuteChannelResponse(
+            request.channel(), true, result.deletedOverrideCount(), result.shadowDenyCount()
+        ));
+    }
+
     private void requireFeatureEnabled() {
         if (!preferencesEnabled) {
             throw new PreferencesDisabledException();

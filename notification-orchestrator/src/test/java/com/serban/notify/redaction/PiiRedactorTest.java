@@ -110,6 +110,26 @@ class PiiRedactorTest {
     }
 
     @Test
+    void filterAuditDetails_keepsDeletedOverrideAndShadowDenyCounts_forMuteChannelEvent() {
+        // Faz 23.6 PR-A2 absorb: PREFERENCE_MUTE_CHANNEL carries
+        // deleted_override_count + shadow_deny_count; both must
+        // survive the audit whitelist.
+        Map<String, Object> raw = Map.of(
+            "deleted_override_count", 4,
+            "shadow_deny_count", 2,
+            "channel", "email",
+            "subscriber_id", "1204",
+            "leaked", "should-be-dropped"
+        );
+        Map<String, Object> filtered = redactor.filterAuditDetails(raw);
+        assertThat(filtered).containsEntry("deleted_override_count", 4);
+        assertThat(filtered).containsEntry("shadow_deny_count", 2);
+        assertThat(filtered).containsEntry("channel", "email");
+        assertThat(filtered).containsKey("subscriber_id");
+        assertThat(filtered).doesNotContainKey("leaked");
+    }
+
+    @Test
     void hashRecipientThrowsOnNullArguments() {
         try {
             redactor.hashRecipient(null, "external", "user@example.com");

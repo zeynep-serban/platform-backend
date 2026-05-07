@@ -137,6 +137,117 @@ class SubscriberPreferenceRepositoryTest extends AbstractPostgresTest {
         assertThat(repo.findBySubscriberIdAndOrgId("iso-1204", "restore-iso-b")).hasSize(1);
     }
 
+    // ── Faz 23.6 PR-A2 — same-channel exact override delete ──────────────
+
+    @Test
+    @Transactional
+    void deleteSameChannelExactOverrides_removesExactsButPreservesWildcardAndOtherChannels() {
+        // The mute-channel action writes a (topic=null, channel=email)
+        // wildcard deny rule and then drops same-channel exact overrides
+        // so the wildcard wins resolver precedence. This test pins:
+        //  - same-channel exact overrides ARE deleted
+        //  - the same-channel wildcard row is preserved
+        //  - other-channel rows are untouched
+        SubscriberPreference wildcardEmail =
+            newPref("mute-org", "mute-1204", null, "email", false);
+        SubscriberPreference exactEmail1 =
+            newPref("mute-org", "mute-1204", "report.export.ready", "email", true);
+        SubscriberPreference exactEmail2 =
+            newPref("mute-org", "mute-1204", "auth.password-reset", "email", false);
+        SubscriberPreference exactSms =
+            newPref("mute-org", "mute-1204", "auth.password-reset", "sms", true);
+        repo.save(wildcardEmail);
+        repo.save(exactEmail1);
+        repo.save(exactEmail2);
+        repo.save(exactSms);
+
+        int deleted = repo.deleteSameChannelExactOverrides("mute-org", "mute-1204", "email");
+
+        assertThat(deleted).isEqualTo(2);
+        java.util.List<SubscriberPreference> remaining =
+            repo.findBySubscriberIdAndOrgId("mute-1204", "mute-org");
+        assertThat(remaining).hasSize(2);
+        assertThat(remaining).extracting(SubscriberPreference::getTopicKey)
+            .containsExactlyInAnyOrder(null, "auth.password-reset");
+        assertThat(remaining).extracting(SubscriberPreference::getChannel)
+            .containsExactlyInAnyOrder("email", "sms");
+    }
+
+    @Test
+    @Transactional
+    void deleteSameChannelExactOverrides_isIdempotent_returnsZeroOnEmpty() {
+        int deleted = repo.deleteSameChannelExactOverrides("mute-org", "mute-ghost", "email");
+        assertThat(deleted).isEqualTo(0);
+    }
+
+    @Test
+    @Transactional
+    void findTopicWideAllowRows_returnsTopicWithChannelNullAndEnabled() {
+        // Faz 23.6 PR-A2 P1 absorb: muteChannel needs to enumerate the
+        // topic-wide allow rows (topic IS NOT NULL, channel IS NULL,
+        // enabled=true) so it can shadow them with a channel-specific
+        // exact deny.
+        SubscriberPreference topicWideAllow1 = newPref(
+            "shadow-org", "shadow-1204", "auth.password-reset", null, true
+        );
+        SubscriberPreference topicWideAllow2 = newPref(
+            "shadow-org", "shadow-1204", "report.export.ready", null, true
+        );
+        // Disabled topic-wide row — should NOT be returned (we only
+        // shadow allow rows; deny rows already match the resolver).
+        SubscriberPreference topicWideDeny = newPref(
+            "shadow-org", "shadow-1204", "marketing.weekly", null, false
+        );
+        // Channel-wildcard row — should NOT be returned.
+        SubscriberPreference channelWildcard = newPref(
+            "shadow-org", "shadow-1204", null, "email", false
+        );
+        // Exact row — should NOT be returned.
+        SubscriberPreference exact = newPref(
+            "shadow-org", "shadow-1204", "billing.alert", "email", true
+        );
+        repo.save(topicWideAllow1);
+        repo.save(topicWideAllow2);
+        repo.save(topicWideDeny);
+        repo.save(channelWildcard);
+        repo.save(exact);
+
+        java.util.List<SubscriberPreference> rows =
+            repo.findTopicWideAllowRows("shadow-org", "shadow-1204");
+
+        assertThat(rows).extracting(SubscriberPreference::getTopicKey)
+            .containsExactlyInAnyOrder("auth.password-reset", "report.export.ready");
+    }
+
+    @Test
+    @Transactional
+    void findTopicWideAllowRows_returnsEmpty_whenSubscriberHasNoTopicWideAllows() {
+        java.util.List<SubscriberPreference> rows =
+            repo.findTopicWideAllowRows("shadow-org", "no-rules-1204");
+        assertThat(rows).isEmpty();
+    }
+
+    @Test
+    @Transactional
+    void deleteSameChannelExactOverrides_preservesOtherSubscribersAndOrgs() {
+        SubscriberPreference selfExact =
+            newPref("mute-iso-a", "mute-1204", "auth.password-reset", "email", true);
+        SubscriberPreference otherSubExact =
+            newPref("mute-iso-a", "mute-other", "auth.password-reset", "email", true);
+        SubscriberPreference otherOrgExact =
+            newPref("mute-iso-b", "mute-1204", "auth.password-reset", "email", true);
+        repo.save(selfExact);
+        repo.save(otherSubExact);
+        repo.save(otherOrgExact);
+
+        int deleted = repo.deleteSameChannelExactOverrides("mute-iso-a", "mute-1204", "email");
+
+        assertThat(deleted).isEqualTo(1);
+        assertThat(repo.findBySubscriberIdAndOrgId("mute-1204", "mute-iso-a")).isEmpty();
+        assertThat(repo.findBySubscriberIdAndOrgId("mute-other", "mute-iso-a")).hasSize(1);
+        assertThat(repo.findBySubscriberIdAndOrgId("mute-1204", "mute-iso-b")).hasSize(1);
+    }
+
     private SubscriberPreference newPref(
         String orgId, String subscriberId, String topicKey, String channel, boolean enabled
     ) {

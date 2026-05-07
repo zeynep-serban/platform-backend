@@ -152,6 +152,62 @@ class PreferenceControllerSecurityTest {
             .andExpect(status().isUnauthorized());
     }
 
+    // ── Faz 23.6 PR-A2 — mute-channel boundary ────────────────────────────
+
+    @Test
+    void muteChannel_jwtSubMatchesHeader_returns200() throws Exception {
+        org.mockito.Mockito.when(preferenceService.muteChannel(
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.anyString()
+        )).thenReturn(new com.serban.notify.preference.SubscriberPreferenceService
+            .MuteChannelResult(0, 0));
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/api/v1/notify/preferences/me/mute-channel")
+                .with(jwt().jwt(j -> j.subject("alice")))
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "alice")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content("{\"channel\":\"email\"}"))
+            .andExpect(status().isOk());
+    }
+
+    @Test
+    void muteChannel_jwtSubMismatchesHeader_returns403() throws Exception {
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/api/v1/notify/preferences/me/mute-channel")
+                .with(jwt().jwt(j -> j.subject("alice")))
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "bob")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content("{\"channel\":\"email\"}"))
+            .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void muteChannel_jwtOrgMismatchesHeader_returns403() throws Exception {
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/api/v1/notify/preferences/me/mute-channel")
+                .with(jwt().jwt(j -> j.subject("alice").claim("org_id", "org-a")))
+                .header("X-Org-Id", "org-b")
+                .header("X-Subscriber-Id", "alice")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content("{\"channel\":\"email\"}"))
+            .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void muteChannel_anonymousRequest_returns401() throws Exception {
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/api/v1/notify/preferences/me/mute-channel")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "alice")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content("{\"channel\":\"email\"}"))
+            .andExpect(status().isUnauthorized());
+    }
+
     @TestConfiguration
     static class SecurityTestConfig {
         @Bean

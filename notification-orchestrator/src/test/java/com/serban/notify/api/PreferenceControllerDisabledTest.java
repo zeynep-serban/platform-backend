@@ -74,6 +74,24 @@ class PreferenceControllerDisabledTest {
     }
 
     @Test
+    void muteChannelReturns503AndDoesNotCallService() throws Exception {
+        // Faz 23.6 PR-A2: feature gate covers mute-channel as well.
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/api/v1/notify/preferences/me/mute-channel")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "sub-1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"channel\":\"email\"}"))
+            .andExpect(status().isServiceUnavailable());
+
+        verify(preferenceService, never()).muteChannel(
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.anyString()
+        );
+    }
+
+    @Test
     void deleteAllMineReturns503AndDoesNotCallService() throws Exception {
         // Faz 23.6 PR-A1: feature gate also covers the bulk
         // restore-defaults endpoint.

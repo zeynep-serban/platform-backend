@@ -69,4 +69,62 @@ public interface SubscriberPreferenceRepository extends JpaRepository<Subscriber
         @Param("orgId") String orgId,
         @Param("subscriberId") String subscriberId
     );
+
+    /**
+     * Atomic same-channel exact-override delete for the channel-mute
+     * action (Faz 23.6 PR-A2 — Codex thread {@code 019e0387} `N`
+     * decision).
+     *
+     * <p>Removes every {@code (org, subscriber, channel)} row whose
+     * {@code topic_key} is non-NULL — i.e. exact overrides that would
+     * otherwise win the dispatch-resolver precedence over the new
+     * channel-wildcard deny rule. The wildcard deny row itself
+     * ({@code topic_key IS NULL}) is preserved so the
+     * `mute-all-channel` action survives this call.
+     *
+     * @return number of exact override rows removed
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+        DELETE FROM SubscriberPreference p
+         WHERE p.orgId = :orgId
+           AND p.subscriberId = :subscriberId
+           AND p.channel = :channel
+           AND p.topicKey IS NOT NULL
+        """)
+    int deleteSameChannelExactOverrides(
+        @Param("orgId") String orgId,
+        @Param("subscriberId") String subscriberId,
+        @Param("channel") String channel
+    );
+
+    /**
+     * Topic-wide allow rows that would otherwise shadow a channel-mute
+     * action (Faz 23.6 PR-A2 — Codex thread {@code 019e0387} P1
+     * absorb).
+     *
+     * <p>Resolver order is exact &gt; topic-wildcard (channel=NULL) &gt;
+     * channel-wildcard (topic=NULL) &gt; both-null. So a row like
+     * {@code (topic='auth.password-reset', channel=NULL,
+     * enabled=true)} fires before our new
+     * {@code (topic=NULL, channel='email', enabled=false)} wildcard
+     * deny. We can't delete the topic-wide allow (it carries the
+     * operator's intent for sms / slack / webhook), but we can write a
+     * channel-specific exact deny per matching topic so the resolver
+     * sees deny first when dispatching this channel.
+     *
+     * @return the topic-wide allow rows the caller currently has
+     */
+    @Query("""
+        SELECT p FROM SubscriberPreference p
+         WHERE p.orgId = :orgId
+           AND p.subscriberId = :subscriberId
+           AND p.topicKey IS NOT NULL
+           AND p.channel IS NULL
+           AND p.enabled = true
+        """)
+    List<SubscriberPreference> findTopicWideAllowRows(
+        @Param("orgId") String orgId,
+        @Param("subscriberId") String subscriberId
+    );
 }

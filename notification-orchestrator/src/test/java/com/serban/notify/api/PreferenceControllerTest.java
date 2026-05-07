@@ -190,6 +190,49 @@ class PreferenceControllerTest {
             .andExpect(jsonPath("$.deletedCount").value(0));
     }
 
+    // ── Faz 23.6 PR-A2 — POST /me/mute-channel ────────────────────────────
+
+    @Test
+    void muteChannelReturns200WithDeletedOverrideAndShadowDenyCounts() throws Exception {
+        when(preferenceService.muteChannel("default", "sub-1", "email"))
+            .thenReturn(new com.serban.notify.preference.SubscriberPreferenceService
+                .MuteChannelResult(3, 2));
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/api/v1/notify/preferences/me/mute-channel")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "sub-1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"channel\":\"email\"}"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.channel").value("email"))
+            .andExpect(jsonPath("$.muted").value(true))
+            .andExpect(jsonPath("$.deletedOverrideCount").value(3))
+            .andExpect(jsonPath("$.shadowDenyCount").value(2));
+    }
+
+    @Test
+    void muteChannelRejectsUnknownChannelWith400() throws Exception {
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/api/v1/notify/preferences/me/mute-channel")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "sub-1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"channel\":\"smoke-signal\"}"))
+            .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void muteChannelRejectsBlankChannelWith400() throws Exception {
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/api/v1/notify/preferences/me/mute-channel")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "sub-1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"channel\":\"\"}"))
+            .andExpect(status().isBadRequest());
+    }
+
     private static SubscriberPreference stub(
         Long id, String topicKey, String channel, boolean enabled
     ) {
