@@ -141,19 +141,32 @@ public final class ExceptionsRegistry {
      * @return filtered violations + meta-violations for invalid exception entries
      */
     public List<ContractViolation> apply(List<ContractViolation> violations) {
+        return applyDetailed(violations).filtered();
+    }
+
+    /**
+     * Phase 2 Program 1e (Codex iter-7 §1e-AGREE absorb): explicit suppression
+     * event tracking. Returns raw violations + filtered violations + the
+     * suppression events (which exception entry suppressed which violation).
+     * Used by {@code ContractGateSummary} for accurate "actually suppressed"
+     * reporting (avoids the raw-minus-filtered identity-equality pitfall when
+     * the same violation message recurs).
+     */
+    public ApplyResult applyDetailed(List<ContractViolation> violations) {
+        List<ContractViolation> raw = violations == null ? List.of() : List.copyOf(violations);
+
         if (violations == null || violations.isEmpty()) {
-            // Codex iter-1 BLOCKING absorb: empty input path da meta + load
-            // violations'ı surface etmeli (governance gate fail-closed).
             List<ContractViolation> emptyPath = new ArrayList<>(
                     surfaceMetaViolations(Collections.emptyList()));
             emptyPath.addAll(loadViolations);
-            return emptyPath;
+            return new ApplyResult(raw, emptyPath, List.of());
         }
 
         Instant now = clock.instant();
         Instant horizon = now.plus(Duration.ofDays(MAX_HORIZON_DAYS));
 
         List<ContractViolation> result = new ArrayList<>();
+        List<SuppressionEvent> suppressions = new ArrayList<>();
         for (ContractViolation v : violations) {
             // Phase 2 Program 1d (Codex iter-4 §1d-AGREE absorb): meta-violations
             // (REPORT_*, EXCEPTION_*, RULE_EXECUTION_ERROR) are NOT suppressible.
@@ -165,9 +178,10 @@ public final class ExceptionsRegistry {
             ContractExceptionEntry covering = findValidException(
                     v.reportKey(), v.ruleId(), now, horizon);
             if (covering != null) {
-                // suppressed; no entry in result
+                // suppressed; no entry in result, but tracked as event.
                 log.debug("Suppressed {} for report={} via exception {}",
                         v.ruleId(), v.reportKey(), covering.id());
+                suppressions.add(new SuppressionEvent(covering.id(), v));
             } else {
                 result.add(v);
             }
@@ -176,8 +190,23 @@ public final class ExceptionsRegistry {
         result.addAll(surfaceMetaViolations(violations));
         // Codex iter-1 BLOCKING absorb: surface load/parse errors fail-closed
         result.addAll(loadViolations);
-        return result;
+        return new ApplyResult(raw, List.copyOf(result), List.copyOf(suppressions));
     }
+
+    /**
+     * Suppression event: which exception entry covered which violation.
+     * Phase 2 Program 1e (Codex iter-7 §1e-AGREE absorb).
+     */
+    public record SuppressionEvent(String exceptionId, ContractViolation violation) {}
+
+    /**
+     * Detailed apply result: raw input + filtered output + suppression events.
+     */
+    public record ApplyResult(
+            List<ContractViolation> raw,
+            List<ContractViolation> filtered,
+            List<SuppressionEvent> suppressions
+    ) {}
 
     /**
      * Phase 2 Program 1d (Codex iter-4 §1d-AGREE absorb): determine if a
@@ -298,5 +327,18 @@ public final class ExceptionsRegistry {
     public int entryCount() {
         return entriesByReport.values().stream()
                 .mapToInt(List::size).sum();
+    }
+
+    /**
+     * Phase 2 Program 1e: flat read-only view of all exception entries
+     * (for ContractGateSummary rendering). Order is grouped-by-reportKey
+     * iteration order (per ConcurrentHashMap entrySet semantics — not stable).
+     */
+    public List<ContractExceptionEntry> allEntries() {
+        List<ContractExceptionEntry> all = new ArrayList<>();
+        for (List<ContractExceptionEntry> bucket : entriesByReport.values()) {
+            all.addAll(bucket);
+        }
+        return all;
     }
 }

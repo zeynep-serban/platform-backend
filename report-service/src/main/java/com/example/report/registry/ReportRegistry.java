@@ -39,13 +39,21 @@ public class ReportRegistry {
             Resource[] resources = resolver.getResources(pattern);
 
             for (Resource resource : resources) {
+                String filename = resource.getFilename();
+                // Phase 2 Program 1e (Codex iter-8 §1e-AGREE absorb): exceptions.json
+                // and exceptions-test.json are governance artifacts handled by
+                // ExceptionsRegistry — not report definitions. Skip by filename
+                // guard so startup doesn't emit a spurious bind-error log.
+                if (filename != null && filename.startsWith("exceptions")) {
+                    continue;
+                }
                 try {
                     ReportDefinition def = objectMapper.readValue(resource.getInputStream(), ReportDefinition.class);
                     validate(def);
                     definitions.put(def.key(), def);
                     log.info("Loaded report definition: {} ({})", def.key(), def.title());
                 } catch (Exception e) {
-                    log.error("Failed to load report definition from {}: {}", resource.getFilename(), e.getMessage());
+                    log.error("Failed to load report definition from {}: {}", filename, e.getMessage());
                 }
             }
 

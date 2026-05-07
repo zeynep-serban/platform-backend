@@ -32,7 +32,8 @@ import org.springframework.core.io.ResourceLoader;
  * <ul>
  *   <li>JsonSchema instance singleton (load 1x, validate N times)</li>
  *   <li>Constructor injection for test isolation (no static globals)</li>
- *   <li>Field path = stable JSON Pointer (e.g. {@code /columns/3/type})</li>
+ *   <li>Field path = stable instance location (networknt JSONPath-style,
+ *       e.g. {@code $.columns[3].type})</li>
  *   <li>Per-report violation cap (first 20 + summary) for PR feedback bloat</li>
  * </ul>
  *

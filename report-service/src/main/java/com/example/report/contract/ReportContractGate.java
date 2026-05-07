@@ -1,6 +1,8 @@
 package com.example.report.contract;
 
+import com.example.report.contract.exceptions.ContractExceptionEntry;
 import com.example.report.contract.exceptions.ExceptionsRegistry;
+import com.example.report.contract.report.ContractGateSummary;
 import com.example.report.contract.report.ContractReport;
 import com.example.report.contract.report.ContractViolation;
 import com.example.report.contract.schema.RegistrySweep;
@@ -60,19 +62,33 @@ public final class ReportContractGate {
     private final ExceptionsRegistry exceptionsRegistry;
     private final ResourceLoader resourceLoader;
     private final String reportsPattern;
+    private final Clock clock;
 
     public ReportContractGate(ObjectMapper objectMapper,
                                ReportDefinitionSchemaValidator schemaValidator,
                                ContractValidator contractValidator,
                                ExceptionsRegistry exceptionsRegistry,
                                ResourceLoader resourceLoader,
-                               String reportsPattern) {
+                               String reportsPattern,
+                               Clock clock) {
         this.objectMapper = objectMapper;
         this.schemaValidator = schemaValidator;
         this.contractValidator = contractValidator;
         this.exceptionsRegistry = exceptionsRegistry;
         this.resourceLoader = resourceLoader;
         this.reportsPattern = reportsPattern;
+        this.clock = clock;
+    }
+
+    /** Backward-compat constructor (system clock). */
+    public ReportContractGate(ObjectMapper objectMapper,
+                               ReportDefinitionSchemaValidator schemaValidator,
+                               ContractValidator contractValidator,
+                               ExceptionsRegistry exceptionsRegistry,
+                               ResourceLoader resourceLoader,
+                               String reportsPattern) {
+        this(objectMapper, schemaValidator, contractValidator, exceptionsRegistry,
+                resourceLoader, reportsPattern, Clock.systemUTC());
     }
 
     /**
@@ -81,6 +97,14 @@ public final class ReportContractGate {
      * before returning.
      */
     public static ReportContractGate create() {
+        return create(Clock.systemUTC());
+    }
+
+    /**
+     * Phase 2 Program 1e (Codex iter-7 §1e-AGREE absorb): factory with
+     * injectable clock for deterministic Markdown expiry-day calculations.
+     */
+    public static ReportContractGate create(Clock clock) {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         ResourceLoader loader = new DefaultResourceLoader();
         ReportDefinitionSchemaValidator schemaValidator =
@@ -88,18 +112,27 @@ public final class ReportContractGate {
         TenantColumnAllowlist allowlist = new TenantColumnAllowlist(loader, mapper);
         ContractValidator contractValidator = ContractValidator.withDefaultRules(allowlist);
         ExceptionsRegistry exceptions = new ExceptionsRegistry(
-                loader, mapper, "classpath:reports/exceptions.json", Clock.systemUTC());
+                loader, mapper, "classpath:reports/exceptions.json", clock);
         exceptions.load();
         return new ReportContractGate(mapper, schemaValidator, contractValidator,
-                exceptions, loader, "classpath*:reports/*.json");
+                exceptions, loader, "classpath*:reports/*.json", clock);
     }
 
     /**
-     * Run the registry contract gate. Aggregate violations from sweep,
-     * semantic rules, and exception registry, then return as a
-     * {@link ContractReport}.
+     * Backward-compat: returns the filtered violations as a {@link ContractReport}.
+     * Single source of truth is {@link #gateDetailed()}.
      */
     public ContractReport gate() {
+        ContractGateSummary summary = gateDetailed();
+        return new ContractReport(summary.filteredViolations(), summary.reportCount());
+    }
+
+    /**
+     * Phase 2 Program 1e (Codex iter-7 §1e-AGREE absorb): detailed gate run
+     * returning raw + filtered + suppression events + exception inventory.
+     * Used by sticky PR comment Markdown writer + JSON artifact.
+     */
+    public ContractGateSummary gateDetailed() {
         List<ContractViolation> aggregate = new ArrayList<>();
         Map<String, JsonNode> validNodes = new HashMap<>();
         int reportCount = 0;
@@ -187,11 +220,21 @@ public final class ReportContractGate {
         }
 
         // Apply exception suppression (RC-XXX semantic only; meta NOT suppressible).
-        List<ContractViolation> filtered = exceptionsRegistry.apply(aggregate);
+        // Codex iter-7 §1e-AGREE absorb: applyDetailed → explicit suppression events
+        // (avoids raw-minus-filtered identity-equality pitfall).
+        ExceptionsRegistry.ApplyResult applyResult = exceptionsRegistry.applyDetailed(aggregate);
 
-        log.info("ReportContractGate completed: reports={} violations={} (raw={})",
-                reportCount, filtered.size(), aggregate.size());
-        return new ContractReport(filtered, reportCount);
+        log.info("ReportContractGate completed: reports={} violations={} (raw={}) suppressed={}",
+                reportCount, applyResult.filtered().size(), applyResult.raw().size(),
+                applyResult.suppressions().size());
+
+        return new ContractGateSummary(
+                reportCount,
+                applyResult.raw(),
+                applyResult.filtered(),
+                applyResult.suppressions(),
+                List.copyOf(exceptionsRegistry.allEntries()),
+                clock.instant());
     }
 
     private String resolveKey(@Nullable JsonNode node, String filename) {

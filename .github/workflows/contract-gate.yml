@@ -1,0 +1,72 @@
+name: Report Contract Gate
+
+# Phase 2 Program 1e — Build-time contract gate workflow.
+# Codex iter-7 §1e-AGREE absorb (thread 019e0119): targeted gate test +
+# JSON/Markdown artifact upload + Marocchino sticky PR comment + final
+# exit-code propagation. Independent of full Maven reactor build.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  contract-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+
+      - name: Run report contract gate test
+        id: gate
+        continue-on-error: true
+        working-directory: .
+        run: ./mvnw -B -q -pl report-service -am test -Dtest=ReportDefinitionContractTest -Dsurefire.failIfNoSpecifiedTests=false
+
+      - name: Ensure comment.md exists (failure fallback)
+        if: always()
+        run: |
+          mkdir -p report-service/target/report-contract-gate
+          if [ ! -f report-service/target/report-contract-gate/comment.md ]; then
+            cat > report-service/target/report-contract-gate/comment.md <<'EOF'
+          # Report Contract Gate
+
+          :x: **Gate did not produce an artifact.**
+
+          The contract gate test failed before reaching the Markdown writer (likely a
+          compilation or infrastructure error). Check the workflow logs for details.
+          EOF
+          fi
+
+      - name: Upload gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-contract-gate
+          path: report-service/target/report-contract-gate/
+          if-no-files-found: warn
+
+      - name: Sticky PR comment
+        if: always() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: report-contract-gate
+          path: report-service/target/report-contract-gate/comment.md
+
+      - name: Propagate gate failure
+        if: steps.gate.outcome == 'failure'
+        run: |
+          echo "::error::Contract gate failed — see sticky PR comment + uploaded artifact for details."
+          exit 1
