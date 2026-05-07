@@ -146,6 +146,19 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!--
+        Phase 2 Program 8a (2026-05): SchemaServiceClient unit tests use
+        MockWebServer to stub schema-service /api/v1/schema/snapshot
+        responses (200/404/5xx) without a real HTTP server. okhttp3
+        mockwebserver is the canonical WebClient mock pattern in Spring
+        Boot 3.x test slices.
+        -->
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>mockwebserver</artifactId>
+            <version>4.12.0</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.springframework.security</groupId>
             <artifactId>spring-security-test</artifactId>

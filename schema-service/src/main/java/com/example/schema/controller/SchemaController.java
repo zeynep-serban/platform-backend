@@ -13,6 +13,8 @@ import com.example.schema.service.QuerySuggestionService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
@@ -22,6 +24,8 @@ import java.util.stream.Collectors;
 @RestController
 @RequestMapping("/api/v1/schema")
 public class SchemaController {
+
+    private static final String INTERNAL_API_KEY_HEADER = "X-Internal-Api-Key";
 
     private final SchemaExtractService extractService;
     private final SchemaSnapshotService snapshotService;
@@ -36,6 +40,9 @@ public class SchemaController {
 
     @Value("${schema.cache-ttl-minutes:60}")
     private int cacheTtlMinutes;
+
+    @Value("${schema.snapshot.internal-api-key:}")
+    private String snapshotInternalApiKey;
 
     public SchemaController(SchemaExtractService extractService,
                             SchemaSnapshotService snapshotService,
@@ -55,11 +62,40 @@ public class SchemaController {
 
     /**
      * Full schema snapshot — tables, relationships, domains, analysis.
-     * Used by the frontend to load the entire schema graph.
+     * Used by the frontend to load the entire schema graph + report-service
+     * SchemaTruthService Tier 1 (Phase 2 Program 8).
+     *
+     * <p>Auth model (Phase 2 Program 8a, Codex iter-1 §3 + iter-2 §1 absorb):
+     * <strong>internal key OR valid JWT</strong>. Two parallel paths:
+     * <ul>
+     *   <li>Internal service-to-service: {@code X-Internal-Api-Key} header
+     *       (matches existing master-data pattern). Used by report-service
+     *       SchemaTruthService Tier 1 client.</li>
+     *   <li>Frontend / browser: JWT (gateway-propagated). Preserves existing
+     *       schema-explorer + {@code useReportSchemaContext} hook access.</li>
+     * </ul>
+     *
+     * <p>Empty configured key (test/dev profile) means internal-key check
+     * passes for any caller; production deployments set the key via
+     * Vault / ESO so internal callers MUST present it.
      */
     @GetMapping("/snapshot")
     public ResponseEntity<SchemaSnapshot> getSnapshot(
-            @RequestParam(required = false) String schema) {
+            @RequestParam(required = false) String schema,
+            @RequestHeader(value = INTERNAL_API_KEY_HEADER, required = false) String providedKey,
+            @AuthenticationPrincipal Jwt jwt) {
+
+        // Auth: internal key OR valid JWT (Codex iter-2 §1 absorb).
+        // Empty configured key = internal path open (test/dev passthrough).
+        boolean internalOk = snapshotInternalApiKey == null
+                || snapshotInternalApiKey.isBlank()
+                || snapshotInternalApiKey.equals(providedKey);
+        boolean jwtOk = jwt != null;
+
+        if (!internalOk && !jwtOk) {
+            return ResponseEntity.status(401).build();
+        }
+
         String target = schema != null ? schema : defaultSchema;
         SchemaSnapshot snapshot = snapshotService.buildSnapshot(target);
         return ResponseEntity.ok()

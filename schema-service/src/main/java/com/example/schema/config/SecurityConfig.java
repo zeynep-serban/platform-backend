@@ -40,6 +40,14 @@ public class SecurityConfig {
                     // including /diagnostic/{kind}. Path is in-cluster only;
                     // gateway does not surface it.
                     .requestMatchers(AntPathRequestMatcher.antMatcher("/api/v1/schema/master-data/**")).permitAll()
+                    // Phase 2 Program 8a (2026-05-07): Schema Truth Integration
+                    // Tier 1 — report-service SchemaServiceClient internal call.
+                    // Codex iter-1 §3 absorb: report-service uses
+                    // X-Internal-Api-Key (matches existing master-data pattern);
+                    // controller-level guard with empty-key dev/test fallback
+                    // preserves existing JWT-only frontend access. NetworkPolicy
+                    // ensures in-cluster only.
+                    .requestMatchers(AntPathRequestMatcher.antMatcher("/api/v1/schema/snapshot")).permitAll()
                     .anyRequest().authenticated()
             )
             .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> {}));
