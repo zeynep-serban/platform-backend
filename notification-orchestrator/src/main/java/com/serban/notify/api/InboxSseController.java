@@ -81,12 +81,17 @@ public class InboxSseController {
     private static final long HEARTBEAT_INTERVAL_MS = 25_000L;
 
     private final InboxService inboxService;
+    private final SubscriberIdentityGuard subscriberIdentityGuard;
 
     /** Per-(orgId, subscriberId) connected SSE emitters. */
     private final Map<String, List<SseEmitter>> emitters = new ConcurrentHashMap<>();
 
-    public InboxSseController(InboxService inboxService) {
+    public InboxSseController(
+        InboxService inboxService,
+        SubscriberIdentityGuard subscriberIdentityGuard
+    ) {
         this.inboxService = inboxService;
+        this.subscriberIdentityGuard = subscriberIdentityGuard;
     }
 
     /**
@@ -100,6 +105,10 @@ public class InboxSseController {
         @RequestParam(name = "orgId", required = true) @NotBlank String orgId,
         @RequestParam(name = "subscriberId", required = true) @NotBlank String subscriberId
     ) {
+        // Faz 23.4 PR-E.5: enforce subscriberId query param matches JWT
+        // principal so an authenticated caller cannot stream another
+        // subscriber's unread updates by editing the query string.
+        subscriberIdentityGuard.requireMatchOrThrow(subscriberId);
         String key = key(orgId, subscriberId);
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
 

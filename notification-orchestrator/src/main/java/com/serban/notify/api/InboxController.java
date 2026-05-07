@@ -33,6 +33,15 @@ import java.util.Map;
  * <p>Cross-tenant leak prevention: 404 (not 403) returned for missing or
  * cross-tenant rows — avoids existence disclosure (matches
  * NotificationIntentController.status pattern).
+ *
+ * <p>Faz 23.4 PR-E.5 (Codex thread {@code 019e01ba} iter-2 absorb):
+ * {@link SubscriberIdentityGuard} validates the {@code X-Subscriber-Id}
+ * header against the JWT principal's {@code sub} claim before any
+ * service call. Without this guard an authenticated caller could send
+ * any other subscriber's id in the header and read their inbox. The
+ * guard returns 403 (Forbidden) on mismatch — distinct from the 404
+ * cross-tenant existence-disclosure pattern, because identity mismatch
+ * is an authorization failure, not a missing-row case.
  */
 @RestController
 @RequestMapping("/api/v1/notify/inbox")
@@ -40,9 +49,14 @@ import java.util.Map;
 public class InboxController {
 
     private final InboxService inboxService;
+    private final SubscriberIdentityGuard subscriberIdentityGuard;
 
-    public InboxController(InboxService inboxService) {
+    public InboxController(
+        InboxService inboxService,
+        SubscriberIdentityGuard subscriberIdentityGuard
+    ) {
         this.inboxService = inboxService;
+        this.subscriberIdentityGuard = subscriberIdentityGuard;
     }
 
     /**
@@ -64,6 +78,7 @@ public class InboxController {
         @RequestParam(name = "page", defaultValue = "0") @Min(0) int page,
         @RequestParam(name = "size", defaultValue = "20") @Min(1) int size
     ) {
+        subscriberIdentityGuard.requireMatchOrThrow(subscriberId);
         Page<NotificationInbox> pageResult = inboxService.listActive(
             callerOrgId, subscriberId, page, size
         );
@@ -82,6 +97,7 @@ public class InboxController {
         @RequestHeader(name = "X-Org-Id", required = true) @NotBlank String callerOrgId,
         @RequestHeader(name = "X-Subscriber-Id", required = true) @NotBlank String subscriberId
     ) {
+        subscriberIdentityGuard.requireMatchOrThrow(subscriberId);
         long count = inboxService.unreadCount(callerOrgId, subscriberId);
         return ResponseEntity.ok(new UnreadCountResponse(count));
     }
@@ -102,6 +118,7 @@ public class InboxController {
         @RequestHeader(name = "X-Org-Id", required = true) @NotBlank String callerOrgId,
         @RequestHeader(name = "X-Subscriber-Id", required = true) @NotBlank String subscriberId
     ) {
+        subscriberIdentityGuard.requireMatchOrThrow(subscriberId);
         return inboxService.markAsRead(callerOrgId, id, subscriberId)
             .map(InboxItemResponse::fromEntity)
             .map(ResponseEntity::ok)
@@ -128,6 +145,7 @@ public class InboxController {
         @RequestHeader(name = "X-Org-Id", required = true) @NotBlank String callerOrgId,
         @RequestHeader(name = "X-Subscriber-Id", required = true) @NotBlank String subscriberId
     ) {
+        subscriberIdentityGuard.requireMatchOrThrow(subscriberId);
         return inboxService.archive(callerOrgId, id, subscriberId)
             .map(InboxItemResponse::fromEntity)
             .map(ResponseEntity::ok)

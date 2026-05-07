@@ -29,10 +29,34 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @WebMvcTest(controllers = InboxSseController.class)
 @AutoConfigureMockMvc(addFilters = false)
 @ActiveProfiles("test")
+@org.springframework.context.annotation.Import(InboxSseControllerSliceTest.TestConfig.class)
 class InboxSseControllerSliceTest {
 
     @Autowired MockMvc mockMvc;
     @MockBean InboxService inboxService;
+
+    /**
+     * Faz 23.4 PR-E.5: real {@link SubscriberIdentityGuard} bean. Slice
+     * runs with {@code addFilters=false}; SecurityContext is empty so the
+     * guard returns silently. JWT match enforcement is verified in
+     * {@code InboxControllerSecurityTest}.
+     */
+    @org.springframework.boot.test.context.TestConfiguration
+    static class TestConfig {
+        @org.springframework.context.annotation.Bean
+        SubscriberIdentityGuard subscriberIdentityGuard() {
+            return new SubscriberIdentityGuard();
+        }
+
+        @org.springframework.context.annotation.Bean
+        @org.springframework.context.annotation.Primary
+        org.springframework.security.oauth2.jwt.JwtDecoder testJwtDecoder() {
+            return token -> {
+                throw new UnsupportedOperationException(
+                    "JwtDecoder not exercised in InboxSseControllerSliceTest");
+            };
+        }
+    }
 
     @Test
     void sseStreamStartsAsyncWithInitialEventPayload() throws Exception {

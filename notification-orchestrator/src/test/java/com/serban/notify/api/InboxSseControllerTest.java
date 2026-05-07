@@ -35,7 +35,10 @@ class InboxSseControllerTest {
     @BeforeEach
     void setUp() {
         inboxService = mock(InboxService.class);
-        controller = new InboxSseController(inboxService);
+        // Faz 23.4 PR-E.5: real guard. SecurityContext is empty in this
+        // unit test so the guard returns silently — same code path as the
+        // existing slice-test permissive contract.
+        controller = new InboxSseController(inboxService, new SubscriberIdentityGuard());
     }
 
     @AfterEach

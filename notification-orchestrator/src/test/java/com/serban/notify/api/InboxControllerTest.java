@@ -229,6 +229,19 @@ class InboxControllerTest {
                     "JwtDecoder not exercised in InboxControllerTest");
             };
         }
+
+        /**
+         * Faz 23.4 PR-E.5: real {@link SubscriberIdentityGuard} bean.
+         * Slice tests run with {@code addFilters=false}; SecurityContext
+         * is empty so the guard returns silently — same code path as
+         * permissive non-prod profiles. Identity match enforcement is
+         * exercised in {@code InboxControllerSecurityTest} which keeps
+         * filters enabled and supplies a real JWT mock.
+         */
+        @Bean
+        public SubscriberIdentityGuard subscriberIdentityGuard() {
+            return new SubscriberIdentityGuard();
+        }
     }
 
     private static NotificationInbox stubRow() {
