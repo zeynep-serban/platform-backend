@@ -8,6 +8,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.ContextConfiguration;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
@@ -88,5 +89,63 @@ class SubscriberPreferenceRepositoryTest extends AbstractPostgresTest {
         assertThat(orgBList).hasSize(1);
         assertThat(orgAList.get(0).isEnabled()).isTrue();
         assertThat(orgBList.get(0).isEnabled()).isFalse();
+    }
+
+    // ── Faz 23.6 PR-A1 — restore-defaults ─────────────────────────────────
+
+    @Test
+    @Transactional
+    void deleteAllByOrgIdAndSubscriberId_clearsCallerRows() {
+        // Use a unique (org, subscriber) tuple so we never collide with rows
+        // persisted by other tests in the same Postgres container — the
+        // unique constraint uq_pref_subscriber_org_topic_channel would
+        // otherwise fail on shared schema state across @DirtiesContext
+        // recreations (CI Testcontainers reuses the database file).
+        SubscriberPreference row1 = newPref("restore-org", "rest-1204", "auth.password-reset", "email", true);
+        SubscriberPreference row2 = newPref("restore-org", "rest-1204", "report.export.ready", "email", false);
+        SubscriberPreference row3 = newPref("restore-org", "rest-1204", null, "sms", false);
+        repo.save(row1);
+        repo.save(row2);
+        repo.save(row3);
+        assertThat(repo.findBySubscriberIdAndOrgId("rest-1204", "restore-org")).hasSize(3);
+
+        int deleted = repo.deleteAllByOrgIdAndSubscriberId("restore-org", "rest-1204");
+
+        assertThat(deleted).isEqualTo(3);
+        assertThat(repo.findBySubscriberIdAndOrgId("rest-1204", "restore-org")).isEmpty();
+    }
+
+    @Test
+    @Transactional
+    void deleteAllByOrgIdAndSubscriberId_isIdempotent_returnsZeroOnEmpty() {
+        int deleted = repo.deleteAllByOrgIdAndSubscriberId("restore-org", "ghost-subscriber");
+        assertThat(deleted).isEqualTo(0);
+    }
+
+    @Test
+    @Transactional
+    void deleteAllByOrgIdAndSubscriberId_onlyTouchesCallerRows() {
+        SubscriberPreference orgA = newPref("restore-iso-a", "iso-1204", "auth.password-reset", "email", true);
+        SubscriberPreference orgB = newPref("restore-iso-b", "iso-1204", "auth.password-reset", "email", true);
+        repo.save(orgA);
+        repo.save(orgB);
+
+        int deleted = repo.deleteAllByOrgIdAndSubscriberId("restore-iso-a", "iso-1204");
+
+        assertThat(deleted).isEqualTo(1);
+        assertThat(repo.findBySubscriberIdAndOrgId("iso-1204", "restore-iso-a")).isEmpty();
+        assertThat(repo.findBySubscriberIdAndOrgId("iso-1204", "restore-iso-b")).hasSize(1);
+    }
+
+    private SubscriberPreference newPref(
+        String orgId, String subscriberId, String topicKey, String channel, boolean enabled
+    ) {
+        SubscriberPreference p = new SubscriberPreference();
+        p.setOrgId(orgId);
+        p.setSubscriberId(subscriberId);
+        p.setTopicKey(topicKey);
+        p.setChannel(channel);
+        p.setEnabled(enabled);
+        return p;
     }
 }

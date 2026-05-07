@@ -73,6 +73,22 @@ class PreferenceControllerDisabledTest {
             .andExpect(status().isServiceUnavailable());
     }
 
+    @Test
+    void deleteAllMineReturns503AndDoesNotCallService() throws Exception {
+        // Faz 23.6 PR-A1: feature gate also covers the bulk
+        // restore-defaults endpoint.
+        mockMvc.perform(delete("/api/v1/notify/preferences/me")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "sub-1"))
+            .andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.error").value("preferences_disabled"));
+
+        verify(preferenceService, never()).restoreDefaults(
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.anyString()
+        );
+    }
+
     @TestConfiguration
     static class TestConfig {
         @Bean
@@ -87,6 +103,11 @@ class PreferenceControllerDisabledTest {
         @Bean
         public SubscriberIdentityGuard subscriberIdentityGuard() {
             return SubscriberIdentityGuardTestSupport.newGuard();
+        }
+
+        @Bean
+        public NotifyOrgAccessGuard notifyOrgAccessGuard() {
+            return NotifyOrgAccessGuardTestSupport.newGuard();
         }
     }
 }

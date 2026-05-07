@@ -94,6 +94,22 @@ class PiiRedactorTest {
     }
 
     @Test
+    void filterAuditDetails_keepsDeletedCount_forRestoreDefaultsEvent() {
+        // Faz 23.6 PR-A1 absorb: PREFERENCE_RESTORE_DEFAULTS audit event
+        // carries deleted_count; the whitelist must include it so the
+        // detail survives PiiRedactor.filterAuditDetails().
+        Map<String, Object> raw = Map.of(
+            "deleted_count", 5,
+            "subscriber_id", "1204",
+            "leaked", "should-be-dropped"
+        );
+        Map<String, Object> filtered = redactor.filterAuditDetails(raw);
+        assertThat(filtered).containsEntry("deleted_count", 5);
+        assertThat(filtered).containsKey("subscriber_id");
+        assertThat(filtered).doesNotContainKey("leaked");
+    }
+
+    @Test
     void hashRecipientThrowsOnNullArguments() {
         try {
             redactor.hashRecipient(null, "external", "user@example.com");

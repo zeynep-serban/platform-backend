@@ -2,6 +2,9 @@ package com.serban.notify.repository;
 
 import com.serban.notify.domain.SubscriberPreference;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
@@ -43,5 +46,27 @@ public interface SubscriberPreferenceRepository extends JpaRepository<Subscriber
      */
     Optional<SubscriberPreference> findByOrgIdAndSubscriberIdAndTopicKeyIsNullAndChannelIsNull(
         String orgId, String subscriberId
+    );
+
+    /**
+     * Atomic restore-defaults: deletes every preference row owned by the
+     * caller in a single transaction (Faz 23.6 PR-A1, Codex thread
+     * {@code 019e0376}).
+     *
+     * <p>Backed by the existing {@code (org_id, subscriber_id)} index in
+     * {@code V1__init_notify_schema.sql}; the JPQL bulk delete bypasses
+     * the persistence context for speed and correctness.
+     *
+     * @return number of rows removed (0 when the caller had no rules)
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+        DELETE FROM SubscriberPreference p
+         WHERE p.orgId = :orgId
+           AND p.subscriberId = :subscriberId
+        """)
+    int deleteAllByOrgIdAndSubscriberId(
+        @Param("orgId") String orgId,
+        @Param("subscriberId") String subscriberId
     );
 }

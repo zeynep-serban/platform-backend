@@ -65,15 +65,18 @@ public class PreferenceController {
 
     private final SubscriberPreferenceService preferenceService;
     private final SubscriberIdentityGuard subscriberIdentityGuard;
+    private final NotifyOrgAccessGuard notifyOrgAccessGuard;
     private final boolean preferencesEnabled;
 
     public PreferenceController(
         SubscriberPreferenceService preferenceService,
         SubscriberIdentityGuard subscriberIdentityGuard,
+        NotifyOrgAccessGuard notifyOrgAccessGuard,
         @Value("${notify.preferences.enabled:true}") boolean preferencesEnabled
     ) {
         this.preferenceService = preferenceService;
         this.subscriberIdentityGuard = subscriberIdentityGuard;
+        this.notifyOrgAccessGuard = notifyOrgAccessGuard;
         this.preferencesEnabled = preferencesEnabled;
     }
 
@@ -94,6 +97,7 @@ public class PreferenceController {
         @RequestHeader(name = "X-Subscriber-Id", required = true) @NotBlank String subscriberId
     ) {
         requireFeatureEnabled();
+        notifyOrgAccessGuard.requireOrgAccessOrThrow(callerOrgId);
         subscriberIdentityGuard.requireMatchOrThrow(subscriberId);
         List<PreferenceResponse> body = preferenceService.listForSubscriber(callerOrgId, subscriberId)
             .stream()
@@ -120,6 +124,7 @@ public class PreferenceController {
         @Valid @RequestBody PreferenceUpsertRequest request
     ) {
         requireFeatureEnabled();
+        notifyOrgAccessGuard.requireOrgAccessOrThrow(callerOrgId);
         subscriberIdentityGuard.requireMatchOrThrow(subscriberId);
         if (request == null) {
             throw new InvalidRequestException("request body required");
@@ -160,12 +165,47 @@ public class PreferenceController {
         @RequestHeader(name = "X-Subscriber-Id", required = true) @NotBlank String subscriberId
     ) {
         requireFeatureEnabled();
+        notifyOrgAccessGuard.requireOrgAccessOrThrow(callerOrgId);
         subscriberIdentityGuard.requireMatchOrThrow(subscriberId);
         boolean removed = preferenceService.delete(callerOrgId, subscriberId, id);
         if (!removed) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
         }
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * DELETE /api/v1/notify/preferences/me — restore-defaults: hard delete
+     * every preference row owned by the caller in a single transaction
+     * (Faz 23.6 PR-A1 — Codex thread {@code 019e0376} iter-2 AGREE absorb).
+     *
+     * <p>Idempotent: a follow-up call returns {@code 200 OK} with
+     * {@code deletedCount: 0}. Each invocation appends a
+     * {@code PREFERENCE_RESTORE_DEFAULTS} audit event so the operator
+     * action is observable even when no rows were deleted.
+     *
+     * <p>Once the rows are gone the dispatcher's preference resolver
+     * falls through to the default-allow behaviour (ADR-0013 D46 #8) —
+     * "no preference set" maps to ALLOW.
+     */
+    @DeleteMapping("/me")
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "Preference rows cleared"),
+        @ApiResponse(responseCode = "401", description = "Authentication required"),
+        @ApiResponse(responseCode = "403", description = "Org or subscriber identity mismatch"),
+        @ApiResponse(responseCode = "503", description = "Preference feature disabled")
+    })
+    public ResponseEntity<com.serban.notify.api.dto.PreferenceRestoreDefaultsResponse> restoreDefaults(
+        @RequestHeader(name = "X-Org-Id", required = true) @NotBlank String callerOrgId,
+        @RequestHeader(name = "X-Subscriber-Id", required = true) @NotBlank String subscriberId
+    ) {
+        requireFeatureEnabled();
+        notifyOrgAccessGuard.requireOrgAccessOrThrow(callerOrgId);
+        subscriberIdentityGuard.requireMatchOrThrow(subscriberId);
+        int deleted = preferenceService.restoreDefaults(callerOrgId, subscriberId);
+        return ResponseEntity.ok(
+            new com.serban.notify.api.dto.PreferenceRestoreDefaultsResponse(deleted)
+        );
     }
 
     private void requireFeatureEnabled() {

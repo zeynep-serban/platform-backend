@@ -1,17 +1,25 @@
 package com.serban.notify.preference;
 
+import com.serban.notify.audit.AuditEventPublisher;
+import com.serban.notify.config.NotifyConfig;
 import com.serban.notify.domain.NotificationIntent;
 import com.serban.notify.domain.SubscriberPreference;
+import com.serban.notify.redaction.PiiRedactor;
 import com.serban.notify.repository.SubscriberContactRepository;
 import com.serban.notify.repository.SubscriberPreferenceRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -21,13 +29,27 @@ class SubscriberPreferenceServiceTest {
 
     private SubscriberContactRepository contactRepo;
     private SubscriberPreferenceRepository prefRepo;
+    private AuditEventPublisher auditPublisher;
+    private PiiRedactor piiRedactor;
     private SubscriberPreferenceService service;
 
     @BeforeEach
     void setUp() {
         contactRepo = mock(SubscriberContactRepository.class);
         prefRepo = mock(SubscriberPreferenceRepository.class);
-        service = new SubscriberPreferenceService(contactRepo, prefRepo);
+        auditPublisher = mock(AuditEventPublisher.class);
+        piiRedactor = new PiiRedactor(new NotifyConfig(
+            new NotifyConfig.DispatchConfig(false),
+            new NotifyConfig.IntakeConfig(10000),
+            new NotifyConfig.IdempotencyConfig(24),
+            new NotifyConfig.DedupeConfig(5),
+            new NotifyConfig.RetryConfig(5, 30000L, 2.5d, 3600000L, 0.25d),
+            new NotifyConfig.AuditConfig(90, false, "0 0 2 * * *", 24, false, 3, true),
+            new NotifyConfig.RedactionConfig("test-pepper-fixed"),
+            new NotifyConfig.WorkerConfig(5000L, 25, 50, 60000L, ""),
+            new NotifyConfig.SecurityConfig("default", java.util.List.of("subscriberId", "userId", "sub"))
+        ));
+        service = new SubscriberPreferenceService(contactRepo, prefRepo, auditPublisher, piiRedactor);
     }
 
     @Test
@@ -183,5 +205,71 @@ class SubscriberPreferenceServiceTest {
         p.setEnabled(enabled);
         p.setBypassForCritical(bypassForCritical);
         return p;
+    }
+
+    // ── Faz 23.6 PR-A1 — restore-defaults ─────────────────────────────────
+
+    @Test
+    void restoreDefaults_deletesEveryRow_andPublishesAuditEvent() {
+        when(prefRepo.deleteAllByOrgIdAndSubscriberId("default", "1204")).thenReturn(3);
+
+        int count = service.restoreDefaults("default", "1204");
+
+        assertThat(count).isEqualTo(3);
+        verify(prefRepo, times(1)).deleteAllByOrgIdAndSubscriberId("default", "1204");
+        // Codex thread 019e0376 absorb: every invocation publishes an audit
+        // event, including the zero-deletion path.
+        verify(auditPublisher, times(1)).publishStandalone(
+            eq("PREFERENCE_RESTORE_DEFAULTS"),
+            eq("default"),
+            anyString(),
+            any()
+        );
+    }
+
+    @Test
+    void restoreDefaults_zeroRows_stillPublishesAuditEvent() {
+        when(prefRepo.deleteAllByOrgIdAndSubscriberId("default", "no-rules")).thenReturn(0);
+
+        int count = service.restoreDefaults("default", "no-rules");
+
+        assertThat(count).isEqualTo(0);
+        verify(auditPublisher, times(1)).publishStandalone(
+            eq("PREFERENCE_RESTORE_DEFAULTS"),
+            eq("default"),
+            anyString(),
+            any()
+        );
+    }
+
+    @Test
+    void restoreDefaults_carriesDeletedCountInAuditDetails() {
+        when(prefRepo.deleteAllByOrgIdAndSubscriberId("default", "1204")).thenReturn(7);
+
+        @SuppressWarnings("unchecked")
+        org.mockito.ArgumentCaptor<Map<String, Object>> details =
+            org.mockito.ArgumentCaptor.forClass(Map.class);
+        service.restoreDefaults("default", "1204");
+
+        verify(auditPublisher).publishStandalone(
+            eq("PREFERENCE_RESTORE_DEFAULTS"),
+            eq("default"),
+            anyString(),
+            details.capture()
+        );
+        assertThat(details.getValue()).containsEntry("deleted_count", 7);
+        assertThat(details.getValue()).containsEntry("subscriber_id", "1204");
+    }
+
+    @Test
+    void restoreDefaults_blankInputs_returnsZeroWithoutTouchingRepoOrAudit() {
+        assertThat(service.restoreDefaults("", "1204")).isEqualTo(0);
+        assertThat(service.restoreDefaults("default", "")).isEqualTo(0);
+        assertThat(service.restoreDefaults(null, "1204")).isEqualTo(0);
+        assertThat(service.restoreDefaults("default", null)).isEqualTo(0);
+        verify(prefRepo, org.mockito.Mockito.never()).deleteAllByOrgIdAndSubscriberId(anyString(), anyString());
+        verify(auditPublisher, org.mockito.Mockito.never()).publishStandalone(
+            anyString(), anyString(), anyString(), any()
+        );
     }
 }

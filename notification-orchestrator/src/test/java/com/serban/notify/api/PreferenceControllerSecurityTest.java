@@ -105,6 +105,53 @@ class PreferenceControllerSecurityTest {
             .andExpect(status().isForbidden());
     }
 
+    // ── Faz 23.6 PR-A1 — DELETE /me restore-defaults boundary ─────────────
+
+    @Test
+    void deleteAll_jwtSubMatchesHeader_returns200() throws Exception {
+        org.mockito.Mockito.when(preferenceService.restoreDefaults(
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.anyString()
+        )).thenReturn(2);
+
+        mockMvc.perform(delete("/api/v1/notify/preferences/me")
+                .with(jwt().jwt(j -> j.subject("alice")))
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "alice"))
+            .andExpect(status().isOk());
+    }
+
+    @Test
+    void deleteAll_jwtSubMismatchesHeader_returns403() throws Exception {
+        mockMvc.perform(delete("/api/v1/notify/preferences/me")
+                .with(jwt().jwt(j -> j.subject("alice")))
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "bob"))
+            .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void deleteAll_jwtOrgMismatchesHeader_returns403() throws Exception {
+        // Codex thread 019e0376 post-impl review: pin the
+        // NotifyOrgAccessGuard wiring at the controller surface.
+        // JWT trusts org-a, but X-Org-Id requests org-b → 403.
+        mockMvc.perform(delete("/api/v1/notify/preferences/me")
+                .with(jwt().jwt(j -> j.subject("alice").claim("org_id", "org-a")))
+                .header("X-Org-Id", "org-b")
+                .header("X-Subscriber-Id", "alice"))
+            .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void deleteAll_anonymousRequest_returns401() throws Exception {
+        // Resource-server filter chain catches anonymous calls before
+        // the controller even runs.
+        mockMvc.perform(delete("/api/v1/notify/preferences/me")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "alice"))
+            .andExpect(status().isUnauthorized());
+    }
+
     @TestConfiguration
     static class SecurityTestConfig {
         @Bean
@@ -119,6 +166,11 @@ class PreferenceControllerSecurityTest {
         @Bean
         public SubscriberIdentityGuard subscriberIdentityGuard() {
             return SubscriberIdentityGuardTestSupport.newGuard();
+        }
+
+        @Bean
+        public NotifyOrgAccessGuard notifyOrgAccessGuard() {
+            return NotifyOrgAccessGuardTestSupport.newGuard();
         }
     }
 }

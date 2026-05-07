@@ -1,14 +1,17 @@
 package com.serban.notify.preference;
 
+import com.serban.notify.audit.AuditEventPublisher;
 import com.serban.notify.domain.NotificationIntent;
 import com.serban.notify.domain.SubscriberContact;
 import com.serban.notify.domain.SubscriberPreference;
+import com.serban.notify.redaction.PiiRedactor;
 import com.serban.notify.repository.SubscriberContactRepository;
 import com.serban.notify.repository.SubscriberPreferenceRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -36,13 +39,19 @@ public class SubscriberPreferenceService {
 
     private final SubscriberContactRepository contactRepo;
     private final SubscriberPreferenceRepository preferenceRepo;
+    private final AuditEventPublisher auditPublisher;
+    private final PiiRedactor piiRedactor;
 
     public SubscriberPreferenceService(
         SubscriberContactRepository contactRepo,
-        SubscriberPreferenceRepository preferenceRepo
+        SubscriberPreferenceRepository preferenceRepo,
+        AuditEventPublisher auditPublisher,
+        PiiRedactor piiRedactor
     ) {
         this.contactRepo = contactRepo;
         this.preferenceRepo = preferenceRepo;
+        this.auditPublisher = auditPublisher;
+        this.piiRedactor = piiRedactor;
     }
 
     /**
@@ -227,6 +236,41 @@ public class SubscriberPreferenceService {
      * when no matching row was found (id missing or cross-tenant) —
      * same 404-ish semantics as the inbox controller's archive path.
      */
+    /**
+     * Atomic restore-defaults: hard-delete every preference row owned by
+     * the caller (Faz 23.6 PR-A1, Codex thread {@code 019e0376}).
+     *
+     * <p>Once the rows are gone the dispatch-time resolver falls through
+     * to the default-allow behaviour (ADR-0013 D46 #8) — the caller is
+     * effectively reset to the platform default.
+     *
+     * <p>An append-only {@code PREFERENCE_RESTORE_DEFAULTS} audit event is
+     * published on every invocation, including {@code deleted_count=0},
+     * so operator commands stay observable even when no rows changed.
+     *
+     * @return number of rows removed (0 when the caller had no rules)
+     */
+    @org.springframework.transaction.annotation.Transactional
+    public int restoreDefaults(String orgId, String subscriberId) {
+        if (orgId == null || orgId.isBlank() || subscriberId == null || subscriberId.isBlank()) {
+            return 0;
+        }
+        int deleted = preferenceRepo.deleteAllByOrgIdAndSubscriberId(orgId, subscriberId);
+        String recipientHash = piiRedactor.hashRecipient(orgId, "subscriber", subscriberId);
+        auditPublisher.publishStandalone(
+            "PREFERENCE_RESTORE_DEFAULTS",
+            orgId,
+            recipientHash,
+            Map.of(
+                "subscriber_id", subscriberId,
+                "deleted_count", deleted
+            )
+        );
+        log.info("preference restore-defaults: orgId={} subscriberId={} deleted={}",
+            orgId, subscriberId, deleted);
+        return deleted;
+    }
+
     @org.springframework.transaction.annotation.Transactional
     public boolean delete(String orgId, String subscriberId, Long id) {
         if (orgId == null || orgId.isBlank() || subscriberId == null || subscriberId.isBlank()

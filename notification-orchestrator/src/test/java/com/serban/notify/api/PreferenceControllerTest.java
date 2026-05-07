@@ -164,6 +164,32 @@ class PreferenceControllerTest {
             .andExpect(status().isNotFound());
     }
 
+    // ── Faz 23.6 PR-A1 — DELETE /me restore-defaults ──────────────────────
+
+    @Test
+    void deleteAllMine_returns200WithDeletedCount() throws Exception {
+        when(preferenceService.restoreDefaults("default", "sub-1")).thenReturn(3);
+
+        mockMvc.perform(delete("/api/v1/notify/preferences/me")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "sub-1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.deletedCount").value(3));
+    }
+
+    @Test
+    void deleteAllMine_zeroRows_idempotentReturns200() throws Exception {
+        // Idempotent contract: a follow-up call with no rows still returns
+        // 200 + count=0 so retry/UX behaviour stays sane.
+        when(preferenceService.restoreDefaults("default", "sub-1")).thenReturn(0);
+
+        mockMvc.perform(delete("/api/v1/notify/preferences/me")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "sub-1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.deletedCount").value(0));
+    }
+
     private static SubscriberPreference stub(
         Long id, String topicKey, String channel, boolean enabled
     ) {
@@ -197,6 +223,15 @@ class PreferenceControllerTest {
         @Bean
         public SubscriberIdentityGuard subscriberIdentityGuard() {
             return SubscriberIdentityGuardTestSupport.newGuard();
+        }
+
+        @Bean
+        public NotifyOrgAccessGuard notifyOrgAccessGuard() {
+            // Faz 23.6 PR-A1: PreferenceController gains the org guard
+            // alongside the subscriber guard. Tests run with no
+            // SecurityContext, so the guard's silent-pass branch
+            // applies and the existing assertions remain valid.
+            return NotifyOrgAccessGuardTestSupport.newGuard();
         }
     }
 }
