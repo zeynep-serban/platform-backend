@@ -11,15 +11,16 @@ package com.serban.notify.inbox;
  *   <li>{@code InboxService.archive} — *→ ARCHIVED (active list shrinks)</li>
  * </ul>
  *
- * <p>Listener: {@link InboxSseController} broadcasts new unread count to
+ * <p>Listener: {@code InboxSseController} broadcasts new unread count to
  * subscriber's connected SSE clients.
  *
- * <p>Scope (single-pod, intentional): {@code ApplicationEventPublisher} is
- * JVM-local. In a multi-pod deployment, an event raised in pod A is not
- * delivered to pod B's listeners; subscribers connected to pod B miss the
- * push. Acceptable for current notify deployment (HPA min=1 in test, single
- * replica). Cross-pod broadcast (Redis pub/sub or STOMP+message broker)
- * deferred to PR-E.4 / 23.4.
+ * <p>Cross-pod delivery (Faz 23.4 PR-E.4): events flow through PG
+ * LISTEN/NOTIFY pattern by default (cross-pod-enabled=true). Publisher
+ * emits {@code pg_notify('inbox_updated', '<json>')} → all pods'
+ * {@code InboxNotifyListener} receive → recompute fresh unread count
+ * (avoids stale-snapshot race) → re-emit this Spring event locally per
+ * pod → SSE controller broadcasts to local clients. Single-pod fallback
+ * (cross-pod-enabled=false) preserved for local dev / unit test.
  */
 public record InboxUpdatedEvent(
     String orgId,

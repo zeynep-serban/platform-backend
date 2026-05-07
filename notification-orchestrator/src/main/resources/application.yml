@@ -179,6 +179,14 @@ notify:
   redaction:
     pepper: ${NOTIFY_REDACTION_PEPPER:dev-only-pepper-not-for-production}
 
+  # Faz 23.4 PR-E.4 SSE cross-pod broadcast (PG LISTEN/NOTIFY pattern).
+  # cross-pod-enabled: prod default true (multi-pod aware SSE delivery);
+  # set false for local dev / unit test to use single-pod ApplicationEventPublisher
+  # fallback (avoids LISTEN background thread + transactional event semantics
+  # that aren't needed without multi-pod scale).
+  inbox:
+    cross-pod-enabled: ${NOTIFY_INBOX_CROSS_POD_ENABLED:true}
+
 logging:
   level:
     root: ${LOGGING_LEVEL_ROOT:INFO}

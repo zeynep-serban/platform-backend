@@ -21,6 +21,12 @@ notify:
     enabled: false
   authz:
     enabled: false
+  # Faz 23.4 PR-E.4 SSE cross-pod broadcast: disable in test profile —
+  # PG LISTEN background thread + multi-pod broadcast not needed for
+  # integration tests (single JVM, single pod). Use legacy local
+  # ApplicationEventPublisher path so existing SSE tests stay green.
+  inbox:
+    cross-pod-enabled: false
 
 logging:
   level:

@@ -57,7 +57,10 @@
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <scope>runtime</scope>
+            <!-- Faz 23.4 PR-E.4: scope previously runtime; changed to default
+                 (compile) because InboxNotifyListener uses PGConnection /
+                 PGNotification directly (PG LISTEN/NOTIFY background worker
+                 for cross-pod SSE event broadcast). -->
         </dependency>
         <dependency>
             <groupId>org.flywaydb</groupId>

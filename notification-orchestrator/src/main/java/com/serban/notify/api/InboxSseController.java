@@ -10,8 +10,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.transaction.event.TransactionPhase;
-import org.springframework.transaction.event.TransactionalEventListener;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -53,13 +51,14 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * lockdown: PR-D-future replaces query params with JWT subject/org claim
  * extraction so a caller cannot subscribe to another subscriber's stream.
  *
- * <p>Multi-pod posture (Codex iter-1 P1.4 absorb): emitter map and
- * ApplicationEventPublisher are JVM-local. Current HPA can scale to
- * {@code maxReplicas=3} in test/prod overlays; while running with multiple
- * replicas a subscriber connected to pod A misses events emitted in pod B.
- * Acceptable for current MVP testing only — production rollout REQUIRES
- * either (a) HPA min=max=1 for in-app SSE pods, or (b) cross-pod broadcast
- * via Redis pub/sub / STOMP+broker (PR-E.4 / 23.4).
+ * <p>Multi-pod posture (Faz 23.4 PR-E.4): cross-pod event delivery via PG
+ * LISTEN/NOTIFY pattern (default cross-pod-enabled=true). Each pod's
+ * {@code InboxNotifyListener} receives all NOTIFY events post-commit and
+ * re-emits the Spring event locally — every pod's SSE clients see the
+ * update regardless of which pod handled the original mutation. Single-pod
+ * fallback path (cross-pod-enabled=false) preserved for local dev / unit
+ * test. After PR-E.4 merge + rollout, gitops PR #385 (HPA min=max=1 lock)
+ * can be reverted so HPA scale-out re-enables.
  *
  * <p>Lifecycle:
  * <ul>
@@ -141,20 +140,30 @@ public class InboxSseController {
      * Listen for inbox state changes; broadcast to subscriber's connected SSE
      * clients on this pod.
      *
-     * <p>Codex iter-1 P1.2 absorb: {@link TransactionalEventListener
-     * AFTER_COMMIT} — only deliver events whose emitting transaction
-     * actually committed. Rolled-back inserts/updates produce no SSE push,
-     * preventing client from seeing stale/non-existent count.
+     * <p>Faz 23.4 PR-E.4 (Codex iter-1 P1.3 absorb):
+     * {@code @TransactionalEventListener(AFTER_COMMIT, fallbackExecution=true)}.
+     * <ul>
+     *   <li>Cross-pod path: event arrives via {@link com.serban.notify.inbox.InboxNotifyListener}
+     *       (PG NOTIFY post-commit). No active transaction at delivery time;
+     *       {@code fallbackExecution=true} ensures the handler still fires.</li>
+     *   <li>Single-pod fallback path (cross-pod-enabled=false): publisher
+     *       calls {@code applicationEventPublisher.publishEvent} inside the
+     *       caller's transaction. {@code AFTER_COMMIT} phase guard prevents
+     *       phantom events on rollback — listener fires only after commit.</li>
+     * </ul>
      *
-     * <p>Codex iter-1 P1.3 absorb: {@code @Async("inboxSseExecutor")}
+     * <p>Codex PR-E.3 iter-1 P1.3 absorb: {@code @Async("inboxSseExecutor")}
      * — bounded {@code ThreadPoolTaskExecutor} (see {@code AsyncConfig});
-     * SSE network IO does not block transaction-completion thread.
+     * SSE network IO does not block event-publishing thread.
      *
-     * <p>Codex iter-1 P2.5 absorb: catch {@link RuntimeException} alongside
-     * {@link IOException} so a failed/completed emitter doesn't leak into
-     * the map and consume future heartbeat slots.
+     * <p>Codex PR-E.3 iter-1 P2.5 absorb: catch {@link RuntimeException}
+     * alongside {@link IOException} so a failed/completed emitter doesn't
+     * leak into the map and consume future heartbeat slots.
      */
-    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @org.springframework.transaction.event.TransactionalEventListener(
+        phase = org.springframework.transaction.event.TransactionPhase.AFTER_COMMIT,
+        fallbackExecution = true
+    )
     @Async("inboxSseExecutor")
     public void onInboxUpdated(InboxUpdatedEvent event) {
         String key = key(event.orgId(), event.subscriberId());
