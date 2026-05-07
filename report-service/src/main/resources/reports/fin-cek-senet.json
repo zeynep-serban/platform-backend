@@ -121,11 +121,6 @@
   "access": {
     "permission": "reports.fin-cek-senet.view",
     "columnRestrictions": {},
-    "rowFilter": {
-      "column": "COMPANY_ID",
-      "scopeType": "COMPANY",
-      "bypassPermission": "reports.fin.all-companies"
-    },
     "reportGroup": "FINANCE_REPORTS"
   }
 }

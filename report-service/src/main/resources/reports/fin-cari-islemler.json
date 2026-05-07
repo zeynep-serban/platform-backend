@@ -150,11 +150,6 @@
   "access": {
     "permission": "REPORT_VIEW",
     "columnRestrictions": {},
-    "rowFilter": {
-      "column": "TO_CMP_ID",
-      "scopeType": "COMPANY",
-      "bypassPermission": "reports.fin.all-companies"
-    },
     "reportGroup": "FINANCE_REPORTS"
   }
 }

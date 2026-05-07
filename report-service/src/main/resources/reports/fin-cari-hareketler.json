@@ -121,11 +121,6 @@
   "access": {
     "permission": "reports.fin-cari-hareketler.view",
     "columnRestrictions": {},
-    "rowFilter": {
-      "column": "FROM_CMP_ID",
-      "scopeType": "COMPANY",
-      "bypassPermission": "reports.fin.all-companies"
-    },
     "reportGroup": "FINANCE_REPORTS"
   }
 }

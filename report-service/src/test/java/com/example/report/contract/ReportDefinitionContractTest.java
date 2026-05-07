@@ -79,16 +79,15 @@ class ReportDefinitionContractTest {
     }
 
     @Test
-    @DisplayName("Aggregate: suppressed counts match exception inventory")
+    @DisplayName("Aggregate: suppressed counts match exception inventory (post-2d)")
     void aggregate_suppressedCountsMatchInventory() {
-        // 21 governance debt entries → 21 suppressions if all RC-XXX violations
-        // hit by exceptions actually fire from the rules. RC-001×2, RC-004×7,
-        // RC-005×12. Drift guard: if a yearColumn fix lands without removing
-        // its RC-001 exception, this count diverges.
+        // Phase 2 Program 2d cleaned RC-005×12 (rowFilter removed from 12 yearly
+        // reports; 2a runtime tenant guard provides fail-closed precondition).
+        // Remaining: RC-001×2 (yearColumn ambiguous), RC-004×7 (scopeType debt).
         assertThat(CACHED.suppressedByRule())
                 .containsEntry("RC-001", 2L)
                 .containsEntry("RC-004", 7L)
-                .containsEntry("RC-005", 12L);
+                .doesNotContainKey("RC-005");
     }
 
     @Test

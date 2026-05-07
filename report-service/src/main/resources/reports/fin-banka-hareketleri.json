@@ -128,11 +128,6 @@
   "access": {
     "permission": "reports.fin-banka-hareketleri.view",
     "columnRestrictions": {},
-    "rowFilter": {
-      "column": "ACTION_FROM_COMPANY_ID",
-      "scopeType": "COMPANY",
-      "bypassPermission": "reports.fin.all-companies"
-    },
     "reportGroup": "FINANCE_REPORTS"
   }
 }

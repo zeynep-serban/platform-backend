@@ -26,13 +26,14 @@ import org.springframework.core.io.Resource;
  * <p>Acceptance criteria:
  * <ul>
  *   <li>Default {@code mvn test} run completes deterministically.</li>
- *   <li>All known RC-001 + RC-004 + RC-005 governance debt is suppressed
- *       by the 21 exception entries committed in this PR.</li>
+ *   <li>All known RC-001 + RC-004 governance debt is suppressed by the
+ *       9 exception entries (Phase 2 Program 2d cleaned up 12 RC-005
+ *       entries by removing the redundant yearly+rowFilter pairs).</li>
  *   <li>{@code hr-personel-listesi} (legitimate {@code OUR_COMPANY_ID})
  *       is NOT in the exception list.</li>
  *   <li>No unsuppressed FAILs remain in the gate output.</li>
- *   <li>Exception inventory exact: 21 entries (2× RC-001, 7× RC-004,
- *       12× RC-005); no other rule namespaces.</li>
+ *   <li>Exception inventory exact: 9 entries (2× RC-001, 7× RC-004);
+ *       RC-005 namespace eliminated by 2d.</li>
  * </ul>
  */
 class ReportContractGateTest {
@@ -116,8 +117,8 @@ class ReportContractGateTest {
         ContractExceptionEntry[] entries = loadExceptions();
 
         assertThat(entries)
-                .as("Total governance debt entries (Phase 2 Program 1d)")
-                .hasSize(21);
+                .as("Total governance debt entries (Phase 2 Program 2d cleaned RC-005×12)")
+                .hasSize(9);
 
         Map<String, Long> byRule = Arrays.stream(entries)
                 .flatMap(e -> e.ruleIds().stream())
@@ -129,13 +130,16 @@ class ReportContractGateTest {
         assertThat(byRule.get("RC-004"))
                 .as("RC-004 debt: HR + ORDER scopeType=COMPANY misclassified")
                 .isEqualTo(7L);
+        // RC-005 eliminated by Phase 2 Program 2d (rowFilter removed from 12
+        // yearly reports; 2a runtime tenant guard hardening provides the
+        // fail-closed precondition).
         assertThat(byRule.get("RC-005"))
-                .as("RC-005 debt: yearly + rowFilter.scopeType=COMPANY redundant")
-                .isEqualTo(12L);
+                .as("RC-005 debt eliminated by 2d")
+                .isNull();
 
         // No other rule namespace should creep in without review.
         assertThat(byRule.keySet())
-                .containsExactlyInAnyOrder("RC-001", "RC-004", "RC-005");
+                .containsExactlyInAnyOrder("RC-001", "RC-004");
     }
 
     @Test

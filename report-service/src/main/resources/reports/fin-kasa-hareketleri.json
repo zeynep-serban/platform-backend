@@ -107,11 +107,6 @@
   "access": {
     "permission": "reports.fin-kasa-hareketleri.view",
     "columnRestrictions": {},
-    "rowFilter": {
-      "column": "CASH_ACTION_FROM_COMPANY_ID",
-      "scopeType": "COMPANY",
-      "bypassPermission": "reports.fin.all-companies"
-    },
     "reportGroup": "FINANCE_REPORTS"
   }
 }
