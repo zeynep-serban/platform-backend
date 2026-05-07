@@ -218,11 +218,13 @@ class InboxControllerTest {
 
     @Test
     void markAllAsReadReturns200WithUpdatedCount() throws Exception {
-        when(inboxService.markAllAsRead(anyString(), anyString(), any()))
-            .thenAnswer(inv -> new InboxService.BulkMarkAllReadResult(
-                7,
-                inv.getArgument(2)
-            ));
+        // Faz 23.5 hardening (Codex 019e03b5): cutoff is now DB-sourced
+        // so the controller no longer passes it. The service mock returns
+        // a fixed timestamp the same way the production service would
+        // forward repository.currentDatabaseTimestamp().
+        OffsetDateTime dbCutoff = OffsetDateTime.parse("2026-05-07T12:00:00Z");
+        when(inboxService.markAllAsRead(anyString(), anyString()))
+            .thenReturn(new InboxService.BulkMarkAllReadResult(7, dbCutoff));
 
         mockMvc.perform(post("/api/v1/notify/inbox/me/mark-all-read")
                 .header("X-Org-Id", "default")
@@ -234,11 +236,9 @@ class InboxControllerTest {
 
     @Test
     void markAllAsReadIdempotentReturnsZeroCount() throws Exception {
-        when(inboxService.markAllAsRead(anyString(), anyString(), any()))
-            .thenAnswer(inv -> new InboxService.BulkMarkAllReadResult(
-                0,
-                inv.getArgument(2)
-            ));
+        OffsetDateTime dbCutoff = OffsetDateTime.parse("2026-05-07T12:00:00Z");
+        when(inboxService.markAllAsRead(anyString(), anyString()))
+            .thenReturn(new InboxService.BulkMarkAllReadResult(0, dbCutoff));
 
         mockMvc.perform(post("/api/v1/notify/inbox/me/mark-all-read")
                 .header("X-Org-Id", "default")

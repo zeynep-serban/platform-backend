@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Optional;
 
 /**
@@ -110,7 +111,9 @@ public class InboxService {
         Optional<NotificationInbox> current =
             inboxRepository.findByOrgIdAndIdAndSubscriberId(orgId, id, subscriberId);
         if (current.isEmpty()) return Optional.empty();
-        int affected = inboxRepository.markAsRead(orgId, id, subscriberId, OffsetDateTime.now());
+        // Faz 23.5 hardening (Codex thread `019e03b5`): read_at is
+        // sourced from the DB clock now; no JVM timestamp parameter.
+        int affected = inboxRepository.markAsRead(orgId, id, subscriberId);
         log.info("inbox.mark_read: orgId={} subscriberId={} id={} affected={}",
             orgId, subscriberId, id, affected);
         // PR-E.3: emit event (badge count changed; SSE controller broadcasts).
@@ -136,7 +139,9 @@ public class InboxService {
         Optional<NotificationInbox> current =
             inboxRepository.findByOrgIdAndIdAndSubscriberId(orgId, id, subscriberId);
         if (current.isEmpty()) return Optional.empty();
-        int affected = inboxRepository.archive(orgId, id, subscriberId, OffsetDateTime.now());
+        // Faz 23.5 hardening (Codex thread `019e03b5`): archived_at is
+        // sourced from the DB clock now; no JVM timestamp parameter.
+        int affected = inboxRepository.archive(orgId, id, subscriberId);
         log.info("inbox.archive: orgId={} subscriberId={} id={} affected={}",
             orgId, subscriberId, id, affected);
         // PR-E.3: emit event if state actually transitioned (UNREAD → ARCHIVED
@@ -148,47 +153,46 @@ public class InboxService {
     }
 
     /**
-     * Bulk mark-all-read (Faz 23.5 PR1).
+     * Bulk mark-all-read with database-canonical cutoff (Faz 23.5 PR1
+     * + Faz 23.5 hardening — Codex thread {@code 019e03b5}).
      *
-     * <p>Flips every UNREAD row owned by the subscriber whose
-     * {@code created_at <= cutoff} to READ. The {@code cutoff} parameter
-     * is the server-side request-start timestamp passed by the
-     * controller — using a server clock ensures monotonic boundaries
-     * free of client clock skew, and the WHERE-clause predicate
-     * guarantees that notifications arriving between request acceptance
-     * and the UPDATE are not collateral-marked-as-read.
+     * <p>The cutoff is captured by the database via
+     * {@code CURRENT_TIMESTAMP} inside the same SQL statement that does
+     * the UPDATE. {@code created_at} is also DB-sourced
+     * (V14 ALTER + entity {@code insertable=false}), so a row that the
+     * database stamps after the bulk update commits cannot satisfy the
+     * predicate inside the same transaction. Single- and multi-pod
+     * clusters agree on the boundary regardless of JVM clock drift.
+     *
+     * <p>The response carries the cutoff timestamp the database
+     * returned so the audit trail is reproducible — same wire shape
+     * the controller emitted before, just sourced from the DB instead
+     * of {@link OffsetDateTime#now()}.
      *
      * <p>Idempotent: a follow-up call with no UNREAD rows returns
      * {@code 0}. Emits {@link InboxEventPublisher#publishInboxUpdated}
      * once at the end (not per row) so SSE subscribers see a single
      * {@code unread-count} update with the post-bulk total.
-     *
-     * @param orgId tenant id
-     * @param subscriberId subscriber whose inbox is being swept
-     * @param cutoff inclusive upper bound on {@code created_at} of rows
-     *               eligible for the transition
-     * @return {@link BulkMarkAllReadResult} describing how many rows
-     *         flipped and which cutoff was applied
      */
     @Transactional
-    public BulkMarkAllReadResult markAllAsRead(
-        String orgId,
-        String subscriberId,
-        OffsetDateTime cutoff
-    ) {
+    public BulkMarkAllReadResult markAllAsRead(String orgId, String subscriberId) {
         validateTenancy(orgId, subscriberId);
-        if (cutoff == null) {
-            throw new InvalidRequestException("cutoff required");
-        }
-        OffsetDateTime now = OffsetDateTime.now();
-        int affected = inboxRepository.markAllAsRead(orgId, subscriberId, now, cutoff);
+        // Hibernate's native query type mapper resolves PostgreSQL
+        // `timestamptz` to `Instant` (the zoneless point-in-time view);
+        // adapt to OffsetDateTime at UTC for the wire shape — the
+        // BulkMarkAllReadResponse.cutoff field is the same TZ regardless
+        // of caller locale because the cutoff is a server-side audit
+        // marker, not a display-localised timestamp.
+        OffsetDateTime cutoff = inboxRepository
+            .currentDatabaseTimestamp()
+            .atOffset(ZoneOffset.UTC);
+        int affected = inboxRepository.markAllAsRead(orgId, subscriberId);
         log.info(
             "inbox.mark_all_read: orgId={} subscriberId={} cutoff={} affected={}",
             orgId, subscriberId, cutoff, affected
         );
         // PR-E.3 / PR-E.4: emit event so SSE subscribers get the post-bulk
-        // unread count. Only when something actually flipped — calling
-        // with no UNREAD rows produces a no-op event-wise too.
+        // unread count. Only when something actually flipped.
         if (affected > 0) {
             eventPublisher.publishInboxUpdated(orgId, subscriberId);
         }

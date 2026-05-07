@@ -166,13 +166,13 @@ class InboxServiceUnitTest {
         NotificationInbox row = stubRow();
         when(repository.findByOrgIdAndIdAndSubscriberId("default", 42L, "sub-1"))
             .thenReturn(Optional.of(row));
-        when(repository.markAsRead(eq("default"), eq(42L), eq("sub-1"), any()))
+        when(repository.markAsRead(eq("default"), eq(42L), eq("sub-1")))
             .thenReturn(1);
 
         Optional<NotificationInbox> result = service.markAsRead("default", 42L, "sub-1");
 
         assertThat(result).isPresent();
-        verify(repository).markAsRead(eq("default"), eq(42L), eq("sub-1"), any());
+        verify(repository).markAsRead(eq("default"), eq(42L), eq("sub-1"));
         // PR-E.3: badge event published on actual mutation
         verify(eventPublisher).publishInboxUpdated("default", "sub-1");
     }
@@ -184,7 +184,7 @@ class InboxServiceUnitTest {
         row.setState(NotificationInbox.State.READ);
         when(repository.findByOrgIdAndIdAndSubscriberId("default", 42L, "sub-1"))
             .thenReturn(Optional.of(row));
-        when(repository.markAsRead(eq("default"), eq(42L), eq("sub-1"), any()))
+        when(repository.markAsRead(eq("default"), eq(42L), eq("sub-1")))
             .thenReturn(0);
 
         Optional<NotificationInbox> result = service.markAsRead("default", 42L, "sub-1");
@@ -204,7 +204,7 @@ class InboxServiceUnitTest {
 
         assertThat(result).isEmpty();
         // markAsRead never invoked for cross-tenant id
-        verify(repository, never()).markAsRead(any(), any(), any(), any());
+        verify(repository, never()).markAsRead(any(), any(), any());
     }
 
     @Test
@@ -220,13 +220,13 @@ class InboxServiceUnitTest {
         NotificationInbox row = stubRow();
         when(repository.findByOrgIdAndIdAndSubscriberId("default", 42L, "sub-1"))
             .thenReturn(Optional.of(row));
-        when(repository.archive(eq("default"), eq(42L), eq("sub-1"), any()))
+        when(repository.archive(eq("default"), eq(42L), eq("sub-1")))
             .thenReturn(1);
 
         Optional<NotificationInbox> result = service.archive("default", 42L, "sub-1");
 
         assertThat(result).isPresent();
-        verify(repository).archive(eq("default"), eq(42L), eq("sub-1"), any());
+        verify(repository).archive(eq("default"), eq(42L), eq("sub-1"));
         verify(eventPublisher).publishInboxUpdated("default", "sub-1");
     }
 
@@ -236,7 +236,7 @@ class InboxServiceUnitTest {
         row.setState(NotificationInbox.State.ARCHIVED);
         when(repository.findByOrgIdAndIdAndSubscriberId("default", 42L, "sub-1"))
             .thenReturn(Optional.of(row));
-        when(repository.archive(eq("default"), eq(42L), eq("sub-1"), any()))
+        when(repository.archive(eq("default"), eq(42L), eq("sub-1")))
             .thenReturn(0);
 
         Optional<NotificationInbox> result = service.archive("default", 42L, "sub-1");
@@ -253,59 +253,59 @@ class InboxServiceUnitTest {
         Optional<NotificationInbox> result = service.archive("default", 42L, "wrong-sub");
 
         assertThat(result).isEmpty();
-        verify(repository, never()).archive(any(), any(), any(), any());
+        verify(repository, never()).archive(any(), any(), any());
     }
 
     // ─── Faz 23.5 PR1: bulk mark-all-read ────────────────────────────────
 
     @Test
-    void markAllAsReadHappyPathReturnsAffectedCountAndCutoff() {
-        OffsetDateTime cutoff = OffsetDateTime.now();
-        when(repository.markAllAsRead(eq("default"), eq("sub-1"), any(), eq(cutoff)))
-            .thenReturn(13);
+    void markAllAsReadHappyPathReturnsAffectedCountAndDbCutoff() {
+        // Faz 23.5 hardening (Codex thread `019e03b5`): cutoff is now
+        // sourced from the DB clock; service mocks
+        // currentDatabaseTimestamp() to assert the response carries the
+        // DB-returned value. The repo helper returns Instant (Hibernate
+        // native query timestamptz mapper); service adapts to UTC
+        // OffsetDateTime for the wire shape.
+        java.time.Instant dbCutoffInstant = java.time.Instant.parse("2026-05-07T20:00:00Z");
+        OffsetDateTime dbCutoffExpected = dbCutoffInstant.atOffset(java.time.ZoneOffset.UTC);
+        when(repository.currentDatabaseTimestamp()).thenReturn(dbCutoffInstant);
+        when(repository.markAllAsRead(eq("default"), eq("sub-1"))).thenReturn(13);
 
         InboxService.BulkMarkAllReadResult result =
-            service.markAllAsRead("default", "sub-1", cutoff);
+            service.markAllAsRead("default", "sub-1");
 
         assertThat(result.updatedCount()).isEqualTo(13);
-        assertThat(result.cutoff()).isEqualTo(cutoff);
-        verify(repository).markAllAsRead(eq("default"), eq("sub-1"), any(), eq(cutoff));
-        // Single SSE event after the bulk transition (not per row).
+        assertThat(result.cutoff()).isEqualTo(dbCutoffExpected);
+        verify(repository).markAllAsRead(eq("default"), eq("sub-1"));
         verify(eventPublisher).publishInboxUpdated("default", "sub-1");
     }
 
     @Test
     void markAllAsReadEmitsNoEventWhenNoRowsMatched() {
-        // Idempotent re-call when no UNREAD rows exist; affected = 0 →
-        // no badge change → don't fire SSE event.
-        OffsetDateTime cutoff = OffsetDateTime.now();
-        when(repository.markAllAsRead(eq("default"), eq("sub-1"), any(), eq(cutoff)))
-            .thenReturn(0);
+        java.time.Instant dbCutoffInstant = java.time.Instant.parse("2026-05-07T20:00:00Z");
+        when(repository.currentDatabaseTimestamp()).thenReturn(dbCutoffInstant);
+        when(repository.markAllAsRead(eq("default"), eq("sub-1"))).thenReturn(0);
 
         InboxService.BulkMarkAllReadResult result =
-            service.markAllAsRead("default", "sub-1", cutoff);
+            service.markAllAsRead("default", "sub-1");
 
         assertThat(result.updatedCount()).isZero();
         verify(eventPublisher, never()).publishInboxUpdated(anyString(), anyString());
     }
 
     @Test
-    void markAllAsReadRejectsBlankOrgIdSubscriberIdOrCutoff() {
-        OffsetDateTime cutoff = OffsetDateTime.now();
+    void markAllAsReadRejectsBlankOrgIdOrSubscriberId() {
+        // The cutoff parameter no longer exists; service throws on
+        // blank tenancy inputs only.
         org.junit.jupiter.api.Assertions.assertThrows(
             com.serban.notify.exception.InvalidRequestException.class,
-            () -> service.markAllAsRead("", "sub-1", cutoff)
+            () -> service.markAllAsRead("", "sub-1")
         );
         org.junit.jupiter.api.Assertions.assertThrows(
             com.serban.notify.exception.InvalidRequestException.class,
-            () -> service.markAllAsRead("default", "", cutoff)
+            () -> service.markAllAsRead("default", "")
         );
-        org.junit.jupiter.api.Assertions.assertThrows(
-            com.serban.notify.exception.InvalidRequestException.class,
-            () -> service.markAllAsRead("default", "sub-1", null)
-        );
-        // Repository never called for any of those.
-        verify(repository, never()).markAllAsRead(any(), any(), any(), any());
+        verify(repository, never()).markAllAsRead(any(), any());
     }
 
     private static NotificationInbox stubRow() {

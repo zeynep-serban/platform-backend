@@ -43,6 +43,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 class NotificationInboxRepositoryTest extends AbstractPostgresTest {
 
     @Autowired NotificationInboxRepository repo;
+    // Faz 23.5 hardening: tests that need to plant a future or past
+    // created_at must do it through raw SQL because the entity column is
+    // insertable=false (DB DEFAULT NOW() is canonical now).
+    @Autowired org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     @BeforeEach
     void cleanInbox() {
@@ -136,7 +140,7 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
         NotificationInbox saved = repo.save(stub("default", "intent-1", "sub-1"));
         assertThat(saved.getReadAt()).isNull();
 
-        int affected = repo.markAsRead("default", saved.getId(), "sub-1", OffsetDateTime.now());
+        int affected = repo.markAsRead("default", saved.getId(), "sub-1");
 
         assertThat(affected).isEqualTo(1);
         // Re-fetch — trigger auto-sets read_at on state transition
@@ -148,10 +152,10 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
     @Test
     void markAsReadIdempotentNoOpIfAlreadyRead() {
         NotificationInbox saved = repo.save(stub("default", "intent-1", "sub-1"));
-        repo.markAsRead("default", saved.getId(), "sub-1", OffsetDateTime.now());
+        repo.markAsRead("default", saved.getId(), "sub-1");
 
         // Second call → 0 affected (WHERE state=UNREAD filter)
-        int affected = repo.markAsRead("default", saved.getId(), "sub-1", OffsetDateTime.now());
+        int affected = repo.markAsRead("default", saved.getId(), "sub-1");
 
         assertThat(affected).isEqualTo(0);
     }
@@ -160,7 +164,7 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
     void markAsReadCrossTenantNoEffect() {
         NotificationInbox saved = repo.save(stub("default", "intent-1", "sub-1"));
 
-        int affected = repo.markAsRead("default", saved.getId(), "wrong-sub", OffsetDateTime.now());
+        int affected = repo.markAsRead("default", saved.getId(), "wrong-sub");
 
         assertThat(affected).isEqualTo(0);
         NotificationInbox refetched = repo.findById(saved.getId()).orElseThrow();
@@ -172,7 +176,7 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
         NotificationInbox saved = repo.save(stub("default", "intent-1", "sub-1"));
         assertThat(saved.getArchivedAt()).isNull();
 
-        int affected = repo.archive("default", saved.getId(), "sub-1", OffsetDateTime.now());
+        int affected = repo.archive("default", saved.getId(), "sub-1");
 
         assertThat(affected).isEqualTo(1);
         NotificationInbox refetched = repo.findById(saved.getId()).orElseThrow();
@@ -183,9 +187,9 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
     @Test
     void archiveFromReadStateAlsoTransitions() {
         NotificationInbox saved = repo.save(stub("default", "intent-1", "sub-1"));
-        repo.markAsRead("default", saved.getId(), "sub-1", OffsetDateTime.now());
+        repo.markAsRead("default", saved.getId(), "sub-1");
 
-        int affected = repo.archive("default", saved.getId(), "sub-1", OffsetDateTime.now());
+        int affected = repo.archive("default", saved.getId(), "sub-1");
 
         assertThat(affected).isEqualTo(1);
         NotificationInbox refetched = repo.findById(saved.getId()).orElseThrow();
@@ -198,9 +202,9 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
     @Test
     void archiveIdempotentNoOpIfAlreadyArchived() {
         NotificationInbox saved = repo.save(stub("default", "intent-1", "sub-1"));
-        repo.archive("default", saved.getId(), "sub-1", OffsetDateTime.now());
+        repo.archive("default", saved.getId(), "sub-1");
 
-        int affected = repo.archive("default", saved.getId(), "sub-1", OffsetDateTime.now());
+        int affected = repo.archive("default", saved.getId(), "sub-1");
 
         assertThat(affected).isEqualTo(0);
     }
@@ -236,7 +240,7 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
         // Codex iter-1 P2 absorb: forward-only state machine; READ → UNREAD must
         // raise exception at DB level (defense-in-depth beyond app-level).
         NotificationInbox saved = repo.save(stub("default", "intent-1", "sub-1"));
-        repo.markAsRead("default", saved.getId(), "sub-1", OffsetDateTime.now());
+        repo.markAsRead("default", saved.getId(), "sub-1");
         // Force-clear persistence cache so re-fetch hits DB
         NotificationInbox refetched = repo.findById(saved.getId()).orElseThrow();
         assertThat(refetched.getState()).isEqualTo(NotificationInbox.State.READ);
@@ -256,7 +260,7 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
     void dbTriggerBlocksArchivedToUnreadBackwardTransition() {
         // ARCHIVED is terminal; cannot transition to any other state
         NotificationInbox saved = repo.save(stub("default", "intent-1", "sub-1"));
-        repo.archive("default", saved.getId(), "sub-1", OffsetDateTime.now());
+        repo.archive("default", saved.getId(), "sub-1");
         NotificationInbox refetched = repo.findById(saved.getId()).orElseThrow();
 
         refetched.setState(NotificationInbox.State.UNREAD);
@@ -273,7 +277,7 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
     @Test
     void dbTriggerBlocksArchivedToReadBackwardTransition() {
         NotificationInbox saved = repo.save(stub("default", "intent-1", "sub-1"));
-        repo.archive("default", saved.getId(), "sub-1", OffsetDateTime.now());
+        repo.archive("default", saved.getId(), "sub-1");
         NotificationInbox refetched = repo.findById(saved.getId()).orElseThrow();
 
         refetched.setState(NotificationInbox.State.READ);
@@ -292,7 +296,7 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
         // UNREAD → ARCHIVED (skipping READ) is forward-only valid
         NotificationInbox saved = repo.save(stub("default", "intent-1", "sub-1"));
 
-        int affected = repo.archive("default", saved.getId(), "sub-1", OffsetDateTime.now());
+        int affected = repo.archive("default", saved.getId(), "sub-1");
 
         assertThat(affected).isEqualTo(1);
         NotificationInbox refetched = repo.findById(saved.getId()).orElseThrow();
@@ -373,7 +377,12 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
         row.setTopicKey("test.topic");
         row.setSeverity("info");
         row.setState(NotificationInbox.State.UNREAD);
-        row.setCreatedAt(OffsetDateTime.now());
+        // Faz 23.5 hardening: NotificationInbox.createdAt is now
+        // insertable=false (DB DEFAULT NOW() owns the column). The
+        // setter still exists for code paths that read the value back,
+        // but JPA ignores it on insert. Tests that need a specific
+        // timestamp use jdbcTemplate.update("...SET created_at=...")
+        // instead.
         return row;
     }
 
@@ -392,8 +401,7 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
         preRead.setReadAt(OffsetDateTime.now().minusHours(1));
         repo.save(preRead);
 
-        OffsetDateTime cutoff = OffsetDateTime.now();
-        int affected = repo.markAllAsRead("default", "sub-1", cutoff, cutoff);
+        int affected = repo.markAllAsRead("default", "sub-1");
 
         // Only the 3 UNREAD rows should flip; the pre-READ row not counted.
         assertThat(affected).isEqualTo(3);
@@ -406,23 +414,29 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
     }
 
     @Test
-    void markAllAsReadHonorsCreatedAtCutoff() {
-        // older row (createdAt minus 1h) should be inside the cutoff;
-        // newer row (createdAt plus 5min) should be excluded.
-        NotificationInbox older = stub("default", "intent-old", "sub-1");
-        older.setCreatedAt(OffsetDateTime.now().minusHours(1));
-        repo.save(older);
+    void markAllAsReadHonorsCreatedAtCutoff_withDbClockSourcedTimestamps() {
+        // Faz 23.5 hardening (Codex thread `019e03b5`): created_at is
+        // now DB-sourced (insertable=false), so we plant the past /
+        // future timestamps via raw SQL after the insert. The bulk
+        // mark-all-read query uses NOW() in the predicate, so the
+        // future row stays UNREAD even after the bulk sweep.
+        NotificationInbox older = repo.save(stub("default", "intent-old-db", "sub-1"));
+        NotificationInbox newer = repo.save(stub("default", "intent-new-db", "sub-1"));
+        // Move older row 1h into the past, newer row 5 min into the future.
+        jdbcTemplate.update(
+            "UPDATE notify.notification_inbox SET created_at = NOW() - INTERVAL '1 hour' WHERE id = ?",
+            older.getId()
+        );
+        jdbcTemplate.update(
+            "UPDATE notify.notification_inbox SET created_at = NOW() + INTERVAL '5 minutes' WHERE id = ?",
+            newer.getId()
+        );
 
-        NotificationInbox newer = stub("default", "intent-new", "sub-1");
-        newer.setCreatedAt(OffsetDateTime.now().plusMinutes(5));
-        NotificationInbox newerSaved = repo.save(newer);
-
-        OffsetDateTime cutoff = OffsetDateTime.now();
-        int affected = repo.markAllAsRead("default", "sub-1", cutoff, cutoff);
+        int affected = repo.markAllAsRead("default", "sub-1");
 
         assertThat(affected).isEqualTo(1);
         NotificationInbox newerFresh =
-            repo.findByOrgIdAndIdAndSubscriberId("default", newerSaved.getId(), "sub-1")
+            repo.findByOrgIdAndIdAndSubscriberId("default", newer.getId(), "sub-1")
                 .orElseThrow();
         assertThat(newerFresh.getState())
             .as("future-dated row outside cutoff must remain UNREAD")
@@ -435,21 +449,16 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
         repo.save(stub("default", "intent-2", "sub-1"));
         repo.save(stub("default", "intent-3", "sub-2"));  // different subscriber
 
-        OffsetDateTime cutoff = OffsetDateTime.now();
-
         // Cross-org attempt: zero rows match, no leakage.
-        int crossOrg =
-            repo.markAllAsRead("wrong-org", "sub-1", OffsetDateTime.now(), cutoff);
+        int crossOrg = repo.markAllAsRead("wrong-org", "sub-1");
         assertThat(crossOrg).isZero();
 
         // Cross-subscriber attempt within the same org: zero rows match.
-        int crossSub =
-            repo.markAllAsRead("default", "sub-99", OffsetDateTime.now(), cutoff);
+        int crossSub = repo.markAllAsRead("default", "sub-99");
         assertThat(crossSub).isZero();
 
         // Legit call sweeps only sub-1's rows in default org.
-        int affected =
-            repo.markAllAsRead("default", "sub-1", OffsetDateTime.now(), cutoff);
+        int affected = repo.markAllAsRead("default", "sub-1");
         assertThat(affected).isEqualTo(2);
 
         // sub-2's row left untouched.
@@ -465,8 +474,24 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
         r.setReadAt(OffsetDateTime.now().minusHours(1));
         repo.save(r);
 
-        OffsetDateTime cutoff = OffsetDateTime.now();
-        int affected = repo.markAllAsRead("default", "sub-1", cutoff, cutoff);
+        int affected = repo.markAllAsRead("default", "sub-1");
         assertThat(affected).isZero();
+    }
+
+    @Test
+    void currentDatabaseTimestamp_returnsRecentTimestamp() {
+        // Faz 23.5 hardening: the bulk endpoint reads cutoff from the
+        // DB clock; the helper must return a non-null timestamp that is
+        // close to "now" (within a generous skew window). Hibernate's
+        // native query mapper resolves PG `timestamptz` to Instant;
+        // the service adapts to OffsetDateTime for the wire shape, but
+        // here we assert at the Instant level the helper returns.
+        java.time.Instant dbNow = repo.currentDatabaseTimestamp();
+        assertThat(dbNow).isNotNull();
+        java.time.Instant jvmNow = java.time.Instant.now();
+        // Allow ±5 minutes for container clock skew; we only care that
+        // the value is real, not a millisecond match.
+        assertThat(java.time.Duration.between(dbNow, jvmNow).abs())
+            .isLessThan(java.time.Duration.ofMinutes(5));
     }
 }

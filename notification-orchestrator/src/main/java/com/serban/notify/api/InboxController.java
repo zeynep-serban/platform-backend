@@ -157,21 +157,29 @@ public class InboxController {
     }
 
     /**
-     * POST /api/v1/notify/inbox/me/mark-all-read — Faz 23.5 PR1.
+     * POST /api/v1/notify/inbox/me/mark-all-read — Faz 23.5 PR1
+     * + Faz 23.5 hardening (Codex thread {@code 019e03b5} AGREE
+     * iter-1; Codex thread {@code 019e03c9} REVISE iter-2 doc absorb).
      *
-     * <p>Replaces the v1 UI's N+1 mark-read loop with a single SQL UPDATE.
-     * The handler captures the server-side request-start timestamp before
-     * any work and passes it to the service as the {@code cutoff} so
-     * notifications arriving after the request landed are not collateral-
-     * marked-as-read. Idempotent: a re-call with no UNREAD rows returns
-     * {@code updatedCount: 0}.
+     * <p>Replaces the v1 UI's N+1 mark-read loop with a single SQL
+     * UPDATE. The cutoff is fully owned by the database — the
+     * service issues a native UPDATE with {@code created_at <= NOW()}
+     * in the WHERE clause and the {@link InboxService} reads back
+     * the same DB clock via {@link NotificationInboxRepository#currentDatabaseTimestamp()}
+     * (transaction-start timestamp). The controller therefore does
+     * not capture {@link OffsetDateTime#now()} or any other JVM
+     * timestamp; the JVM clock has zero authority over either side
+     * of the cutoff comparison, which keeps the action race-safe
+     * across pods regardless of NTP drift. Idempotent: a re-call
+     * with no UNREAD rows returns {@code updatedCount: 0}.
      *
-     * <p>Identity: same {@link SubscriberIdentityGuard} contract as the
-     * other "me" endpoints — caller-supplied {@code X-Subscriber-Id}
+     * <p>Identity: same {@link SubscriberIdentityGuard} contract as
+     * the other "me" endpoints — caller-supplied {@code X-Subscriber-Id}
      * must match a trusted JWT identity claim.
      *
-     * @return {@link BulkMarkAllReadResponse} echoing the affected row
-     *         count and the cutoff that was applied (audit affordance)
+     * @return {@link BulkMarkAllReadResponse} echoing the affected
+     *         row count and the DB-sourced cutoff that was applied
+     *         (audit affordance; wire shape unchanged from PR1)
      */
     @PostMapping("/me/mark-all-read")
     @ApiResponses({
@@ -183,25 +191,17 @@ public class InboxController {
         @RequestHeader(name = "X-Org-Id", required = true) @NotBlank String callerOrgId,
         @RequestHeader(name = "X-Subscriber-Id", required = true) @NotBlank String subscriberId
     ) {
-        // Codex iter on PR #97 P1 absorb: capture cutoff on the very
-        // first line of the handler so the "request-start" framing is
-        // accurate. The guard runs immediately after.
-        //
-        // Honest framing on the clock model: cutoff is set from the
-        // serving pod's JVM clock; {@code NotificationInbox.createdAt}
-        // is also JVM-clock-set on the writing pod. If multiple pods
-        // run with non-trivial clock drift (no NTP, container clock
-        // skew), a row inserted on a pod whose clock lags the cutoff
-        // window can be incorrectly bulk-marked as READ. NTP-synced
-        // clusters with sub-second drift are safe in practice; the
-        // canonical fix (DB-clock cutoff via {@code CURRENT_TIMESTAMP}
-        // in the WHERE clause AND DB-side {@code DEFAULT now()} on
-        // {@code created_at}) is tracked as a Faz 23.5 hardening
-        // follow-up; not a v1 blocker.
-        OffsetDateTime cutoff = OffsetDateTime.now();
+        // Faz 23.5 hardening (Codex thread `019e03b5`): the cutoff is
+        // now captured by the database via CURRENT_TIMESTAMP inside the
+        // same SQL statement that does the bulk UPDATE. The handler
+        // therefore no longer reads OffsetDateTime.now() — the JVM
+        // clock has zero authority on the read boundary, which makes
+        // the action race-safe across pods regardless of NTP drift.
+        // The response still echoes the cutoff timestamp for audit
+        // affordance, but it is now the DB clock value.
         subscriberIdentityGuard.requireMatchOrThrow(subscriberId);
         InboxService.BulkMarkAllReadResult result =
-            inboxService.markAllAsRead(callerOrgId, subscriberId, cutoff);
+            inboxService.markAllAsRead(callerOrgId, subscriberId);
         return ResponseEntity.ok(BulkMarkAllReadResponse.from(result));
     }
 

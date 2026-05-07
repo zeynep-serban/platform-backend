@@ -13,8 +13,13 @@ import java.time.OffsetDateTime;
  * A delivery may be {@code DELIVERED} while the inbox row stays
  * {@code UNREAD} until the subscriber opens the notification.
  *
- * <p>read_at / archived_at columns are auto-set via PostgreSQL trigger
- * (V9 migration) on state transition — entity does not enforce them.
+ * <p>created_at, read_at and archived_at are DB-authoritative (Faz 23.5
+ * hardening — Codex thread {@code 019e03b5}). The native UPDATE
+ * statements that flip {@code state} also write {@code NOW()} into the
+ * timeline columns inside the same statement, so the inbox clock is
+ * sourced exclusively from PostgreSQL — never from a JVM. The V9
+ * trigger remains as a safety net that drops the timeline markers on
+ * backward state transitions.
  *
  * <p>One row per (org_id, intent_id, subscriber_id) — UNIQUE index in DB
  * ensures idempotent insert from intent fan-out / dispatch retries.
@@ -68,16 +73,24 @@ public class NotificationInbox {
     @Column(name = "archived_at")
     private OffsetDateTime archivedAt;
 
-    @Column(name = "created_at", nullable = false)
+    /**
+     * DB-authoritative creation timestamp (Faz 23.5 hardening — Codex
+     * thread `019e03b5`). The column carries {@code DEFAULT NOW()} so
+     * every row's {@code created_at} comes from the database clock,
+     * which keeps the mark-all-read cutoff predicate race-safe across
+     * multiple pods. The application MUST NOT set this field; JPA is
+     * told not to insert or update it via {@code insertable=false,
+     * updatable=false}.
+     */
+    @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
     private OffsetDateTime createdAt;
 
     @Column(name = "expires_at")
     private OffsetDateTime expiresAt;
-
-    @PrePersist
-    void prePersist() {
-        if (createdAt == null) createdAt = OffsetDateTime.now();
-    }
+    // Faz 23.5 hardening (Codex thread `019e03b5`): no @PrePersist hook —
+    // created_at is owned by the database, not the JVM clock. Tests that
+    // need a specific created_at (e.g. "future row stays UNREAD after
+    // mark-all-read") must use raw SQL to set the column.
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
