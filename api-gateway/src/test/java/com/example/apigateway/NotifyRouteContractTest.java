@@ -58,17 +58,29 @@ class NotifyRouteContractTest {
                 .as("application.properties must declare at least one gateway route")
                 .isNotEmpty();
 
+        // Codex iter-1 PARTIAL absorb (thread 019e0423 §1): exact predicate
+        // match on `Path=/api/v1/notify/**`. The earlier `contains` check
+        // would let a narrower predicate (e.g. `Path=/api/v1/notify/inbox/**`)
+        // silently pass — that would still produce 404 on
+        // /api/v1/notify/preferences/me. Pin the exact contract.
         var notifyRoutes = routes.stream()
-                .filter(r -> r.predicate != null && r.predicate.contains("/api/v1/notify/"))
+                .filter(NotifyRouteContractTest::predicateMatchesNotifyContract)
                 .toList();
 
         assertThat(notifyRoutes)
-                .as("exactly one /api/v1/notify/** route should exist; "
+                .as("exactly one route with predicate Path=/api/v1/notify/** should exist; "
                         + "current routes: %s",
-                        routes.stream().map(r -> r.id == null ? "<null>" : r.id).toList())
+                        routes.stream().map(NotifyRouteContractTest::summarize).toList())
                 .hasSize(1);
 
         RouteSnapshot notify = notifyRoutes.get(0);
+
+        // Route id is the contract anchor across logs / Prometheus
+        // gateway_requests metric labels. Pin it.
+        assertThat(notify.id)
+                .as("notify route id must be `notification-orchestrator-v1-route`")
+                .isEqualTo("notification-orchestrator-v1-route");
+
         // URI must point at notification-orchestrator (case-insensitive — local
         // profile uses `lb://NOTIFICATION-ORCHESTRATOR`, k8s overlay overrides
         // via configmap to `http://notification-orchestrator:8089`).
@@ -78,6 +90,32 @@ class NotifyRouteContractTest {
         assertThat(notify.uri.toLowerCase(Locale.ROOT))
                 .as("notify route URI should reference notification-orchestrator: %s", notify.uri)
                 .contains("notification-orchestrator");
+    }
+
+    /**
+     * Exact contract match: the predicate must declare {@code Path=} with
+     * {@code /api/v1/notify/**} as one of its patterns. Spring Cloud Gateway
+     * stores Path predicates as the literal string
+     * {@code Path=/api/v1/notify/**} in {@code predicates[i]}, with multiple
+     * patterns comma-joined. We split on commas, strip the {@code Path=}
+     * prefix from the first chunk, and look for {@code /api/v1/notify/**}
+     * verbatim. A narrower predicate (e.g. {@code Path=/api/v1/notify/inbox/**})
+     * does NOT satisfy this contract — the route must accept the full
+     * notify surface ({@code /preferences/me}, {@code /inbox/me/stream},
+     * etc.).
+     */
+    private static boolean predicateMatchesNotifyContract(RouteSnapshot route) {
+        String predicate = route.predicate;
+        if (predicate == null || !predicate.startsWith("Path=")) return false;
+        String patterns = predicate.substring("Path=".length());
+        for (String pattern : patterns.split(",")) {
+            if (pattern.trim().equals("/api/v1/notify/**")) return true;
+        }
+        return false;
+    }
+
+    private static String summarize(RouteSnapshot r) {
+        return (r.id == null ? "<null>" : r.id) + "/" + (r.predicate == null ? "<null>" : r.predicate);
     }
 
     private static Properties loadApplicationProperties() {
