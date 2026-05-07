@@ -1,6 +1,8 @@
 package com.serban.notify.api;
 
 import com.serban.notify.config.NotifyConfig;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
@@ -55,10 +57,35 @@ public class NotifyOrgAccessGuard {
     private static final String CLAIM_ALLOWED_ORGS = "allowed_orgs";
     private static final String AUTHORITY_CROSS_ORG = "notify-deliveries-cross-org";
 
-    private final NotifyConfig.SecurityConfig securityConfig;
+    /**
+     * Faz 24 / PR-5.1 (Codex thread {@code 019e040c} PARTIAL iter-1):
+     * Micrometer counter that tracks which trusted source matched the
+     * caller's requested org. Tags are bounded — {@code org_id},
+     * {@code tenant_id}, {@code allowed_orgs}, {@code default} (config
+     * fallback), {@code cross_org_authority} (forward-compat bypass)
+     * and {@code none} (no match — also the AccessDeniedException path).
+     * The Prometheus output is
+     * {@code notify_org_access_match_total{source="..."}}; it is the
+     * authoritative cutover signal for the PR-5.5 strict env flip
+     * ({@code NOTIFY_SECURITY_DEFAULT_ORG_ID=""}). The flip is safe
+     * only when {@code source="default"} AND {@code source="none"}
+     * have been at zero for the configured observation window.
+     */
+    public static final String MATCH_METER = "notify.org.access.match";
+    public static final String SOURCE_TAG = "source";
+    public static final String SOURCE_ORG_ID = "org_id";
+    public static final String SOURCE_TENANT_ID = "tenant_id";
+    public static final String SOURCE_ALLOWED_ORGS = "allowed_orgs";
+    public static final String SOURCE_DEFAULT = "default";
+    public static final String SOURCE_CROSS_ORG = "cross_org_authority";
+    public static final String SOURCE_NONE = "none";
 
-    public NotifyOrgAccessGuard(NotifyConfig notifyConfig) {
+    private final NotifyConfig.SecurityConfig securityConfig;
+    private final MeterRegistry meterRegistry;
+
+    public NotifyOrgAccessGuard(NotifyConfig notifyConfig, MeterRegistry meterRegistry) {
         this.securityConfig = notifyConfig.security();
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -85,15 +112,25 @@ public class NotifyOrgAccessGuard {
 
         // Forward-compat cross-org bypass (v1: not seeded in catalogue)
         if (hasAuthority(auth, AUTHORITY_CROSS_ORG)) {
+            incrementMatchCounter(SOURCE_CROSS_ORG);
             return;
         }
 
         // JWT principal — resolve trusted org set
         if (auth instanceof JwtAuthenticationToken jwtAuth) {
             Jwt jwt = jwtAuth.getToken();
-            if (matchesClaim(jwt, CLAIM_ORG_ID, requestedOrgId)) return;
-            if (matchesClaim(jwt, CLAIM_TENANT_ID, requestedOrgId)) return;
-            if (matchesAllowedOrgs(jwt, requestedOrgId)) return;
+            if (matchesClaim(jwt, CLAIM_ORG_ID, requestedOrgId)) {
+                incrementMatchCounter(SOURCE_ORG_ID);
+                return;
+            }
+            if (matchesClaim(jwt, CLAIM_TENANT_ID, requestedOrgId)) {
+                incrementMatchCounter(SOURCE_TENANT_ID);
+                return;
+            }
+            if (matchesAllowedOrgs(jwt, requestedOrgId)) {
+                incrementMatchCounter(SOURCE_ALLOWED_ORGS);
+                return;
+            }
         }
 
         // Default-org fallback ONLY when requested == default (NOT a wildcard)
@@ -101,12 +138,30 @@ public class NotifyOrgAccessGuard {
         if (defaultOrgId != null
             && !defaultOrgId.isBlank()
             && requestedOrgId.equals(defaultOrgId)) {
+            incrementMatchCounter(SOURCE_DEFAULT);
             return;
         }
 
+        // Faz 24 / PR-5.1: emit `none` BEFORE throwing so the metric
+        // signal captures both legitimate AccessDeniedException paths
+        // and the "default fallback also missed" path. The cutover
+        // gate (PR-5.4 runbook) requires `source="none"` to be zero
+        // for the observation window — non-zero `none` means at least
+        // one caller is hitting the strict-403 branch under the
+        // current (legacy-permissive) config and would 403 even
+        // harder under strict mode.
+        incrementMatchCounter(SOURCE_NONE);
         throw new AccessDeniedException(
             "Caller is not authorised for org " + requestedOrgId
         );
+    }
+
+    private void incrementMatchCounter(String source) {
+        Counter.builder(MATCH_METER)
+            .description("Org access guard match distribution by trusted source")
+            .tag(SOURCE_TAG, source)
+            .register(meterRegistry)
+            .increment();
     }
 
     private boolean matchesClaim(Jwt jwt, String claimName, String requested) {

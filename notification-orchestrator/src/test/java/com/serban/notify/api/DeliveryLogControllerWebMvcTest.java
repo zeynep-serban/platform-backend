@@ -46,7 +46,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
     SecurityConfig.class,
     NotifyOrgAccessGuard.class,
     DeliveryLogControllerWebMvcTest.NotifyConfigStub.class,
-    DeliveryLogControllerWebMvcTest.JwtDecoderStub.class
+    DeliveryLogControllerWebMvcTest.JwtDecoderStub.class,
+    DeliveryLogControllerWebMvcTest.MeterRegistryStub.class
 })
 @ActiveProfiles("security-test")  // !local & !test → SecurityConfig active
 class DeliveryLogControllerWebMvcTest {
@@ -173,6 +174,21 @@ class DeliveryLogControllerWebMvcTest {
                 throw new UnsupportedOperationException(
                     "JwtDecoder not exercised; jwt() postprocessor sets the principal directly");
             };
+        }
+    }
+
+    /**
+     * Faz 24 / PR-5.1 (Codex thread `019e040c`): NotifyOrgAccessGuard
+     * now needs a MeterRegistry. WebMvcTest slices don't auto-load
+     * the actuator stack, so provide a SimpleMeterRegistry bean
+     * explicitly.
+     */
+    @TestConfiguration
+    static class MeterRegistryStub {
+        @Bean
+        @Primary
+        public io.micrometer.core.instrument.MeterRegistry testMeterRegistry() {
+            return new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
         }
     }
 }

@@ -1,6 +1,8 @@
 package com.serban.notify.api;
 
 import com.serban.notify.config.NotifyConfig;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import java.util.List;
 
@@ -21,10 +23,22 @@ final class NotifyOrgAccessGuardTestSupport {
 
     /**
      * @return a guard wired with the legacy single-tenant default-org
-     * fallback ("default") and the canonical claim list. Suitable for
-     * slice tests that don't run a real {@code SecurityContext}.
+     * fallback ("default"), the canonical claim list, and a fresh
+     * {@link SimpleMeterRegistry} (Faz 24 / PR-5.1 — Codex thread
+     * `019e040c`: the production constructor now requires a
+     * {@link MeterRegistry} for the
+     * {@code notify.org.access.match} counter). Suitable for slice
+     * tests that don't run a real {@code SecurityContext}.
      */
     static NotifyOrgAccessGuard newGuard() {
+        return newGuard(new SimpleMeterRegistry());
+    }
+
+    /**
+     * Variant that lets the caller pass its own {@link MeterRegistry}
+     * so a test can assert which {@code source=} tag was incremented.
+     */
+    static NotifyOrgAccessGuard newGuard(MeterRegistry registry) {
         NotifyConfig config = new NotifyConfig(
             new NotifyConfig.DispatchConfig(false),
             new NotifyConfig.IntakeConfig(10000),
@@ -39,6 +53,6 @@ final class NotifyOrgAccessGuardTestSupport {
                 List.of("subscriberId", "userId", "sub")
             )
         );
-        return new NotifyOrgAccessGuard(config);
+        return new NotifyOrgAccessGuard(config, registry);
     }
 }

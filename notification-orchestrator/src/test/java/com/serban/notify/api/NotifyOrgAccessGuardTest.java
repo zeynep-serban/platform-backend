@@ -1,7 +1,10 @@
 package com.serban.notify.api;
 
 import com.serban.notify.config.NotifyConfig;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
@@ -37,12 +40,35 @@ class NotifyOrgAccessGuardTest {
     private static final NotifyConfig.SecurityConfig EMPTY_SECURITY =
         new NotifyConfig.SecurityConfig("", DEFAULT_CLAIMS);
 
-    private final NotifyOrgAccessGuard guardWithDefault = guard(DEFAULT_SECURITY);
-    private final NotifyOrgAccessGuard guardWithoutDefault = guard(EMPTY_SECURITY);
+    // Faz 24 / PR-5.1: guards + registry are built per-test in a single
+    // @BeforeEach because the constructor needs the per-test
+    // MeterRegistry. Field initializers and a separate @BeforeEach
+    // would race on null state.
+    private NotifyOrgAccessGuard guardWithDefault;
+    private NotifyOrgAccessGuard guardWithoutDefault;
+    private MeterRegistry meterRegistry;
+
+    @BeforeEach
+    void setUpGuardsAndRegistry() {
+        meterRegistry = new SimpleMeterRegistry();
+        guardWithDefault = guard(DEFAULT_SECURITY);
+        guardWithoutDefault = guard(EMPTY_SECURITY);
+    }
 
     @AfterEach
     void clearSecurityContext() {
         SecurityContextHolder.clearContext();
+    }
+
+    /**
+     * Helper for the new PR-5.1 metric assertions — returns the count
+     * for the given source tag, or 0 if no counter was recorded.
+     */
+    private double matchCount(String source) {
+        var counter = meterRegistry.find(NotifyOrgAccessGuard.MATCH_METER)
+            .tag(NotifyOrgAccessGuard.SOURCE_TAG, source)
+            .counter();
+        return counter == null ? 0.0d : counter.count();
     }
 
     @Test
@@ -153,7 +179,10 @@ class NotifyOrgAccessGuardTest {
             new NotifyConfig.WorkerConfig(5000L, 25, 50, 60000L, ""),
             security
         );
-        return new NotifyOrgAccessGuard(config);
+        // Faz 24 / PR-5.1 (Codex thread `019e040c` PARTIAL iter-1):
+        // pass the per-test MeterRegistry so each test can assert
+        // which `source=` tag was incremented.
+        return new NotifyOrgAccessGuard(config, meterRegistry);
     }
 
     @Test
@@ -166,6 +195,92 @@ class NotifyOrgAccessGuardTest {
             "subscriberId", "1204"
         ));
         guardWithoutDefault.requireOrgAccessOrThrow("tenant-from-claim");
+    }
+
+    // ─── Faz 24 / PR-5.1 metric instrumentation tests (Codex 019e040c) ────
+
+    @Test
+    void metric_org_id_match_incrementsOrgIdSourceTag() {
+        // Single-tenant principal with `org_id` claim → counter
+        // must increment under source="org_id" and zero everywhere else.
+        setJwt(Map.of("org_id", "tenant-claim"));
+        guard(DEFAULT_SECURITY).requireOrgAccessOrThrow("tenant-claim");
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_ORG_ID)).isEqualTo(1.0d);
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_TENANT_ID)).isZero();
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_ALLOWED_ORGS)).isZero();
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_DEFAULT)).isZero();
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_NONE)).isZero();
+    }
+
+    @Test
+    void metric_tenant_id_match_incrementsTenantIdSourceTag() {
+        // Tenant-platform alias claim — `tenant_id` resolves when
+        // `org_id` is absent.
+        setJwt(Map.of("tenant_id", "tenant-claim"));
+        guard(DEFAULT_SECURITY).requireOrgAccessOrThrow("tenant-claim");
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_TENANT_ID)).isEqualTo(1.0d);
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_ORG_ID)).isZero();
+    }
+
+    @Test
+    void metric_allowed_orgs_match_incrementsAllowedOrgsSourceTag() {
+        // Multi-tenant operator with `allowed_orgs` array — third
+        // priority after `org_id` and `tenant_id`.
+        setJwt(Map.of("allowed_orgs", List.of("tenant-claim", "other-tenant")));
+        guard(DEFAULT_SECURITY).requireOrgAccessOrThrow("tenant-claim");
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_ALLOWED_ORGS)).isEqualTo(1.0d);
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_ORG_ID)).isZero();
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_TENANT_ID)).isZero();
+    }
+
+    @Test
+    void metric_default_fallback_incrementsDefaultSourceTag() {
+        // No claim — falls through to the configured default-org-id
+        // when requested == default. THIS IS THE METRIC THAT THE
+        // PR-5.5 STRICT CUTOVER GATE WATCHES: when this counter
+        // sits at zero for the observation window, the env flip
+        // (NOTIFY_SECURITY_DEFAULT_ORG_ID="") is safe.
+        setJwt(Map.of("subscriberId", "1204"));  // unrelated claim
+        guard(DEFAULT_SECURITY).requireOrgAccessOrThrow("default");
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_DEFAULT)).isEqualTo(1.0d);
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_NONE)).isZero();
+    }
+
+    @Test
+    void metric_cross_org_authority_incrementsCrossOrgSourceTag() {
+        // Forward-compat bypass — emitted but not seeded in v1
+        // catalogue. Still tracked so we can see if any caller
+        // ever uses it.
+        setJwt(Map.of("subscriberId", "ops-bot"), "notify-deliveries-cross-org");
+        guard(DEFAULT_SECURITY).requireOrgAccessOrThrow("any-tenant");
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_CROSS_ORG)).isEqualTo(1.0d);
+    }
+
+    @Test
+    void metric_no_match_incrementsNoneTagBeforeAccessDeniedException() {
+        // Negative path — no claim matches, default fallback also
+        // misses (requested != default). The `none` counter MUST
+        // increment BEFORE the throw so the cutover gate in PR-5.4
+        // catches the legitimate strict-403 cases. Non-zero `none`
+        // blocks the cutover.
+        setJwt(Map.of("subscriberId", "1204"));  // no org claim
+        assertThatThrownBy(() ->
+            guard(DEFAULT_SECURITY).requireOrgAccessOrThrow("foreign-tenant"))
+            .isInstanceOf(AccessDeniedException.class);
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_NONE)).isEqualTo(1.0d);
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_ORG_ID)).isZero();
+    }
+
+    @Test
+    void metric_silent_pass_does_not_increment_counter_in_slice_test() {
+        // No SecurityContext authentication — the guard silently
+        // passes (slice-test pattern). No counter should fire
+        // because there was no resolution attempt; this avoids
+        // contaminating the cutover gate with test-only traffic.
+        guard(DEFAULT_SECURITY).requireOrgAccessOrThrow("tenant-claim");
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_ORG_ID)).isZero();
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_DEFAULT)).isZero();
+        assertThat(matchCount(NotifyOrgAccessGuard.SOURCE_NONE)).isZero();
     }
 
     private void setJwt(Map<String, Object> claims, String... extraAuthorities) {
