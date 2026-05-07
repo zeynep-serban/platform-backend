@@ -191,8 +191,16 @@ notify:
   # default-org-id: requestedOrgId == defaultOrgId ise JWT claim'i aranmaksızın
   # geçer (single-tenant deployment kolaylığı). Multi-tenant'ta boş bırakılır;
   # her zaman JWT org_id / tenant_id / allowed_orgs claim'lerinden çözülür.
+  #
+  # Faz 23.5 hardening — SubscriberIdentityGuard config-driven claim list.
+  # subscriber-identity-claims: priority order; first match wins. Default
+  # legacy compat (subscriberId,userId,sub) until Keycloak emits canonical
+  # subscriberId mapper. Cutover'da operatör NOTIFY_SECURITY_SUBSCRIBER_IDENTITY_CLAIMS=subscriberId
+  # ile strict flip yapar; bu sırada notify_subscriber_identity_match_total
+  # metric'i match dağılımını ölçer.
   security:
     default-org-id: ${NOTIFY_SECURITY_DEFAULT_ORG_ID:default}
+    subscriber-identity-claims: ${NOTIFY_SECURITY_SUBSCRIBER_IDENTITY_CLAIMS:subscriberId,userId,sub}
 
 logging:
   level:

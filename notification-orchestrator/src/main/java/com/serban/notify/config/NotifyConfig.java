@@ -5,7 +5,11 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.validation.annotation.Validated;
 
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
+
+import java.util.List;
 
 /**
  * Notify config — application.yml `notify.*` keys (Faz 23.1 PR2 + ileri sub-PR'lar).
@@ -104,18 +108,41 @@ public record NotifyConfig(
     ) {}
 
     /**
-     * Faz 23.5 PR6 security knob — single-tenant default org fallback for
-     * {@code NotifyOrgAccessGuard}.
+     * Security knobs for the notification surface.
      *
-     * <p>Resolve order claim &gt; tenant &gt; allowed_orgs &gt;
-     * {@code defaultOrgId}. Default-org fallback yalnızca
-     * {@code requestedOrgId == defaultOrgId} eşitliğinde geçerli; "her org'a
-     * izin" semantiği YASAK (Codex 019e0289 iter-3 AGREE absorb).
+     * <h3>{@code defaultOrgId}</h3>
      *
-     * <p>{@code defaultOrgId} boş bırakılırsa fallback devre dışı; multi-tenant
-     * deployment'larda her zaman JWT claim'lerinden çözülmesi zorlanır.
+     * <p>Single-tenant default-org fallback for {@link
+     * com.serban.notify.api.NotifyOrgAccessGuard}. Resolve order is claim
+     * &gt; tenant &gt; allowed_orgs &gt; {@code defaultOrgId}. The default-org
+     * fallback applies <i>only</i> when {@code requestedOrgId ==
+     * defaultOrgId} — it is not a wildcard (Codex thread {@code 019e0289}
+     * iter-3 AGREE absorb). Set this to an empty string to disable the
+     * fallback in multi-tenant deployments.
+     *
+     * <h3>{@code subscriberIdentityClaims}</h3>
+     *
+     * <p>Faz 23.5 hardening (Codex thread {@code 019e0316} iter-3 AGREE):
+     * the JWT claim names {@link
+     * com.serban.notify.api.SubscriberIdentityGuard} accepts as carrying
+     * the subscriber identifier, in priority order. The default
+     * {@code [subscriberId, userId, sub]} keeps legacy tokens working
+     * while the canonical {@code subscriberId} mapper rolls out. Operators
+     * flip to {@code subscriberId} alone via
+     * {@code NOTIFY_SECURITY_SUBSCRIBER_IDENTITY_CLAIMS=subscriberId} once
+     * the metric {@code notify_subscriber_identity_match_total} shows the
+     * legacy {@code userId/sub} match rate has dropped to zero.
+     *
+     * <p>The {@link Pattern} restricts the input to the three known claim
+     * names — typos in the env override fail boot rather than silently
+     * disabling the guard, and the metric tag cardinality stays bounded
+     * at four ({@code subscriberId}, {@code userId}, {@code sub},
+     * {@code none}).
      */
     public record SecurityConfig(
-        @DefaultValue("default") String defaultOrgId
+        @DefaultValue("default") String defaultOrgId,
+        @NotEmpty
+        @DefaultValue({"subscriberId", "userId", "sub"})
+        List<@Pattern(regexp = "subscriberId|userId|sub") String> subscriberIdentityClaims
     ) {}
 }

@@ -45,7 +45,7 @@ class InboxSseControllerSliceTest {
     static class TestConfig {
         @org.springframework.context.annotation.Bean
         SubscriberIdentityGuard subscriberIdentityGuard() {
-            return new SubscriberIdentityGuard();
+            return SubscriberIdentityGuardTestSupport.newGuard();
         }
 
         @org.springframework.context.annotation.Bean

@@ -21,6 +21,22 @@ public class AuthzMeResponseDto {
     // P0 cache invalidation (CNS-20260410-001)
     private Long authzVersion;
 
+    /**
+     * Numeric canonical subscriber id (Faz 23.5 hardening — Codex thread
+     * {@code 019e0316} iter-3 AGREE absorb).
+     *
+     * <p>Set <i>only</i> when {@code userId} resolves to a numeric value
+     * (the platform's DB user id). UUID/sub fallback responses leave
+     * this {@code null} so the alias does not silently leak the drift it
+     * was created to remove.
+     *
+     * <p>The frontend should prefer this field over {@code userId} once
+     * the canonical {@code subscriberId} JWT claim ships; until then the
+     * value mirrors the numeric {@code userId} as a forward-compatible
+     * alias.
+     */
+    private Long subscriberId;
+
     public String getUserId() { return userId; }
     public void setUserId(String userId) { this.userId = userId; }
 
@@ -53,4 +69,7 @@ public class AuthzMeResponseDto {
 
     public Long getAuthzVersion() { return authzVersion; }
     public void setAuthzVersion(Long authzVersion) { this.authzVersion = authzVersion; }
+
+    public Long getSubscriberId() { return subscriberId; }
+    public void setSubscriberId(Long subscriberId) { this.subscriberId = subscriberId; }
 }

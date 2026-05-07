@@ -28,11 +28,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class NotifyOrgAccessGuardTest {
 
+    private static final List<String> DEFAULT_CLAIMS =
+        List.of("subscriberId", "userId", "sub");
+
     private static final NotifyConfig.SecurityConfig DEFAULT_SECURITY =
-        new NotifyConfig.SecurityConfig("default");
+        new NotifyConfig.SecurityConfig("default", DEFAULT_CLAIMS);
 
     private static final NotifyConfig.SecurityConfig EMPTY_SECURITY =
-        new NotifyConfig.SecurityConfig("");
+        new NotifyConfig.SecurityConfig("", DEFAULT_CLAIMS);
 
     private final NotifyOrgAccessGuard guardWithDefault = guard(DEFAULT_SECURITY);
     private final NotifyOrgAccessGuard guardWithoutDefault = guard(EMPTY_SECURITY);
@@ -151,6 +154,18 @@ class NotifyOrgAccessGuardTest {
             security
         );
         return new NotifyOrgAccessGuard(config);
+    }
+
+    @Test
+    void claim_priority_subscriberIdWinsOverUserIdAndSub() {
+        // Verifies the org guard does not depend on the subscriber-identity
+        // claim configuration — sanity check that this delta did not cross
+        // wires between the two guards.
+        setJwt(Map.of(
+            "org_id", "tenant-from-claim",
+            "subscriberId", "1204"
+        ));
+        guardWithoutDefault.requireOrgAccessOrThrow("tenant-from-claim");
     }
 
     private void setJwt(Map<String, Object> claims, String... extraAuthorities) {

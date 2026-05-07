@@ -141,6 +141,11 @@ public class AuthorizationControllerV1 {
         dto.setUserId(resolvedUser.responseUserId());
 
             Long numericUserId = resolvedUser.numericUserId();
+            // Faz 23.5 hardening (Codex thread 019e0316 iter-3 AGREE):
+            // additive `subscriberId` mirrors the numeric DB user id when
+            // resolution succeeds; UUID/sub fallbacks leave it null so the
+            // alias does not silently leak the drift it was created to fix.
+            dto.setSubscriberId(numericUserId);
 
             // Legacy permissions (backward compat)
             dto.setPermissions(resolvePermissionsSafely(jwt, numericUserId));

@@ -24,6 +24,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.when;
 
@@ -86,6 +87,9 @@ class AuthorizationControllerV1Test {
         AuthzMeResponseDto body = response.getBody();
         assertNotNull(body);
         assertEquals("15", body.getUserId());
+        // Faz 23.5 hardening — Codex thread 019e0316 iter-3 absorb:
+        // additive subscriberId mirrors the numeric userId.
+        assertEquals(15L, body.getSubscriberId());
         assertEquals(Set.of("VIEW_USERS", "MANAGE_USERS"), body.getPermissions());
         assertEquals(1, body.getAllowedScopes().size());
         assertEquals("COMPANY", body.getAllowedScopes().get(0).scopeType());
@@ -110,6 +114,10 @@ class AuthorizationControllerV1Test {
         AuthzMeResponseDto body = response.getBody();
         assertNotNull(body);
         assertEquals("2fd0e4f7-c9da-4622-b4b6-b90adab28dd4", body.getUserId());
+        // Faz 23.5 hardening — UUID fallback path leaves subscriberId
+        // null so the alias does not silently leak the drift it was
+        // created to fix (Codex thread 019e0316 iter-3 absorb).
+        assertNull(body.getSubscriberId());
         assertEquals(Set.of("VIEW_USERS"), body.getPermissions());
         assertEquals(List.of(), body.getAllowedScopes());
         assertEquals(List.of(), body.getScopes());

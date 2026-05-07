@@ -196,7 +196,7 @@ class PreferenceControllerTest {
 
         @Bean
         public SubscriberIdentityGuard subscriberIdentityGuard() {
-            return new SubscriberIdentityGuard();
+            return SubscriberIdentityGuardTestSupport.newGuard();
         }
     }
 }

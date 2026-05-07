@@ -1,5 +1,8 @@
 package com.serban.notify.api;
 
+import com.serban.notify.config.NotifyConfig;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.access.AccessDeniedException;
@@ -32,7 +35,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class SubscriberIdentityGuardTest {
 
-    private final SubscriberIdentityGuard guard = new SubscriberIdentityGuard();
+    private static final List<String> LEGACY_CLAIMS =
+        List.of("subscriberId", "userId", "sub");
+
+    private final MeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final SubscriberIdentityGuard guard = new SubscriberIdentityGuard(
+        new NotifyConfig.SecurityConfig("default", LEGACY_CLAIMS), meterRegistry);
 
     @AfterEach
     void clearSecurityContext() {
@@ -188,6 +196,84 @@ class SubscriberIdentityGuardTest {
         SecurityContextHolder.getContext().setAuthentication(upat);
 
         assertThatCode(() -> guard.requireMatchOrThrow("alice")).doesNotThrowAnyException();
+    }
+
+    // ----- Faz 23.5 hardening — Codex thread 019e0316 iter-3 absorb -----
+
+    @Test
+    void strictMode_subscriberIdOnly_rejectsLegacySubFallback() {
+        // Operator-flipped strict configuration: only the canonical
+        // `subscriberId` claim is trusted. Legacy `userId` / `sub` matches
+        // become 403 — the cutover signal.
+        SubscriberIdentityGuard strict = new SubscriberIdentityGuard(
+            new NotifyConfig.SecurityConfig("default", List.of("subscriberId")),
+            meterRegistry);
+        SecurityContextHolder.getContext().setAuthentication(
+            new JwtAuthenticationToken(newJwt("alice"), List.of(new SimpleGrantedAuthority("ROLE_USER")))
+        );
+
+        assertThatThrownBy(() -> strict.requireMatchOrThrow("alice"))
+            .isInstanceOf(AccessDeniedException.class);
+        assertThat(meterRegistry.counter(
+            SubscriberIdentityGuard.MATCH_METER, SubscriberIdentityGuard.CLAIM_TAG,
+            SubscriberIdentityGuard.NO_MATCH_TAG).count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void strictMode_subscriberIdOnly_acceptsCanonicalClaim() {
+        SubscriberIdentityGuard strict = new SubscriberIdentityGuard(
+            new NotifyConfig.SecurityConfig("default", List.of("subscriberId")),
+            meterRegistry);
+        Jwt jwt = Jwt.withTokenValue("token")
+            .header("alg", "RS256")
+            .subject("uuid-1")
+            .claim("subscriberId", "1204")
+            .issuedAt(Instant.now())
+            .expiresAt(Instant.now().plusSeconds(60))
+            .build();
+        SecurityContextHolder.getContext().setAuthentication(
+            new JwtAuthenticationToken(jwt, List.of(new SimpleGrantedAuthority("ROLE_USER")))
+        );
+
+        assertThatCode(() -> strict.requireMatchOrThrow("1204")).doesNotThrowAnyException();
+        assertThat(meterRegistry.counter(
+            SubscriberIdentityGuard.MATCH_METER, SubscriberIdentityGuard.CLAIM_TAG,
+            "subscriberId").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void counter_taggedWithMatchedClaim_legacyCompat() {
+        // Legacy default config matches via `userId` claim.
+        Jwt jwt = Jwt.withTokenValue("token")
+            .header("alg", "RS256")
+            .subject("uuid-1")
+            .claim("userId", 1204)
+            .issuedAt(Instant.now())
+            .expiresAt(Instant.now().plusSeconds(60))
+            .build();
+        SecurityContextHolder.getContext().setAuthentication(
+            new JwtAuthenticationToken(jwt, List.of(new SimpleGrantedAuthority("ROLE_USER")))
+        );
+        guard.requireMatchOrThrow("1204");
+
+        assertThat(meterRegistry.counter(
+            SubscriberIdentityGuard.MATCH_METER, SubscriberIdentityGuard.CLAIM_TAG,
+            "userId").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void counter_notIncrementedOnBlankInput() {
+        // Blank input goes to the 400 path before configured-claim
+        // resolution; the metric should ignore it.
+        Jwt jwt = newJwt("alice");
+        SecurityContextHolder.getContext().setAuthentication(
+            new JwtAuthenticationToken(jwt, List.of(new SimpleGrantedAuthority("ROLE_USER")))
+        );
+
+        assertThatThrownBy(() -> guard.requireMatchOrThrow(""))
+            .isInstanceOf(AccessDeniedException.class);
+        assertThat(meterRegistry.find(SubscriberIdentityGuard.MATCH_METER).counters())
+            .isEmpty();
     }
 
     private static Jwt newJwt(String subject) {
