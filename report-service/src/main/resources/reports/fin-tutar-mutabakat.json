@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "fin-tutar-mutabakat",
   "version": "2.0",
   "title": "Kaynak ↔ Muhasebe Tutar Mutabakatı",
@@ -185,5 +186,12 @@
     "columnRestrictions": {},
     "reportGroup": "FINANCE_REPORTS"
   },
-  "yearColumn": "ACTION_DATE"
+  "yearColumn": "ACTION_DATE",
+  "tenantBoundary": {
+    "mode": "schema",
+    "scopeType": "tenant",
+    "schemaResolver": "yearlyPartitionRotation",
+    "schemaPattern": "workcube_mikrolink_{year}_{tenantId}",
+    "reason": "Yearly partition rotation; schema name encodes year and tenant boundary"
+  }
 }

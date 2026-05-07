@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "fin-gerceklesen-maliyet",
   "version": "1.0",
   "title": "Gerçekleşen Maliyet Raporu",
@@ -7,6 +8,13 @@
   "source": "ACCOUNT_CARD_ROWS",
   "sourceSchema": "workcube_mikrolink_2026_1",
   "schemaMode": "yearly",
+  "tenantBoundary": {
+    "mode": "schema",
+    "scopeType": "tenant",
+    "schemaResolver": "yearlyPartitionRotation",
+    "schemaPattern": "workcube_mikrolink_{year}_{tenantId}",
+    "reason": "Yearly partition rotation; schema name encodes year and tenant boundary"
+  },
   "columns": [
     {
       "field": "CARD_ID",

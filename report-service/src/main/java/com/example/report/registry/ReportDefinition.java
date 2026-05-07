@@ -1,7 +1,19 @@
 package com.example.report.registry;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import java.util.List;
 
+/**
+ * Runtime model for a report registry entry.
+ *
+ * <p>Phase 2 Program 1c (2026-05-07) adds {@code contractVersion} and
+ * {@code tenantBoundary} fields to the JSON schema for build-time gate
+ * enforcement. These fields are NOT part of the runtime record (no behavior
+ * change at this layer); {@code @JsonIgnoreProperties(ignoreUnknown = true)}
+ * lets ReportRegistry continue binding 31+ migrated JSON files without
+ * forcing a record signature break.
+ */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public record ReportDefinition(
         String key,
         String version,

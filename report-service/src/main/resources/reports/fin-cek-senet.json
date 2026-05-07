@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "fin-cek-senet",
   "version": "1.0",
   "title": "Çek/Senet Takip",
@@ -8,6 +9,13 @@
   "sourceSchema": "workcube_mikrolink_1",
   "schemaMode": "yearly",
   "yearColumn": "CHEQUE_DUEDATE",
+  "tenantBoundary": {
+    "mode": "schema",
+    "scopeType": "tenant",
+    "schemaResolver": "yearlyPartitionRotation",
+    "schemaPattern": "workcube_mikrolink_{year}_{tenantId}",
+    "reason": "Yearly partition rotation; schema name encodes year and tenant boundary"
+  },
   "columns": [
     {
       "field": "CHEQUE_ID",

@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "hr-maas-raporu",
   "version": "1.0",
   "title": "Maaş Raporu",
@@ -6,6 +7,12 @@
   "category": "İnsan Kaynakları",
   "source": "EMPLOYEES_SALARY",
   "sourceSchema": "workcube_mikrolink",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "row",
+    "scopeType": "COMPANY",
+    "reason": "Row-level filter via rowFilter; tenant scoping enforced at query layer"
+  },
   "columns": [
     {
       "field": "SALARY_HISTORY_ID",

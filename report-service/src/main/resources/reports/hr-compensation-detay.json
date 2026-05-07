@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "hr-compensation-detay",
   "version": "1.0",
   "title": "Ücret Detay Raporu",
@@ -6,6 +7,13 @@
   "category": "İnsan Kaynakları",
   "sourceQuery": "SELECT epr.EMPLOYEE_ID, e.EMPLOYEE_NAME + ' ' + e.EMPLOYEE_SURNAME AS FULL_NAME, ISNULL(NULLIF(RTRIM(epr.ROW_DEPARTMENT_HEAD),''), 'Belirtilmemiş') AS DEPARTMENT_NAME, epr.POSITION_NAME, ISNULL(br.BRANCH_NAME, 'Belirtilmemiş') AS BRANCH_NAME, ISNULL(co.NICK_NAME, 'Belirtilmemiş') AS COMPANY_NAME, ISNULL(epos.COLLAR_TYPE, 0) AS COLLAR_TYPE, ISNULL(ed.SEX, -1) AS GENDER, CASE ed.LAST_SCHOOL WHEN 1 THEN 'Ilkokul' WHEN 8 THEN 'Ortaokul' WHEN 2 THEN 'Lise' WHEN 9 THEN 'Meslek Lisesi' WHEN 3 THEN 'Onlisans' WHEN 4 THEN 'Lisans' WHEN 10 THEN 'Muhendislik' WHEN 11 THEN 'Fakulte' WHEN 5 THEN 'Yuksek Lisans' WHEN 6 THEN 'Doktora' ELSE 'Belirtilmemis' END AS EDUCATION, CASE WHEN eio.START_DATE IS NOT NULL THEN CAST(DATEDIFF(DAY, eio.START_DATE, GETDATE()) / 365.25 AS DECIMAL(5,1)) ELSE NULL END AS TENURE_YEARS, CASE WHEN ei.BIRTH_DATE IS NOT NULL THEN DATEDIFF(YEAR, ei.BIRTH_DATE, GETDATE()) ELSE NULL END AS AGE, epr.SALARY AS GROSS_SALARY, epr.NET_UCRET AS NET_SALARY, (epr.SALARY + ISNULL(epr.SSK_ISVEREN_HISSESI,0) + ISNULL(epr.ISSIZLIK_ISVEREN_HISSESI,0)) AS TOTAL_EMPLOYER_COST, epr.SSK_ISVEREN_HISSESI AS SSK_EMPLOYER, epr.GELIR_VERGISI AS INCOME_TAX, ISNULL(epr.EXT_SALARY,0) AS OVERTIME_PAY, epr.KIDEM_AMOUNT AS SEVERANCE_AMOUNT, ISNULL(epos.IS_CRITICAL, 0) AS IS_CRITICAL FROM [workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS] epr WITH (NOLOCK) INNER JOIN [workcube_mikrolink].[EMPLOYEES_PUANTAJ] ep WITH (NOLOCK) ON ep.PUANTAJ_ID = epr.PUANTAJ_ID INNER JOIN [workcube_mikrolink].[EMPLOYEES] e WITH (NOLOCK) ON e.EMPLOYEE_ID = epr.EMPLOYEE_ID LEFT JOIN [workcube_mikrolink].[EMPLOYEES_IN_OUT] eio WITH (NOLOCK) ON eio.EMPLOYEE_ID = epr.EMPLOYEE_ID AND eio.FINISH_DATE IS NULL LEFT JOIN [workcube_mikrolink].[EMPLOYEE_POSITIONS] epos WITH (NOLOCK) ON epos.EMPLOYEE_ID = epr.EMPLOYEE_ID AND epos.POSITION_STATUS = 1 LEFT JOIN [workcube_mikrolink].[EMPLOYEES_DETAIL] ed WITH (NOLOCK) ON ed.EMPLOYEE_ID = epr.EMPLOYEE_ID LEFT JOIN [workcube_mikrolink].[EMPLOYEES_IDENTY] ei WITH (NOLOCK) ON ei.EMPLOYEE_ID = epr.EMPLOYEE_ID LEFT JOIN [workcube_mikrolink].[BRANCH] br WITH (NOLOCK) ON br.BRANCH_ID = ISNULL(epr.POSITION_BRANCH_ID, epos.BRANCH_ID) LEFT JOIN [workcube_mikrolink].[OUR_COMPANY] co WITH (NOLOCK) ON co.COMP_ID = br.COMPANY_ID WHERE ep.SAL_YEAR = YEAR(GETDATE()) AND ep.SAL_MON = MONTH(GETDATE()) - 1 AND epr.SALARY > 0",
   "sourceSchema": "workcube_mikrolink",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "none",
+    "scopeType": "global",
+    "schemaResolver": "sourceSchemaLiteral",
+    "reason": "Canonical reference data (no tenant scoping); access controlled via permission gates"
+  },
   "columns": [
     {
       "field": "EMPLOYEE_ID",

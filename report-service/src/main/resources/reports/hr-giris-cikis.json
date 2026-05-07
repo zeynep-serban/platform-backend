@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "hr-giris-cikis",
   "version": "1.0",
   "title": "İşe Giriş / Çıkış Raporu",
@@ -6,6 +7,12 @@
   "category": "İnsan Kaynakları",
   "source": "EMPLOYEES_IN_OUT",
   "sourceSchema": "workcube_mikrolink",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "row",
+    "scopeType": "COMPANY",
+    "reason": "Row-level filter via rowFilter; tenant scoping enforced at query layer"
+  },
   "columns": [
     {
       "field": "IN_OUT_ID",

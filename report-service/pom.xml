@@ -194,6 +194,15 @@
             <version>1.20.4</version>
             <scope>test</scope>
         </dependency>
+
+        <!-- Phase 2 Program 1c: JSON Schema validator for report-definition.schema.json
+             (build-time contract gate; production runtime path inactive — only
+             ContractValidator entry point invokes this). -->
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+            <version>1.5.4</version>
+        </dependency>
     </dependencies>
 
     <dependencyManagement>

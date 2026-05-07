@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "hr-personel-listesi",
   "version": "1.0",
   "title": "Personel Listesi",
@@ -6,6 +7,12 @@
   "category": "İnsan Kaynakları",
   "source": "EMPLOYEE_POSITIONS",
   "sourceSchema": "workcube_mikrolink",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "row",
+    "scopeType": "COMPANY",
+    "reason": "Row-level filter via rowFilter; tenant scoping enforced at query layer"
+  },
   "columns": [
     {
       "field": "POSITION_ID",

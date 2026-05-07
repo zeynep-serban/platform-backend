@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "hr-izin-raporu",
   "version": "1.0",
   "title": "İzin Raporu",
@@ -6,6 +7,12 @@
   "category": "İnsan Kaynakları",
   "source": "OFFTIME",
   "sourceSchema": "workcube_mikrolink",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "row",
+    "scopeType": "COMPANY",
+    "reason": "Row-level filter via rowFilter; tenant scoping enforced at query layer"
+  },
   "columns": [
     {
       "field": "OFFTIME_ID",

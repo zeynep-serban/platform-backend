@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "fin-muhasebe-fisleri",
   "version": "1.0",
   "title": "Muhasebe Fişleri",
@@ -8,6 +9,13 @@
   "sourceSchema": "workcube_mikrolink_2026_1",
   "schemaMode": "yearly",
   "yearColumn": "ACTION_DATE",
+  "tenantBoundary": {
+    "mode": "schema",
+    "scopeType": "tenant",
+    "schemaResolver": "yearlyPartitionRotation",
+    "schemaPattern": "workcube_mikrolink_{year}_{tenantId}",
+    "reason": "Yearly partition rotation; schema name encodes year and tenant boundary"
+  },
   "columns": [
     {
       "field": "CARD_ID",

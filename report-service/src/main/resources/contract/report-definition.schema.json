@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform.example.com/schemas/report-definition.schema.json",
+  "title": "Report Definition Contract",
+  "description": "Phase 2 Program 1c — Strict registry contract for report-service report definitions. All 31+ reports must validate against this schema before semantic RC rules execute. additionalProperties: false locks vocabulary; field names mirror runtime ReportDefinition record (Codex iter-1 absorb — no UI vocabulary rewrite in this PR).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "key",
+    "version",
+    "title",
+    "category",
+    "tenantBoundary",
+    "schemaMode",
+    "columns"
+  ],
+  "anyOf": [
+    {"required": ["source"]},
+    {"required": ["sourceQuery"]}
+  ],
+  "properties": {
+    "contractVersion": {
+      "description": "Schema migration signal. v1 = Phase 2 Program 1c baseline.",
+      "type": "integer",
+      "enum": [1]
+    },
+    "key": {
+      "description": "Unique slug identifier (e.g. fin-cari-hareketler). Used as registry path.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+      "minLength": 2,
+      "maxLength": 80
+    },
+    "version": {
+      "description": "Semantic version string (e.g. 1.0).",
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+(\\.\\d+)?$"
+    },
+    "title": {
+      "description": "User-facing display name (Turkish OK).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "description": {
+      "description": "Optional human-readable description.",
+      "type": "string",
+      "maxLength": 1000
+    },
+    "category": {
+      "description": "Domain bucket (Finans / Satış / İnsan Kaynakları / etc.).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "source": {
+      "description": "Table/view name (alternative to sourceQuery).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "sourceSchema": {
+      "description": "MSSQL schema name (workcube_mikrolink, workcube_mikrolink_<tenantId>, workcube_mikrolink_<year>_<tenantId>).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "schemaMode": {
+      "description": "Schema resolution mode. 'yearly' triggers yearly partition rotation (yearColumn required); 'static' uses sourceSchema literally; 'current'/'canonical' reserved for Phase 2 Program 8 schema-truth integration.",
+      "type": "string",
+      "enum": ["yearly", "current", "canonical", "static"]
+    },
+    "yearColumn": {
+      "description": "Column used for yearly partition routing (required when schemaMode=yearly).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "sourceQuery": {
+      "description": "Custom SQL (alternative to source). Must contain {schema} placeholder for schema-truth substitution.",
+      "type": "string",
+      "minLength": 1
+    },
+    "columns": {
+      "description": "Column definitions (matches runtime ColumnDefinition record).",
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/ColumnDefinition"}
+    },
+    "defaultSort": {
+      "description": "Optional default sort column (must match a column field).",
+      "type": "string",
+      "minLength": 1
+    },
+    "defaultSortDirection": {
+      "description": "Default sort direction. Must be uppercase ASC/DESC (runtime is case-sensitive).",
+      "type": "string",
+      "enum": ["ASC", "DESC"]
+    },
+    "access": {"$ref": "#/$defs/AccessConfig"},
+    "tenantBoundary": {"$ref": "#/$defs/TenantBoundary"}
+  },
+  "$defs": {
+    "ColumnDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "headerName", "type"],
+      "properties": {
+        "field": {
+          "description": "SQL column name (must match source query result set).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "headerName": {
+          "description": "User-facing header text.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "type": {
+          "description": "Display type. Repo-wide inventory: text/number/date.",
+          "type": "string",
+          "enum": ["text", "number", "date"]
+        },
+        "width": {
+          "description": "Default column width in pixels.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "sensitive": {
+          "description": "When true, column masked unless user holds the report's sensitive-column grant.",
+          "type": "boolean"
+        },
+        "groupable": {
+          "description": "PR-0.2: AG Grid SSRM row-group dimension candidate.",
+          "type": "boolean"
+        },
+        "aggregatable": {
+          "description": "PR-0.2: AG Grid SSRM valueCols candidate.",
+          "type": "boolean"
+        },
+        "defaultAggFunc": {
+          "description": "PR-0.2: default aggregation function (sum/avg/min/max/count). null → sum for numeric, count otherwise.",
+          "type": ["string", "null"],
+          "enum": ["sum", "avg", "min", "max", "count", null]
+        }
+      }
+    },
+    "AccessConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "permission": {
+          "description": "Permission key gating report access.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "reportGroup": {
+          "description": "Logical access group identifier.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "columnRestrictions": {
+          "description": "Map of permission → list of restricted columns.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "rowFilter": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "column": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "scopeType": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "bypassPermission": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": ["column", "scopeType"]
+        }
+      }
+    },
+    "TenantBoundary": {
+      "description": "Phase 2 Program 1c — declarative tenant isolation boundary. Cross-field semantics (boundary mode ↔ schemaMode coupling) enforced by RC-XXX semantic rules; this schema only locks shape.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "scopeType", "reason"],
+      "properties": {
+        "mode": {
+          "description": "Isolation enforcement layer. 'schema' = schema-name-based (yearly/current); 'row' = row-level filter via rowFilter; 'none' = no tenant scoping (reserved — must justify in reason).",
+          "type": "string",
+          "enum": ["schema", "row", "none"]
+        },
+        "scopeType": {
+          "description": "Logical scope category. Examples: 'tenant', 'company', 'subscriber', 'global'.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "schemaResolver": {
+          "description": "Optional resolver hint (e.g. 'sourceSchemaLiteral', 'yearlyPartitionRotation', 'schemaTruthCanonical'). Build-time documentation only.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "schemaPattern": {
+          "description": "Optional schema-name template (e.g. 'workcube_mikrolink_{tenantId}', 'workcube_mikrolink_{year}_{tenantId}').",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "reason": {
+          "description": "Mandatory audit trail: why this boundary was chosen. Min 10 chars to discourage placeholder values.",
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 500
+        }
+      }
+    }
+  }
+}

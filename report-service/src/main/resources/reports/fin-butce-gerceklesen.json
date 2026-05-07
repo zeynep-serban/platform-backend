@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "fin-butce-gerceklesen",
   "version": "1.0",
   "title": "Bütçe vs Gerçekleşen",
@@ -6,7 +7,13 @@
   "category": "Finans",
   "source": "BUDGET_PLAN_ROW",
   "sourceSchema": "workcube_mikrolink",
-  "schemaMode": "standard",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "none",
+    "scopeType": "global",
+    "schemaResolver": "sourceSchemaLiteral",
+    "reason": "Canonical reference data (no tenant scoping); access controlled via permission gates"
+  },
   "columns": [
     {
       "field": "BUDGET_PLAN_ROW_ID",
@@ -91,7 +98,6 @@
   "access": {
     "permission": "REPORT_VIEW",
     "columnRestrictions": {},
-    "rowFilter": {},
     "reportGroup": "FINANCE_REPORTS"
   }
 }

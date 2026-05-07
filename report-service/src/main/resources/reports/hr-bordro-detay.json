@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "hr-bordro-detay",
   "version": "1.0",
   "title": "Bordro Detay Raporu",
@@ -6,6 +7,12 @@
   "category": "İnsan Kaynakları",
   "source": "EMPLOYEES_PUANTAJ_ROWS",
   "sourceSchema": "workcube_mikrolink",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "row",
+    "scopeType": "COMPANY",
+    "reason": "Row-level filter via rowFilter; tenant scoping enforced at query layer"
+  },
   "columns": [
     {
       "field": "EMPLOYEE_PUANTAJ_ID",

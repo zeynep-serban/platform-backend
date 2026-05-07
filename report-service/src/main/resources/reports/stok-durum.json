@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "stok-durum",
   "version": "1.0",
   "title": "Sipariş Kalem Raporu",
@@ -6,6 +7,14 @@
   "category": "Satış",
   "source": "ORDER_ROW",
   "sourceSchema": "workcube_mikrolink_1",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "schema",
+    "scopeType": "tenant",
+    "schemaResolver": "sourceSchemaLiteral",
+    "schemaPattern": "workcube_mikrolink_{tenantId}",
+    "reason": "Tenant-scoped via literal sourceSchema suffix; no yearly rotation needed"
+  },
   "columns": [
     {
       "field": "ORDER_ID",

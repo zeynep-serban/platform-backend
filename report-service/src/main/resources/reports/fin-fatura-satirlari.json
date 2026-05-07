@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "fin-fatura-satirlari",
   "version": "1.0",
   "title": "Fatura Satır Detayları",
@@ -7,6 +8,13 @@
   "source": "INVOICE_ROW",
   "sourceSchema": "workcube_mikrolink_2026_1",
   "schemaMode": "yearly",
+  "tenantBoundary": {
+    "mode": "schema",
+    "scopeType": "tenant",
+    "schemaResolver": "yearlyPartitionRotation",
+    "schemaPattern": "workcube_mikrolink_{year}_{tenantId}",
+    "reason": "Yearly partition rotation; schema name encodes year and tenant boundary"
+  },
   "sourceQuery": "SELECT IR.INVOICE_ROW_ID, IR.INVOICE_ID, IR.NAME_PRODUCT, IR.DESCRIPTION, IR.AMOUNT AS MIKTAR, IR.UNIT, IR.PRICE AS BIRIM_FIYAT, IR.COST_PRICE AS MALIYET_FIYAT, IR.DISCOUNT1, IR.DISCOUNT2, IR.DISCOUNTTOTAL AS ISKONTO_TOPLAM, IR.NETTOTAL AS NET_TUTAR, IR.TAXTOTAL AS KDV_TUTAR, IR.TAX AS KDV_ORAN, IR.GROSSTOTAL AS BRUT_TUTAR, IR.MARGIN AS KAR_MARJI, IR.OTHER_MONEY AS DOVIZ, IR.OTHER_MONEY_VALUE AS DOVIZ_TUTAR, IR.OTHER_MONEY_GROSS_TOTAL AS DOVIZ_BRUT, IR.LOT_NO, IR.ROW_ACC_CODE AS HESAP_KODU, IR.ROW_PROJECT_ID, IR.DELIVER_DATE, I.INVOICE_NUMBER, I.SERIAL_NUMBER, I.INVOICE_DATE, I.INVOICE_CAT, I.PURCHASE_SALES, I.COMPANY_ID, CASE I.INVOICE_CAT WHEN 56 THEN 'Alis' WHEN 59 THEN 'Satis' WHEN 57 THEN 'Alis Iade' WHEN 60 THEN 'Satis Iade' ELSE 'Diger' END AS FATURA_TIPI, C.FULLNAME AS CARI_ADI, P.PROJECT_HEAD AS PROJE_ADI FROM [{schema}].[INVOICE_ROW] IR WITH (NOLOCK) LEFT JOIN [{schema}].[INVOICE] I WITH (NOLOCK) ON I.INVOICE_ID = IR.INVOICE_ID LEFT JOIN [workcube_mikrolink].[COMPANY] C WITH (NOLOCK) ON C.COMPANY_ID = I.COMPANY_ID LEFT JOIN [workcube_mikrolink].[PRO_PROJECTS] P WITH (NOLOCK) ON P.PROJECT_ID = IR.ROW_PROJECT_ID",
   "columns": [
     {

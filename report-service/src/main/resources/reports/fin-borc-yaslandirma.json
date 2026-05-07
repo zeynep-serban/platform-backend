@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "key": "fin-borc-yaslandirma",
   "version": "1.0",
   "title": "Borç Yaşlandırma Analizi",
@@ -7,6 +8,13 @@
   "source": "COMPANY_REMAINDER",
   "sourceSchema": "workcube_mikrolink_1",
   "schemaMode": "yearly",
+  "tenantBoundary": {
+    "mode": "schema",
+    "scopeType": "tenant",
+    "schemaResolver": "yearlyPartitionRotation",
+    "schemaPattern": "workcube_mikrolink_{year}_{tenantId}",
+    "reason": "Yearly partition rotation; schema name encodes year and tenant boundary"
+  },
   "columns": [
     {
       "field": "COMPANY_ID",
