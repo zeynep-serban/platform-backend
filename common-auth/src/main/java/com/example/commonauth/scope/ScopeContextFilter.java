@@ -15,29 +15,31 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 
 /**
  * Servlet filter that populates {@link ScopeContextHolder} on every request.
  *
  * Production (openfga.enabled=true):
- *   JWT → extract userId → OpenFGA listObjects → ScopeContext
+ *   JWT → extract userId → {@link OpenFgaScopeReader} → ScopeContext
  *
  * Dev/permitAll (openfga.enabled=false):
  *   YAML config → ScopeContext with static dev scope IDs
  *
  * Always clears the context after the request completes (finally block).
+ *
+ * <p>Codex thread 019e0891 iter-2 AGREE absorb (PR-BE-10 Phase 3): the
+ * OpenFGA fetch logic was extracted into {@link OpenFgaScopeReader} so
+ * permission-service controllers (which do NOT register this filter)
+ * can read the same authoritative scope view via the same parallel
+ * fetch + cache + relation map.
  */
 public class ScopeContextFilter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(ScopeContextFilter.class);
 
-    private final OpenFgaAuthzService authzService;
     private final OpenFgaProperties properties;
     private final AuthenticatedUserLookupService authenticatedUserLookupService;
-    private final ScopeContextCache scopeContextCache;
-    private final AuthzVersionProvider versionProvider;
+    private final OpenFgaScopeReader scopeReader;
 
     public ScopeContextFilter(OpenFgaAuthzService authzService, OpenFgaProperties properties) {
         this(authzService, properties, null, null, null);
@@ -54,11 +56,10 @@ public class ScopeContextFilter extends OncePerRequestFilter {
                               AuthenticatedUserLookupService authenticatedUserLookupService,
                               ScopeContextCache scopeContextCache,
                               AuthzVersionProvider versionProvider) {
-        this.authzService = authzService;
         this.properties = properties;
         this.authenticatedUserLookupService = authenticatedUserLookupService;
-        this.scopeContextCache = scopeContextCache;
-        this.versionProvider = versionProvider;
+        this.scopeReader = new OpenFgaScopeReader(
+                authzService, properties, scopeContextCache, versionProvider);
     }
 
     @Override
@@ -88,67 +89,18 @@ public class ScopeContextFilter extends OncePerRequestFilter {
             return ScopeContext.empty(null);
         }
 
-        // P0: Cache lookup — avoid 5 OpenFGA calls on repeat requests
-        if (scopeContextCache != null && scopeContextCache.isEnabled() && versionProvider != null) {
-            long version = versionProvider.getCurrentVersion();
-            String cacheKey = ScopeContextCache.cacheKey(
-                    userId, version, properties.getStoreId(), properties.getModelId());
-            ScopeContext cached = scopeContextCache.get(cacheKey);
-            if (cached != null) {
-                log.debug("ScopeContext cache HIT for user:{}", userId);
-                return cached;
-            }
-            try {
-                ScopeContext ctx = fetchScopeFromOpenFga(userId);
-                scopeContextCache.put(cacheKey, ctx);
-                return ctx;
-            } catch (Exception e) {
-                log.error("Failed to build ScopeContext from OpenFGA for user {}, falling back to dev scope", userId, e);
-                return buildDevScopeContext();
-            }
-        }
-
+        // OpenFgaScopeReader handles cache + parallel fetch internally
+        // and propagates exceptions; preserve the pre-PR-BE-10
+        // ScopeContextFilter contract: production OpenFGA fail → dev
+        // scope fallback (NOT empty), so a misconfigured/outage cluster
+        // still serves the dev YAML scope rather than failing all
+        // requests with empty scope.
         try {
-            return fetchScopeFromOpenFga(userId);
+            return scopeReader.readScopeContext(userId);
         } catch (Exception e) {
             log.error("Failed to build ScopeContext from OpenFGA for user {}, falling back to dev scope", userId, e);
             return buildDevScopeContext();
         }
-    }
-
-    /**
-     * Fetch scope from OpenFGA — all 5 calls run in PARALLEL (SK-2 optimization).
-     * Previous sequential execution: 5 × 6-8ms = 30-40ms.
-     * Parallel execution: max(6-8ms) = 6-8ms (75% reduction on cache miss).
-     */
-    private ScopeContext fetchScopeFromOpenFga(String userId) {
-        // Codex thread 019e0891 iter-2 AGREE absorb (2026-05-08 PR-BE-9 Phase 2):
-        // Faz 21.3 ADR-0008 "explicit-scope contract" canonical model uses
-        // `viewer: [user]` for branch (and warehouse/company/project). Previous
-        // code read `member` for branch — relation undefined in the canonical
-        // model, so the listObjects call returned empty and any user with
-        // branch scope appeared scope-less to ScopeContextHolder. Realigning
-        // all four object types on `viewer` matches what TupleSyncService
-        // (line ~158-171) writes after PR-BE-9 Phase 1.
-        var companyFuture = CompletableFuture.supplyAsync(
-                () -> authzService.listObjectIds(userId, "viewer", "company"));
-        var projectFuture = CompletableFuture.supplyAsync(
-                () -> authzService.listObjectIds(userId, "viewer", "project"));
-        var warehouseFuture = CompletableFuture.supplyAsync(
-                () -> authzService.listObjectIds(userId, "viewer", "warehouse"));
-        var branchFuture = CompletableFuture.supplyAsync(
-                () -> authzService.listObjectIds(userId, "viewer", "branch"));
-        var adminFuture = CompletableFuture.supplyAsync(
-                () -> authzService.check(userId, "admin", "organization", "default"));
-
-        CompletableFuture.allOf(companyFuture, projectFuture, warehouseFuture, branchFuture, adminFuture).join();
-
-        boolean isSuperAdmin = adminFuture.join();
-        if (isSuperAdmin) {
-            return ScopeContext.superAdmin(userId);
-        }
-        return new ScopeContext(userId, companyFuture.join(), projectFuture.join(),
-                warehouseFuture.join(), branchFuture.join(), false);
     }
 
     private ScopeContext buildDevScopeContext() {
