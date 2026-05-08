@@ -46,12 +46,26 @@ spring:
     schemas: ${NOTIFY_DB_SCHEMA:notify}
     locations: classpath:db/migration
   # Faz 23.2 PR-D.3.x: Spring Security re-introduced.
-  # JWT issuer-uri = Keycloak realm `serban`. Test/local override via env.
-  security:
-    oauth2:
-      resourceserver:
-        jwt:
-          issuer-uri: ${SECURITY_JWT_ISSUER_URI:http://localhost:8081/realms/serban}
+  # Faz 23.6 hardening (2026-05-08): JWT decoder is built by the
+  # custom `@Bean public JwtDecoder jwtDecoder()` in
+  # {@link com.serban.notify.config.SecurityConfig}. That bean uses
+  # {@code NimbusJwtDecoder.withJwkSetUri()} so no auto-discovery
+  # network call is made (the previous Spring Boot auto-config
+  # picked `withIssuerLocation()` and timed out against the public
+  # Keycloak URL inside the cluster). The bean also adds an explicit
+  # {@code JwtValidators.createDefaultWithIssuer()} validator so
+  # issuer claim assertion is preserved.
+  #
+  # Spring Boot auto-config is intentionally NOT given any
+  # `spring.security.oauth2.resourceserver.jwt.*` keys here so that
+  # `OAuth2ResourceServerJwtConfiguration` short-circuits on the
+  # `@ConditionalOnMissingBean(JwtDecoder.class)` guard. Adding keys
+  # back would silently shadow the custom bean's validator chain —
+  # don't do it. The corresponding env vars
+  # (`SECURITY_JWT_JWK_SET_URI`, `SECURITY_JWT_ISSUER`,
+  # `SECURITY_JWT_AUDIENCE`, `SECURITY_AUTH_ALLOWED_CLIENT_IDS`)
+  # are read directly by the bean from {@code Environment}, mirroring
+  # permission-service / api-gateway.
 
 server:
   port: ${SERVER_PORT:8089}
