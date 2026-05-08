@@ -138,11 +138,38 @@ public record NotifyConfig(
      * disabling the guard, and the metric tag cardinality stays bounded
      * at four ({@code subscriberId}, {@code userId}, {@code sub},
      * {@code none}).
+     *
+     * <h3>{@code subscriberIdentityStrict}</h3>
+     *
+     * <p>Faz 23.6 PR-5.5 cutover toggle (Codex thread {@code 019e07d6}
+     * iter-1 PARTIAL absorb). When {@code true} the {@link
+     * com.serban.notify.api.SubscriberIdentityGuard} fail-closes for
+     * requests that arrive without an authenticated JWT principal —
+     * either no {@link org.springframework.security.core.Authentication}
+     * in the {@code SecurityContextHolder} at all, or a non-{@code Jwt}
+     * principal (anonymous, username/password). Default {@code false}
+     * preserves the legacy silent-pass branch that {@code @WebMvcTest
+     * (addFilters = false)} slice tests rely on; production overlays
+     * flip the env to {@code true} once the upstream filter chain is
+     * confirmed to inject a {@code JwtAuthenticationToken} on every
+     * route the guard protects.
      */
     public record SecurityConfig(
         @DefaultValue("default") String defaultOrgId,
         @NotEmpty
         @DefaultValue({"subscriberId", "userId", "sub"})
-        List<@Pattern(regexp = "subscriberId|userId|sub") String> subscriberIdentityClaims
-    ) {}
+        List<@Pattern(regexp = "subscriberId|userId|sub") String> subscriberIdentityClaims,
+        @DefaultValue("false") boolean subscriberIdentityStrict
+    ) {
+        // Codex iter-1 absorb originally suggested a two-arg overload to
+        // keep legacy test fixtures compiling unchanged, but adding a
+        // second public constructor on a record breaks Spring Boot's
+        // @ConfigurationProperties auto-binding (the binder cannot pick
+        // a canonical constructor when two are visible and Boot 3.x
+        // record binding rejects the prefix with `Field error ... on
+        // field 'security': rejected value [null]`). The CI Testcontainers
+        // PG test caught this on PR #126 head 2f51f7d. Fix: drop the
+        // overload, update every test fixture to the three-arg form
+        // (passing `false` to preserve legacy silent-pass behaviour).
+    }
 }

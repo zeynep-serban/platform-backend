@@ -50,7 +50,8 @@ final class NotifyOrgAccessGuardTestSupport {
             new NotifyConfig.WorkerConfig(5000L, 25, 50, 60000L, ""),
             new NotifyConfig.SecurityConfig(
                 "default",
-                List.of("subscriberId", "userId", "sub")
+                List.of("subscriberId", "userId", "sub"),
+                false
             )
         );
         return new NotifyOrgAccessGuard(config, registry);

@@ -40,7 +40,7 @@ class SubscriberIdentityGuardTest {
 
     private final MeterRegistry meterRegistry = new SimpleMeterRegistry();
     private final SubscriberIdentityGuard guard = new SubscriberIdentityGuard(
-        new NotifyConfig.SecurityConfig("default", LEGACY_CLAIMS), meterRegistry);
+        new NotifyConfig.SecurityConfig("default", LEGACY_CLAIMS, false), meterRegistry);
 
     @AfterEach
     void clearSecurityContext() {
@@ -206,7 +206,7 @@ class SubscriberIdentityGuardTest {
         // `subscriberId` claim is trusted. Legacy `userId` / `sub` matches
         // become 403 — the cutover signal.
         SubscriberIdentityGuard strict = new SubscriberIdentityGuard(
-            new NotifyConfig.SecurityConfig("default", List.of("subscriberId")),
+            new NotifyConfig.SecurityConfig("default", List.of("subscriberId"), false),
             meterRegistry);
         SecurityContextHolder.getContext().setAuthentication(
             new JwtAuthenticationToken(newJwt("alice"), List.of(new SimpleGrantedAuthority("ROLE_USER")))
@@ -222,7 +222,7 @@ class SubscriberIdentityGuardTest {
     @Test
     void strictMode_subscriberIdOnly_acceptsCanonicalClaim() {
         SubscriberIdentityGuard strict = new SubscriberIdentityGuard(
-            new NotifyConfig.SecurityConfig("default", List.of("subscriberId")),
+            new NotifyConfig.SecurityConfig("default", List.of("subscriberId"), false),
             meterRegistry);
         Jwt jwt = Jwt.withTokenValue("token")
             .header("alg", "RS256")
@@ -273,6 +273,106 @@ class SubscriberIdentityGuardTest {
         assertThatThrownBy(() -> guard.requireMatchOrThrow(""))
             .isInstanceOf(AccessDeniedException.class);
         assertThat(meterRegistry.find(SubscriberIdentityGuard.MATCH_METER).counters())
+            .isEmpty();
+    }
+
+    // ----- Faz 23.6 PR-5.5 strict cutover — Codex thread 019e07d6 iter-1 absorb -----
+
+    @Test
+    void strictMode_noAuthentication_throwsAccessDeniedAndIncrementsDeniedCounter() {
+        // Production cutover (NOTIFY_SECURITY_SUBSCRIBER_IDENTITY_STRICT=true):
+        // an empty SecurityContext on a /api/v1/notify/** route is a
+        // configuration error or an attempted bypass. Fail-closed and
+        // surface a denial counter for the cutover dashboard.
+        SubscriberIdentityGuard strict = new SubscriberIdentityGuard(
+            new NotifyConfig.SecurityConfig("default", LEGACY_CLAIMS, true),
+            meterRegistry);
+        SecurityContextHolder.clearContext();
+
+        assertThatThrownBy(() -> strict.requireMatchOrThrow("alice"))
+            .isInstanceOf(AccessDeniedException.class)
+            .hasMessageContaining("no authenticated principal");
+        assertThat(meterRegistry.counter(
+            SubscriberIdentityGuard.DENIED_METER,
+            SubscriberIdentityGuard.REASON_TAG,
+            SubscriberIdentityGuard.DENY_NO_AUTH).count()).isEqualTo(1.0);
+        // Match metric must NOT be touched — these are separate dimensions.
+        assertThat(meterRegistry.find(SubscriberIdentityGuard.MATCH_METER).counters())
+            .isEmpty();
+    }
+
+    @Test
+    void strictMode_anonymousAuthentication_throwsAccessDeniedAndIncrementsDeniedCounter() {
+        SubscriberIdentityGuard strict = new SubscriberIdentityGuard(
+            new NotifyConfig.SecurityConfig("default", LEGACY_CLAIMS, true),
+            meterRegistry);
+        AnonymousAuthenticationToken anon = new AnonymousAuthenticationToken(
+            "key",
+            "anonymousUser",
+            List.of(new SimpleGrantedAuthority("ROLE_ANONYMOUS"))
+        );
+        SecurityContextHolder.getContext().setAuthentication(anon);
+
+        assertThatThrownBy(() -> strict.requireMatchOrThrow("alice"))
+            .isInstanceOf(AccessDeniedException.class)
+            .hasMessageContaining("non-JWT principal");
+        assertThat(meterRegistry.counter(
+            SubscriberIdentityGuard.DENIED_METER,
+            SubscriberIdentityGuard.REASON_TAG,
+            SubscriberIdentityGuard.DENY_NON_JWT).count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void strictMode_usernamePasswordPrincipal_throwsAccessDeniedAndIncrementsDeniedCounter() {
+        SubscriberIdentityGuard strict = new SubscriberIdentityGuard(
+            new NotifyConfig.SecurityConfig("default", LEGACY_CLAIMS, true),
+            meterRegistry);
+        UsernamePasswordAuthenticationToken upat = new UsernamePasswordAuthenticationToken(
+            "alice", "irrelevant", List.of(new SimpleGrantedAuthority("ROLE_USER"))
+        );
+        SecurityContextHolder.getContext().setAuthentication(upat);
+
+        assertThatThrownBy(() -> strict.requireMatchOrThrow("alice"))
+            .isInstanceOf(AccessDeniedException.class)
+            .hasMessageContaining("non-JWT principal");
+        assertThat(meterRegistry.counter(
+            SubscriberIdentityGuard.DENIED_METER,
+            SubscriberIdentityGuard.REASON_TAG,
+            SubscriberIdentityGuard.DENY_NON_JWT).count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void strictMode_jwtPrincipalWithMatch_passesAndDoesNotTouchDeniedCounter() {
+        // Regression: strict mode must not break the happy path. JWT
+        // present with a matching claim → silent pass + match counter
+        // increments as before, denied counter untouched.
+        SubscriberIdentityGuard strict = new SubscriberIdentityGuard(
+            new NotifyConfig.SecurityConfig("default", LEGACY_CLAIMS, true),
+            meterRegistry);
+        SecurityContextHolder.getContext().setAuthentication(
+            new JwtAuthenticationToken(newJwt("alice"), List.of(new SimpleGrantedAuthority("ROLE_USER")))
+        );
+
+        assertThatCode(() -> strict.requireMatchOrThrow("alice")).doesNotThrowAnyException();
+        assertThat(meterRegistry.find(SubscriberIdentityGuard.DENIED_METER).counters())
+            .isEmpty();
+        assertThat(meterRegistry.counter(
+            SubscriberIdentityGuard.MATCH_METER, SubscriberIdentityGuard.CLAIM_TAG,
+            "sub").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void legacyMode_subscriberIdentityStrictExplicitFalseKeepsSilentPass() {
+        // The legacy slice / @WebMvcTest(addFilters=false) suite relies on
+        // the silent-pass branch staying active when strict is false.
+        // The denied counter must never appear in this path.
+        SubscriberIdentityGuard legacy = new SubscriberIdentityGuard(
+            new NotifyConfig.SecurityConfig("default", LEGACY_CLAIMS, false),
+            meterRegistry);
+        SecurityContextHolder.clearContext();
+
+        assertThatCode(() -> legacy.requireMatchOrThrow("alice")).doesNotThrowAnyException();
+        assertThat(meterRegistry.find(SubscriberIdentityGuard.DENIED_METER).counters())
             .isEmpty();
     }
 

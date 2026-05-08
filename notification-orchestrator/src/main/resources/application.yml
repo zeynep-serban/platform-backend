@@ -215,6 +215,18 @@ notify:
   security:
     default-org-id: ${NOTIFY_SECURITY_DEFAULT_ORG_ID:default}
     subscriber-identity-claims: ${NOTIFY_SECURITY_SUBSCRIBER_IDENTITY_CLAIMS:subscriberId,userId,sub}
+    # Faz 23.6 PR-5.5 strict cutover — Codex thread `019e07d6` iter-1
+    # absorb. When `true`, SubscriberIdentityGuard fail-closes for
+    # requests that arrive without an authenticated JWT principal
+    # (no Authentication in SecurityContextHolder, or principal that
+    # is not a Jwt — anonymous, username/password). Default `false`
+    # preserves the legacy silent-pass branch that
+    # @WebMvcTest(addFilters=false) slice tests rely on; production
+    # overlays flip the env to `true` once the upstream filter chain
+    # is confirmed to inject a JwtAuthenticationToken on every route
+    # the guard protects. Strict-mode denials surface on the new
+    # `notify_subscriber_identity_denied_total{reason=...}` counter.
+    subscriber-identity-strict: ${NOTIFY_SECURITY_SUBSCRIBER_IDENTITY_STRICT:false}
 
 logging:
   level:

@@ -159,8 +159,7 @@ class DeliveryLogControllerWebMvcTest {
                 new NotifyConfig.AuditConfig(90, false, "0 0 2 * * *", 24, false, 3, true),
                 new NotifyConfig.RedactionConfig("test-pepper"),
                 new NotifyConfig.WorkerConfig(5000L, 25, 50, 60000L, ""),
-                new NotifyConfig.SecurityConfig(
-                    "default", java.util.List.of("subscriberId", "userId", "sub"))
+                new NotifyConfig.SecurityConfig("default", java.util.List.of("subscriberId", "userId", "sub"), false)
             );
         }
     }

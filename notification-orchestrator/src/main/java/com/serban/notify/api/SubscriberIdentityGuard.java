@@ -67,6 +67,26 @@ public class SubscriberIdentityGuard {
     /** Tag value used when the configured claim list has no match. */
     public static final String NO_MATCH_TAG = "none";
 
+    /**
+     * PR-5.5 strict cutover counter (Codex thread {@code 019e07d6} iter-1
+     * absorb). Reports fail-closed denials caused by the new strict mode
+     * boundary. Kept separate from {@link #MATCH_METER} so the
+     * {@code claim} tag cardinality (subscriberId/userId/sub/none) stays
+     * bounded — match distribution and strict-deny reasons are different
+     * dimensions and rolling them into one counter would muddy both
+     * dashboards.
+     */
+    public static final String DENIED_METER = "notify.subscriber.identity.denied";
+
+    /** Tag name on the denied counter. */
+    public static final String REASON_TAG = "reason";
+
+    /** Strict mode denial: no Authentication in the SecurityContextHolder. */
+    public static final String DENY_NO_AUTH = "no_auth";
+
+    /** Strict mode denial: principal is not a Jwt (anonymous / username-password). */
+    public static final String DENY_NON_JWT = "non_jwt";
+
     private final NotifyConfig.SecurityConfig securityConfig;
     private final MeterRegistry meterRegistry;
 
@@ -122,13 +142,29 @@ public class SubscriberIdentityGuard {
     public void requireMatchOrThrow(String subscriberId) {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         if (authentication == null || !authentication.isAuthenticated()) {
-            // No filter chain in this profile (e.g. @WebMvcTest addFilters=false)
-            // → contract semantics not exercised; let the slice test pass.
+            // PR-5.5 strict cutover (Codex thread 019e07d6 iter-1 absorb).
+            // Default false preserves the legacy silent-pass that
+            // @WebMvcTest(addFilters=false) slice tests rely on; production
+            // overlays flip NOTIFY_SECURITY_SUBSCRIBER_IDENTITY_STRICT=true
+            // once the filter chain is confirmed to inject a
+            // JwtAuthenticationToken on every protected route.
+            if (securityConfig.subscriberIdentityStrict()) {
+                incrementDeniedCounter(DENY_NO_AUTH);
+                throw new AccessDeniedException(
+                    "subscriber identity strict mode: no authenticated principal");
+            }
             return;
         }
         Object principal = authentication.getPrincipal();
         if (!(principal instanceof Jwt jwt)) {
-            // Anonymous / non-JWT principal under a permissive profile.
+            // PR-5.5 strict cutover: anonymous / username-password principals
+            // are not acceptable on /api/v1/notify/** in production. The
+            // legacy permissive branch stays for default-config slice tests.
+            if (securityConfig.subscriberIdentityStrict()) {
+                incrementDeniedCounter(DENY_NON_JWT);
+                throw new AccessDeniedException(
+                    "subscriber identity strict mode: non-JWT principal");
+            }
             return;
         }
         if (subscriberId == null || subscriberId.isBlank()) {
@@ -176,6 +212,22 @@ public class SubscriberIdentityGuard {
         Counter.builder(MATCH_METER)
             .description("Subscriber identity guard match distribution by JWT claim name")
             .tag(CLAIM_TAG, claim)
+            .register(meterRegistry)
+            .increment();
+    }
+
+    /**
+     * PR-5.5 strict cutover (Codex thread {@code 019e07d6} iter-1 absorb):
+     * separate counter for fail-closed denials so the existing
+     * {@link #MATCH_METER} cardinality stays bounded to the four canonical
+     * claim tags. Reasons are limited to {@link #DENY_NO_AUTH} and
+     * {@link #DENY_NON_JWT} — both come from runtime classes not from
+     * caller input, so the tag values are bounded at compile time.
+     */
+    private void incrementDeniedCounter(String reason) {
+        Counter.builder(DENIED_METER)
+            .description("Subscriber identity guard strict-mode denial reasons")
+            .tag(REASON_TAG, reason)
             .register(meterRegistry)
             .increment();
     }

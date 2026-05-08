@@ -35,10 +35,10 @@ class NotifyOrgAccessGuardTest {
         List.of("subscriberId", "userId", "sub");
 
     private static final NotifyConfig.SecurityConfig DEFAULT_SECURITY =
-        new NotifyConfig.SecurityConfig("default", DEFAULT_CLAIMS);
+        new NotifyConfig.SecurityConfig("default", DEFAULT_CLAIMS, false);
 
     private static final NotifyConfig.SecurityConfig EMPTY_SECURITY =
-        new NotifyConfig.SecurityConfig("", DEFAULT_CLAIMS);
+        new NotifyConfig.SecurityConfig("", DEFAULT_CLAIMS, false);
 
     // Faz 24 / PR-5.1: guards + registry are built per-test in a single
     // @BeforeEach because the constructor needs the per-test
