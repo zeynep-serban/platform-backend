@@ -122,6 +122,14 @@ public class ScopeContextFilter extends OncePerRequestFilter {
      * Parallel execution: max(6-8ms) = 6-8ms (75% reduction on cache miss).
      */
     private ScopeContext fetchScopeFromOpenFga(String userId) {
+        // Codex thread 019e0891 iter-2 AGREE absorb (2026-05-08 PR-BE-9 Phase 2):
+        // Faz 21.3 ADR-0008 "explicit-scope contract" canonical model uses
+        // `viewer: [user]` for branch (and warehouse/company/project). Previous
+        // code read `member` for branch — relation undefined in the canonical
+        // model, so the listObjects call returned empty and any user with
+        // branch scope appeared scope-less to ScopeContextHolder. Realigning
+        // all four object types on `viewer` matches what TupleSyncService
+        // (line ~158-171) writes after PR-BE-9 Phase 1.
         var companyFuture = CompletableFuture.supplyAsync(
                 () -> authzService.listObjectIds(userId, "viewer", "company"));
         var projectFuture = CompletableFuture.supplyAsync(
@@ -129,7 +137,7 @@ public class ScopeContextFilter extends OncePerRequestFilter {
         var warehouseFuture = CompletableFuture.supplyAsync(
                 () -> authzService.listObjectIds(userId, "viewer", "warehouse"));
         var branchFuture = CompletableFuture.supplyAsync(
-                () -> authzService.listObjectIds(userId, "member", "branch"));
+                () -> authzService.listObjectIds(userId, "viewer", "branch"));
         var adminFuture = CompletableFuture.supplyAsync(
                 () -> authzService.check(userId, "admin", "organization", "default"));
 

@@ -158,10 +158,22 @@ public class TupleSyncService {
     public void syncScopeTuples(String userId, List<Long> companyIds, List<Long> projectIds,
                                 List<Long> warehouseIds, List<Long> branchIds, boolean skipVersionIncrement) {
         boolean anyFailed = false;
+        // Codex thread 019e0891 iter-2 AGREE absorb (2026-05-08 PR-BE-9 Phase 1):
+        // Faz 21.3 ADR-0008 "explicit-scope contract" canonical model uses
+        // `viewer: [user]` for ALL scope object types (company/project/
+        // warehouse/branch). Previous code wrote `operator` for warehouse and
+        // `member` for branch — relations defined ONLY in legacy multi-tier
+        // model.fga (root); `backend/openfga/model.fga` (canonical per ADR-0008
+        // 2026-04-26) drops them entirely. On a cluster loading the canonical
+        // model, those writes return success at SDK level but produce a tuple
+        // that no `viewer` lookup can ever resolve — silent persistence loss
+        // surfaced as the "şirket yetkileri kayıt olmuyor" production bug.
+        // Aligning all four object types on `viewer` makes WRITE relation
+        // match what ScopeContextFilter (line ~125-132) already reads.
         anyFailed |= !writeScopeTuplesSafe(userId, "viewer", "company", companyIds);
         anyFailed |= !writeScopeTuplesSafe(userId, "viewer", "project", projectIds);
-        anyFailed |= !writeScopeTuplesSafe(userId, "operator", "warehouse", warehouseIds);
-        anyFailed |= !writeScopeTuplesSafe(userId, "member", "branch", branchIds);
+        anyFailed |= !writeScopeTuplesSafe(userId, "viewer", "warehouse", warehouseIds);
+        anyFailed |= !writeScopeTuplesSafe(userId, "viewer", "branch", branchIds);
         if (!skipVersionIncrement && !anyFailed) {
             authzVersionService.incrementVersion();
             if (scopeContextCache != null) scopeContextCache.evictUser(userId);

@@ -90,10 +90,17 @@ class ScopeContextFilterTest {
     }
 
     private void setupOpenFgaMocks(String userId, Set<Long> companies, boolean superAdmin) {
+        // PR-BE-9 Phase 2 (Codex thread 019e0891 iter-2 AGREE absorb,
+        // 2026-05-08): branch reads use 'viewer' relation per Faz 21.3
+        // ADR-0008 explicit-scope contract (canonical
+        // backend/openfga/model.fga). Pre-fix expected 'member' here, but
+        // ScopeContextFilter#fetchScopeFromOpenFga now reads
+        // listObjectIds(userId, "viewer", "branch") to match what
+        // TupleSyncService#syncScopeTuples writes.
         when(authzService.listObjectIds(eq(userId), eq("viewer"), eq("company"))).thenReturn(companies);
         when(authzService.listObjectIds(eq(userId), eq("viewer"), eq("project"))).thenReturn(Set.of(10L));
         when(authzService.listObjectIds(eq(userId), eq("viewer"), eq("warehouse"))).thenReturn(Set.of(20L));
-        when(authzService.listObjectIds(eq(userId), eq("member"), eq("branch"))).thenReturn(Set.of(30L));
+        when(authzService.listObjectIds(eq(userId), eq("viewer"), eq("branch"))).thenReturn(Set.of(30L));
         when(authzService.check(eq(userId), eq("admin"), eq("organization"), eq("default"))).thenReturn(superAdmin);
     }
 
