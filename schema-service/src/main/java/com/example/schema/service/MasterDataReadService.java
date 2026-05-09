@@ -71,11 +71,39 @@ public class MasterDataReadService {
     private record TableMapping(String sqlTemplate) {}
 
     private static final Map<String, TableMapping> KIND_MAP = Map.of(
+            // PR-BE-15 (2026-05-09): all four templates now project the
+            // canonical parent FKs (parentCompanyId, parentBranchId,
+            // parentProjectId) so the frontend can compose a
+            // hierarchical scope-picker view. Parent resolution follows
+            // the workcube_mikrolink real FK graph (1774 relations
+            // dump). Naming gotcha: OUR_COMPANY's primary key column is
+            // [COMP_ID], NOT [OUR_COMPANY_ID]. Other tables carry an
+            // [OUR_COMPANY_ID] FK column whose value targets
+            // OUR_COMPANY.[COMP_ID] — a workcube convention oddity.
+            // Refs: V25 schema contract; codex thread 019e0de4 iter-1
+            // P1 absorb (this exact alias was wrong in iter-1).
+            //
+            //   OUR_COMPANY (PK COMP_ID) ← COMPANY (FK OUR_COMPANY_ID)
+            //     ← BRANCH (FK COMPANY_ID)
+            //     ← PRO_PROJECTS (FK COMPANY_ID)
+            //     ← DEPARTMENT (FK OUR_COMPANY_ID, FK BRANCH_ID)
+            //
+            // OUR_COMPANY rows are top-level — parent fields NULL.
+            // PRO_PROJECTS / BRANCH go through COMPANY.OUR_COMPANY_ID
+            // (their direct FK to COMPANY); OUR_COMPANY is the picker's
+            // "company" type so we lift the parent up by one hop with
+            // the JOIN. DEPARTMENT carries OUR_COMPANY_ID directly as
+            // an FK (target OUR_COMPANY.COMP_ID). parentProjectId is
+            // always NULL today — reserved for future project-scoped
+            // permission types without another DTO bump.
             "companies",   new TableMapping("""
                     SELECT TOP (%1$d)
                         c.[COMP_ID]            AS id,
                         c.[COMPANY_SHORT_CODE] AS code,
                         c.[COMPANY_NAME]       AS name,
+                        CAST(NULL AS BIGINT)   AS parentCompanyId,
+                        CAST(NULL AS BIGINT)   AS parentBranchId,
+                        CAST(NULL AS BIGINT)   AS parentProjectId,
                         COALESCE(c.[COMP_STATUS], 1) AS status
                     FROM [%2$s].[OUR_COMPANY] c
                     WHERE c.[COMPANY_NAME] IS NOT NULL AND LEN(LTRIM(RTRIM(c.[COMPANY_NAME]))) > 0
@@ -86,18 +114,28 @@ public class MasterDataReadService {
                         p.[PROJECT_ID]        AS id,
                         p.[PROJECT_NUMBER]    AS code,
                         p.[PROJECT_HEAD]      AS name,
+                        oc.[COMP_ID]          AS parentCompanyId,
+                        p.[BRANCH_ID]         AS parentBranchId,
+                        CAST(NULL AS BIGINT)  AS parentProjectId,
                         COALESCE(p.[PROJECT_STATUS], 1) AS status
                     FROM [%2$s].[PRO_PROJECTS] p
+                    LEFT JOIN [%2$s].[COMPANY] cmp ON cmp.[COMPANY_ID] = p.[COMPANY_ID]
+                    LEFT JOIN [%2$s].[OUR_COMPANY] oc ON oc.[COMP_ID] = cmp.[OUR_COMPANY_ID]
                     WHERE p.[PROJECT_HEAD] IS NOT NULL AND LEN(LTRIM(RTRIM(p.[PROJECT_HEAD]))) > 0
                     ORDER BY p.[PROJECT_HEAD], p.[PROJECT_ID]
                     """),
             "branches",    new TableMapping("""
                     SELECT TOP (%1$d)
-                        b.[BRANCH_ID]   AS id,
-                        NULL            AS code,
-                        b.[BRANCH_NAME] AS name,
+                        b.[BRANCH_ID]         AS id,
+                        CAST(NULL AS NVARCHAR(64)) AS code,
+                        b.[BRANCH_NAME]       AS name,
+                        oc.[COMP_ID]          AS parentCompanyId,
+                        CAST(NULL AS BIGINT)  AS parentBranchId,
+                        CAST(NULL AS BIGINT)  AS parentProjectId,
                         COALESCE(b.[BRANCH_STATUS], 1) AS status
                     FROM [%2$s].[BRANCH] b
+                    LEFT JOIN [%2$s].[COMPANY] cmp ON cmp.[COMPANY_ID] = b.[COMPANY_ID]
+                    LEFT JOIN [%2$s].[OUR_COMPANY] oc ON oc.[COMP_ID] = cmp.[OUR_COMPANY_ID]
                     WHERE b.[BRANCH_NAME] IS NOT NULL AND LEN(LTRIM(RTRIM(b.[BRANCH_NAME]))) > 0
                     ORDER BY b.[BRANCH_NAME], b.[BRANCH_ID]
                     """),
@@ -124,13 +162,16 @@ public class MasterDataReadService {
             // production zones don't leak into the warehouse picker.
             "departments", new TableMapping("""
                     SELECT TOP (%1$d)
-                        d.[DEPARTMENT_ID] AS id,
-                        d.[SPECIAL_CODE]  AS code,
+                        d.[DEPARTMENT_ID]      AS id,
+                        d.[SPECIAL_CODE]       AS code,
                         COALESCE(
                             NULLIF(LTRIM(RTRIM(dn.[DEPARTMENT_NAME])), ''),
                             NULLIF(LTRIM(RTRIM(d.[DEPARTMENT_HEAD])), ''),
                             NULLIF(LTRIM(RTRIM(d.[DEPARTMENT_DETAIL])), '')
                         ) AS name,
+                        d.[OUR_COMPANY_ID]     AS parentCompanyId,
+                        d.[BRANCH_ID]          AS parentBranchId,
+                        CAST(NULL AS BIGINT)   AS parentProjectId,
                         COALESCE(d.[DEPARTMENT_STATUS], 1) AS status
                     FROM [%2$s].[DEPARTMENT] d
                     LEFT JOIN [%2$s].[SETUP_DEPARTMENT_NAME] dn
@@ -158,12 +199,28 @@ public class MasterDataReadService {
         String sql = String.format(Locale.ROOT, mapping.sqlTemplate(), rowLimit, schemaName);
 
         try {
-            return jdbc.query(sql, Map.of(), (rs, rowNum) -> new MasterDataItemDto(
-                    rs.getLong("id"),
-                    rs.getString("code"),
-                    rs.getString("name"),
-                    rs.getBoolean("status")
-            ));
+            return jdbc.query(sql, Map.of(), (rs, rowNum) -> {
+                // PR-BE-15 (2026-05-09): rs.getLong returns 0 for SQL NULL,
+                // so we have to ask wasNull() to distinguish "real id 0"
+                // from "no parent". Top-level OUR_COMPANY rows always
+                // resolve to NULL parents; project/branch/department may
+                // resolve to NULL when the source row has a missing FK
+                // (legacy data, soft-deletes, etc.).
+                long parentCompanyRaw = rs.getLong("parentCompanyId");
+                Long parentCompanyId = rs.wasNull() ? null : parentCompanyRaw;
+                long parentBranchRaw = rs.getLong("parentBranchId");
+                Long parentBranchId = rs.wasNull() ? null : parentBranchRaw;
+                long parentProjectRaw = rs.getLong("parentProjectId");
+                Long parentProjectId = rs.wasNull() ? null : parentProjectRaw;
+                return new MasterDataItemDto(
+                        rs.getLong("id"),
+                        rs.getString("code"),
+                        rs.getString("name"),
+                        parentCompanyId,
+                        parentBranchId,
+                        parentProjectId,
+                        rs.getBoolean("status"));
+            });
         } catch (DataAccessException ex) {
             log.warn("MasterData live MSSQL read failed for kind={} schema={}; reason={}",
                     normalized, schemaName,
