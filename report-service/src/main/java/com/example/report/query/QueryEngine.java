@@ -36,7 +36,27 @@ public class QueryEngine {
         this.yearlySchemaResolver = yearlySchemaResolver;
     }
 
-    public record PagedData(List<Map<String, Object>> items, long total, int page, int pageSize) {}
+    /**
+     * Codex 019e0c99 iter-3 §C absorb: warnings ride along the result so
+     * controllers can lift them onto response headers (e.g.
+     * {@code X-Report-Degraded}). Backward-compat constructor lets pre-existing
+     * callers stay (warnings default to empty).
+     */
+    public record PagedData(
+            List<Map<String, Object>> items,
+            long total,
+            int page,
+            int pageSize,
+            List<DegradationWarning> warnings) {
+
+        public PagedData(List<Map<String, Object>> items, long total, int page, int pageSize) {
+            this(items, total, page, pageSize, List.of());
+        }
+
+        public PagedData {
+            warnings = warnings == null ? List.of() : List.copyOf(warnings);
+        }
+    }
 
     public PagedData executeQuery(ReportDefinition def,
                                    AuthzMeResponse authz,
@@ -60,7 +80,7 @@ public class QueryEngine {
 
         long total = getCount(def, schemas, agGridFilter, visibleColumns, rls);
 
-        return new PagedData(items, total, page, pageSize);
+        return new PagedData(items, total, page, pageSize, dataQuery.warnings());
     }
 
     /**
@@ -109,7 +129,7 @@ public class QueryEngine {
                     def.key(), groupColumn, e.getMessage());
         }
 
-        return new PagedData(items, total, page, pageSize);
+        return new PagedData(items, total, page, pageSize, dataQuery.warnings());
     }
 
     public SqlBuilder.BuiltQuery buildExportQuery(ReportDefinition def,

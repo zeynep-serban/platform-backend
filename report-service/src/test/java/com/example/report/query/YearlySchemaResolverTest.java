@@ -2,6 +2,7 @@ package com.example.report.query;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -44,7 +45,14 @@ class YearlySchemaResolverTest {
         // Default: no schemas in sys.schemas (each test overrides).
         when(jdbcTemplate.queryForList(anyString(), eq(String.class)))
                 .thenReturn(List.of());
-        resolver = new YearlySchemaResolver(jdbc);
+        // Codex 019e0c99 iter-5 absorb: TenantMasterSchemaResolver dependency
+        // injected (Phase 1 refactor). Default mock returns lookup available
+        // for all tenants; specific tests override per scenario.
+        TenantMasterSchemaResolver tenantMaster = mock(TenantMasterSchemaResolver.class);
+        when(tenantMaster.resolveTenantSchema(anyLong()))
+                .thenAnswer(inv -> "workcube_mikrolink_" + inv.<Long>getArgument(0));
+        when(tenantMaster.isTenantLookupAvailable(anyLong(), anyString())).thenReturn(true);
+        resolver = new YearlySchemaResolver(jdbc, tenantMaster);
     }
 
     @Test

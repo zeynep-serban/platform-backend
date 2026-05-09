@@ -22,6 +22,19 @@ class SqlBuilderTest {
         builder = new SqlBuilder();
     }
 
+    /**
+     * Codex 019e0c99 iter-5 absorb: build a Branch test fixture from a
+     * transactional schema name, parsing year+tenantId out of the
+     * {@code workcube_mikrolink_<year>_<tenantId>} pattern when present.
+     * Lookup defaults to available; specific tests override.
+     */
+    private static YearlySchemaResolver.Branch branch(String transactionSchema) {
+        // Best-effort year/tenantId parse (test fixtures often use synthetic names
+        // like "db_2024" — the resolved-schemas plumbing only cares about schemas()).
+        return new YearlySchemaResolver.Branch(
+                transactionSchema, 2024, 0L, "workcube_mikrolink", true);
+    }
+
     // ── Fixtures ──────────────────────────────────────────────
 
     private static ReportDefinition tableDef(String source, String schema) {
@@ -146,7 +159,7 @@ class SqlBuilderTest {
         @Test
         void multiSchema_producesUnionAll() {
             YearlySchemaResolver.ResolvedSchemas schemas =
-                    new YearlySchemaResolver.ResolvedSchemas(List.of("db_2023", "db_2024"));
+                    new YearlySchemaResolver.ResolvedSchemas(List.of(branch("db_2023"), branch("db_2024")));
 
             SqlBuilder.BuiltQuery q = builder.buildDataQuery(
                     yearlyDef(), schemas, YEARLY_COLS,
@@ -162,7 +175,7 @@ class SqlBuilderTest {
         @Test
         void multiSchema_pushesDownRlsIntoEachBranch() {
             YearlySchemaResolver.ResolvedSchemas schemas =
-                    new YearlySchemaResolver.ResolvedSchemas(List.of("db_2023", "db_2024"));
+                    new YearlySchemaResolver.ResolvedSchemas(List.of(branch("db_2023"), branch("db_2024")));
 
             MapSqlParameterSource rlsParams = new MapSqlParameterSource();
             rlsParams.addValue("cid", 5);
@@ -203,7 +216,7 @@ class SqlBuilderTest {
         @Test
         void multiSchema_countsOverUnion() {
             YearlySchemaResolver.ResolvedSchemas schemas =
-                    new YearlySchemaResolver.ResolvedSchemas(List.of("y2023", "y2024"));
+                    new YearlySchemaResolver.ResolvedSchemas(List.of(branch("y2023"), branch("y2024")));
 
             SqlBuilder.BuiltQuery q = builder.buildCountQuery(
                     yearlyDef(), schemas,
@@ -460,6 +473,64 @@ class SqlBuilderTest {
             org.junit.jupiter.api.Assertions.assertThrows(
                     IllegalArgumentException.class,
                     () -> new SqlBuilder.GroupedAggregation("", "sum"));
+        }
+    }
+
+    /**
+     * Codex 019e0c99 iter-3 §B helper coverage. Per-branch render of the
+     * {@code SETUP_PROCESS_CAT} relation fragment must produce alias-preserving
+     * compile-safe SQL whether the per-tenant lookup table exists or not.
+     */
+    @Nested
+    class RenderTenantSetupProcessCatRelation {
+
+        @Test
+        void available_rendersRealTableWithNolockHint() {
+            YearlySchemaResolver.Branch b = new YearlySchemaResolver.Branch(
+                    "workcube_mikrolink_2026_35", 2026, 35L,
+                    "workcube_mikrolink_35", true);
+            java.util.List<DegradationWarning> warnings = new java.util.ArrayList<>();
+            String fragment = builder.renderTenantSetupProcessCatRelation(
+                    b, "fin-muhasebe-detay", warnings);
+            assertThat(fragment).isEqualTo(
+                    "[workcube_mikrolink_35].[SETUP_PROCESS_CAT] SPC WITH (NOLOCK)");
+            assertThat(warnings).isEmpty();
+        }
+
+        @Test
+        void unavailable_rendersEmptyRowsetWithoutNolock_emitsWarning() {
+            YearlySchemaResolver.Branch b = new YearlySchemaResolver.Branch(
+                    "workcube_mikrolink_2026_50", 2026, 50L,
+                    "workcube_mikrolink_50", false);
+            java.util.List<DegradationWarning> warnings = new java.util.ArrayList<>();
+            String fragment = builder.renderTenantSetupProcessCatRelation(
+                    b, "fin-muhasebe-detay", warnings);
+            // Alias preserved (`SPC`), columns CAST NULL, WHERE 1=0 → 0 rows.
+            assertThat(fragment).contains("SPC");
+            assertThat(fragment).contains("CAST(NULL AS int) AS PROCESS_CAT_ID");
+            assertThat(fragment).contains("CAST(NULL AS nvarchar(4000)) AS PROCESS_CAT");
+            assertThat(fragment).contains("WHERE 1 = 0");
+            // Codex iter-3 explicit: NOLOCK only on real tables.
+            assertThat(fragment).doesNotContain("NOLOCK");
+            // Schema name MUST NOT leak into the unavailable branch.
+            assertThat(fragment).doesNotContain("workcube_mikrolink_50");
+            // Warning surfaced for header propagation.
+            assertThat(warnings).hasSize(1);
+            assertThat(warnings.get(0).code())
+                    .isEqualTo(DegradationWarning.CODE_TENANT_LOOKUP_UNAVAILABLE);
+            assertThat(warnings.get(0).tenantId()).isEqualTo("50");
+            assertThat(warnings.get(0).reportKey()).isEqualTo("fin-muhasebe-detay");
+            assertThat(warnings.get(0).table()).isEqualTo("SETUP_PROCESS_CAT");
+        }
+
+        @Test
+        void nullBranch_rendersEmptyRowsetDefensively() {
+            java.util.List<DegradationWarning> warnings = new java.util.ArrayList<>();
+            String fragment = builder.renderTenantSetupProcessCatRelation(
+                    null, "fin-muhasebe-detay", warnings);
+            assertThat(fragment).contains("WHERE 1 = 0");
+            // Null branch → no warning enqueued (no tenantId to attach).
+            assertThat(warnings).isEmpty();
         }
     }
 }

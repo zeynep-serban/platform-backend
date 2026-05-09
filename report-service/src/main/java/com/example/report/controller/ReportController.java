@@ -241,7 +241,11 @@ public class ReportController {
 
         auditClient.logReportAccess(key, authz.getUserId(), extractEmail(jwt));
 
-        return ResponseEntity.ok(new PagedResultDto<>(result.items(), result.total(), result.page(), result.pageSize()));
+        // Codex 019e0c99 iter-3 §C: surface degradation warnings as
+        // X-Report-Degraded header (dedupe by code).
+        return ResponseEntity.ok()
+                .headers(com.example.report.query.DegradationHeaders.of(result.warnings()))
+                .body(new PagedResultDto<>(result.items(), result.total(), result.page(), result.pageSize()));
     }
 
     /**
@@ -395,8 +399,12 @@ public class ReportController {
 
         auditClient.logReportAccess(key, authz.getUserId(), extractEmail(jwt));
 
-        return ResponseEntity.ok(new PagedResultDto<>(
-                result.items(), result.total(), result.page(), result.pageSize()));
+        // Codex 019e0c99 iter-3 §C: degradation header propagation
+        // (multi-level grouped path uses same warning list as flat path).
+        return ResponseEntity.ok()
+                .headers(com.example.report.query.DegradationHeaders.of(result.warnings()))
+                .body(new PagedResultDto<>(
+                        result.items(), result.total(), result.page(), result.pageSize()));
     }
 
     /** PR-0.3 hardening: cap recursion depth so a malicious payload

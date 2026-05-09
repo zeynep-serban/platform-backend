@@ -1,6 +1,8 @@
 package com.example.report.query;
 
 import com.example.report.registry.ReportDefinition;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -9,7 +11,41 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 
 public class SqlBuilder {
 
-    public record BuiltQuery(String sql, MapSqlParameterSource params) {}
+    /**
+     * Built SQL + bound params + degradation warnings produced during
+     * construction. Codex 019e0c99 iter-3 §C absorb: warnings ride along the
+     * query record so controllers can dedupe by code and surface
+     * {@code X-Report-Degraded} headers without ThreadLocal.
+     *
+     * <p>Compact constructor keeps {@code MapSqlParameterSource} type stable
+     * (Codex iter-3 §2 mandate — no drift to {@code Map<String,Object>}).
+     * Backward-compat constructor lets pre-existing callsites stay
+     * (warnings default to empty list).
+     */
+    public record BuiltQuery(
+            String sql,
+            MapSqlParameterSource params,
+            List<DegradationWarning> warnings) {
+
+        /** Backward-compat: legacy callers without warning telemetry. */
+        public BuiltQuery(String sql, MapSqlParameterSource params) {
+            this(sql, params, List.of());
+        }
+
+        public BuiltQuery {
+            warnings = warnings == null ? List.of() : List.copyOf(warnings);
+        }
+    }
+
+    /**
+     * Internal helper: result of {@link #buildFromClause(...)}, carrying both
+     * the SQL fragment and any degradation warnings collected per-branch (so
+     * caller builders can attach them to the final {@link BuiltQuery}).
+     */
+    private record FromClauseResult(String sql, List<DegradationWarning> warnings) {}
+
+    /** Codex iter-3: lookup table the placeholder targets (currently single). */
+    private static final String SETUP_PROCESS_CAT_TABLE = "SETUP_PROCESS_CAT";
 
     private final FilterTranslator filterTranslator = new FilterTranslator();
     private final SortTranslator sortTranslator = new SortTranslator();
@@ -67,12 +103,12 @@ public class SqlBuilder {
         MapSqlParameterSource params = new MapSqlParameterSource();
         FilterTranslator.FilterResult filterResult = filterTranslator.translate(agGridFilter, allowedCols);
 
-        String fromClause = buildFromClause(def, resolvedSchemas, selectCols,
+        FromClauseResult fromResult = buildFromClause(def, resolvedSchemas, selectCols,
                 rlsWhereClause, rlsParams, filterResult, params);
 
         StringBuilder sql = new StringBuilder();
         sql.append("SELECT ").append(selectCols);
-        sql.append(" FROM ").append(fromClause);
+        sql.append(" FROM ").append(fromResult.sql());
 
         String orderBy = sortTranslator.translate(sortModel, allowedCols, def.defaultSort(), def.defaultSortDirection());
         if (orderBy != null) {
@@ -86,7 +122,7 @@ public class SqlBuilder {
         params.addValue("_offset", offset);
         params.addValue("_pageSize", pageSize);
 
-        return new BuiltQuery(sql.toString(), params);
+        return new BuiltQuery(sql.toString(), params, fromResult.warnings());
     }
 
     public BuiltQuery buildCountQuery(ReportDefinition def,
@@ -100,13 +136,13 @@ public class SqlBuilder {
         FilterTranslator.FilterResult filterResult = filterTranslator.translate(agGridFilter, allowedCols);
 
         // For count, we just need * from the union
-        String fromClause = buildFromClause(def, resolvedSchemas, "*",
+        FromClauseResult fromResult = buildFromClause(def, resolvedSchemas, "*",
                 rlsWhereClause, rlsParams, filterResult, params);
 
         StringBuilder sql = new StringBuilder();
-        sql.append("SELECT COUNT(*) FROM ").append(fromClause);
+        sql.append("SELECT COUNT(*) FROM ").append(fromResult.sql());
 
-        return new BuiltQuery(sql.toString(), params);
+        return new BuiltQuery(sql.toString(), params, fromResult.warnings());
     }
 
     public BuiltQuery buildExportQuery(ReportDefinition def,
@@ -125,12 +161,12 @@ public class SqlBuilder {
         MapSqlParameterSource params = new MapSqlParameterSource();
         FilterTranslator.FilterResult filterResult = filterTranslator.translate(agGridFilter, allowedCols);
 
-        String fromClause = buildFromClause(def, resolvedSchemas, selectCols,
+        FromClauseResult fromResult = buildFromClause(def, resolvedSchemas, selectCols,
                 rlsWhereClause, rlsParams, filterResult, params);
 
         StringBuilder sql = new StringBuilder();
         sql.append("SELECT TOP(:_maxRows) ").append(selectCols);
-        sql.append(" FROM ").append(fromClause);
+        sql.append(" FROM ").append(fromResult.sql());
         params.addValue("_maxRows", maxRows);
 
         String orderBy = sortTranslator.translate(sortModel, allowedCols, def.defaultSort(), def.defaultSortDirection());
@@ -138,7 +174,7 @@ public class SqlBuilder {
             sql.append(" ORDER BY ").append(orderBy);
         }
 
-        return new BuiltQuery(sql.toString(), params);
+        return new BuiltQuery(sql.toString(), params, fromResult.warnings());
     }
 
     // ── Grouping queries (PR-0.2 single-level GROUP BY) ────────────────
@@ -253,7 +289,7 @@ public class SqlBuilder {
         MapSqlParameterSource params = new MapSqlParameterSource();
         FilterTranslator.FilterResult filterResult = filterTranslator.translate(agGridFilter, allowedCols);
 
-        String fromClause = buildFromClause(def, resolvedSchemas, selectCols,
+        FromClauseResult fromResult = buildFromClause(def, resolvedSchemas, selectCols,
                 rlsWhereClause, rlsParams, filterResult, params);
 
         StringBuilder sql = new StringBuilder();
@@ -264,7 +300,7 @@ public class SqlBuilder {
                .append("([").append(a.field()).append("])")
                .append(" AS [").append(a.field()).append("]");
         }
-        sql.append(" FROM ").append(fromClause);
+        sql.append(" FROM ").append(fromResult.sql());
         sql.append(" GROUP BY [").append(groupColumn).append("]");
 
         // The order-by on a grouped query may only reference the group
@@ -279,7 +315,7 @@ public class SqlBuilder {
         params.addValue("_offset", offset);
         params.addValue("_pageSize", pageSize);
 
-        return new BuiltQuery(sql.toString(), params);
+        return new BuiltQuery(sql.toString(), params, fromResult.warnings());
     }
 
     /**
@@ -307,17 +343,17 @@ public class SqlBuilder {
         MapSqlParameterSource params = new MapSqlParameterSource();
         FilterTranslator.FilterResult filterResult = filterTranslator.translate(agGridFilter, allowedCols);
 
-        String fromClause = buildFromClause(def, resolvedSchemas, selectCols,
+        FromClauseResult fromResult = buildFromClause(def, resolvedSchemas, selectCols,
                 rlsWhereClause, rlsParams, filterResult, params);
 
         StringBuilder sql = new StringBuilder();
         sql.append("SELECT COUNT(*) FROM (");
         sql.append("SELECT [").append(groupColumn).append("]");
-        sql.append(" FROM ").append(fromClause);
+        sql.append(" FROM ").append(fromResult.sql());
         sql.append(" GROUP BY [").append(groupColumn).append("]");
         sql.append(") AS _g");
 
-        return new BuiltQuery(sql.toString(), params);
+        return new BuiltQuery(sql.toString(), params, fromResult.warnings());
     }
 
     /**
@@ -365,50 +401,60 @@ public class SqlBuilder {
      *
      * WHERE push-down: filters and RLS are applied inside each UNION branch for performance.
      */
-    private String buildFromClause(ReportDefinition def,
-                                   YearlySchemaResolver.ResolvedSchemas resolvedSchemas,
-                                   String selectCols,
-                                   String rlsWhereClause,
-                                   MapSqlParameterSource rlsParams,
-                                   FilterTranslator.FilterResult filterResult,
-                                   MapSqlParameterSource params) {
+    private FromClauseResult buildFromClause(ReportDefinition def,
+                                             YearlySchemaResolver.ResolvedSchemas resolvedSchemas,
+                                             String selectCols,
+                                             String rlsWhereClause,
+                                             MapSqlParameterSource rlsParams,
+                                             FilterTranslator.FilterResult filterResult,
+                                             MapSqlParameterSource params) {
 
         boolean isMultiSchema = resolvedSchemas != null && !resolvedSchemas.isSingle();
+        List<DegradationWarning> warnings = new ArrayList<>();
 
         if (!isMultiSchema) {
             // Single schema — original flat query (no subquery overhead)
-            String schema = (resolvedSchemas != null && !resolvedSchemas.schemas().isEmpty())
-                    ? resolvedSchemas.schemas().get(0)
-                    : def.sourceSchema();
+            YearlySchemaResolver.Branch branch =
+                    (resolvedSchemas != null && !resolvedSchemas.branches().isEmpty())
+                            ? resolvedSchemas.branches().get(0)
+                            : null;
+            String schema = branch != null ? branch.transactionSchema() : def.sourceSchema();
 
             StringBuilder sb = new StringBuilder();
             if (def.hasSourceQuery()) {
-                // Custom SQL query — wrap as subquery
-                String resolvedQuery = def.sourceQuery().replace("{schema}", schema);
+                // Custom SQL query — wrap as subquery; render placeholders
+                // including {schema} (transaction) and
+                // {tenantSetupProcessCatRelation} (Codex 019e0c99 iter-3).
+                String resolvedQuery = renderSourceQuery(
+                        def.sourceQuery(), branch, schema, def.key(), warnings);
                 sb.append("(").append(resolvedQuery).append(") AS _src");
             } else {
                 sb.append("[").append(schema).append("].[").append(def.source()).append("] WITH (NOLOCK)");
             }
             sb.append(" WHERE 1=1");
             appendWhereFilters(sb, rlsWhereClause, rlsParams, filterResult, params);
-            return sb.toString();
+            return new FromClauseResult(sb.toString(), warnings);
         }
 
         // Multi-schema UNION ALL — wrap in subquery
         StringBuilder union = new StringBuilder();
         union.append("(\n");
 
-        List<String> schemas = resolvedSchemas.schemas();
-        for (int i = 0; i < schemas.size(); i++) {
+        List<YearlySchemaResolver.Branch> branches = resolvedSchemas.branches();
+        for (int i = 0; i < branches.size(); i++) {
+            YearlySchemaResolver.Branch branch = branches.get(i);
             if (i > 0) {
                 union.append("\n  UNION ALL\n");
             }
             union.append("  SELECT ").append(selectCols);
             if (def.hasSourceQuery()) {
-                String resolvedQuery = def.sourceQuery().replace("{schema}", schemas.get(i));
+                String resolvedQuery = renderSourceQuery(
+                        def.sourceQuery(), branch, branch.transactionSchema(),
+                        def.key(), warnings);
                 union.append(" FROM (").append(resolvedQuery).append(") AS _src");
             } else {
-                union.append(" FROM [").append(schemas.get(i)).append("].[").append(def.source()).append("] WITH (NOLOCK)");
+                union.append(" FROM [").append(branch.transactionSchema())
+                        .append("].[").append(def.source()).append("] WITH (NOLOCK)");
             }
             union.append(" WHERE 1=1");
             // Push down RLS and filters into each branch
@@ -425,7 +471,75 @@ public class SqlBuilder {
             mergeParams(params, filterResult.params());
         }
 
-        return union.toString();
+        return new FromClauseResult(union.toString(), warnings);
+    }
+
+    /**
+     * Render a {@code sourceQuery} template by substituting all known
+     * placeholders. Codex 019e0c99 iter-3 §B prescription:
+     *
+     * <ul>
+     *   <li>{@code {schema}} → the branch's transaction schema (yearly
+     *       partition, e.g. {@code workcube_mikrolink_2026_35}).</li>
+     *   <li>{@code {tenantSetupProcessCatRelation}} → either the per-tenant
+     *       master table reference (alias {@code SPC} + NOLOCK hint) when
+     *       the lookup is available, or an empty-rowset subquery preserving
+     *       the alias contract when the lookup is absent. The placeholder
+     *       fragment INCLUDES the alias; templates MUST NOT append
+     *       {@code SPC} after the placeholder.</li>
+     * </ul>
+     *
+     * <p>For static reports {@code branch} is the synthetic single-branch
+     * with {@code tenantLookupAvailable=false}; the empty-rowset fallback
+     * keeps SQL compile-safe even though static reports don't currently use
+     * the tenant placeholder family.
+     */
+    private String renderSourceQuery(String template,
+                                     YearlySchemaResolver.Branch branch,
+                                     String schemaForLegacyToken,
+                                     String reportKey,
+                                     List<DegradationWarning> warnings) {
+        String result = template.replace("{schema}", schemaForLegacyToken);
+        if (result.contains("{tenantSetupProcessCatRelation}")) {
+            String fragment = renderTenantSetupProcessCatRelation(branch, reportKey, warnings);
+            result = result.replace("{tenantSetupProcessCatRelation}", fragment);
+        }
+        return result;
+    }
+
+    /**
+     * Codex 019e0c99 iter-3 §B helper: per-branch render of the
+     * {@code SETUP_PROCESS_CAT} relation fragment. The fragment carries
+     * alias {@code SPC} and (when available) the NOLOCK hint; callers MUST
+     * NOT append an additional alias after the placeholder.
+     *
+     * <p>Visible-degrade contract: when {@code branch.tenantLookupAvailable()}
+     * is {@code false}, an empty-rowset subquery is emitted that preserves
+     * the alias and the {@code PROCESS_CAT_ID}/{@code PROCESS_CAT} columns
+     * with NULL values. The existing {@code ISNULL(SPC.PROCESS_CAT, 'Diger')}
+     * pattern in the SELECT list of the 6 finance reports therefore
+     * resolves to {@code 'Diger'} without SQL compile errors. A
+     * {@link DegradationWarning} is appended to the warnings list so the
+     * controller can surface {@code X-Report-Degraded:tenant_lookup_unavailable}.
+     *
+     * <p>WITH (NOLOCK) is intentionally NOT applied to the derived-table
+     * form (Codex iter-3 explicit guidance: hint only on real tables).
+     *
+     * <p>Visible at package scope for unit tests only.
+     */
+    String renderTenantSetupProcessCatRelation(YearlySchemaResolver.Branch branch,
+                                               String reportKey,
+                                               List<DegradationWarning> warnings) {
+        if (branch != null && branch.tenantLookupAvailable()) {
+            return "[" + branch.tenantSchema() + "].[" + SETUP_PROCESS_CAT_TABLE
+                    + "] SPC WITH (NOLOCK)";
+        }
+        if (branch != null && warnings != null) {
+            warnings.add(DegradationWarning.tenantLookupUnavailable(
+                    branch.tenantId(), reportKey, SETUP_PROCESS_CAT_TABLE));
+        }
+        return "(SELECT CAST(NULL AS int) AS PROCESS_CAT_ID, "
+                + "CAST(NULL AS nvarchar(4000)) AS PROCESS_CAT WHERE 1 = 0) SPC";
     }
 
     /** Append WHERE fragments and merge params (for single-schema path). */

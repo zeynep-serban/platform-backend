@@ -113,7 +113,9 @@ class QueryEngineTest {
             when(rowFilterInjector.buildRlsClause(any(), any()))
                     .thenReturn(new RowFilterInjector.RlsResult(null, null));
             when(yearlySchemaResolver.resolve(any(), any(), any()))
-                    .thenReturn(new YearlySchemaResolver.ResolvedSchemas(List.of("db_2024")));
+                    .thenReturn(new YearlySchemaResolver.ResolvedSchemas(List.of(
+                            new YearlySchemaResolver.Branch(
+                                    "db_2024", 2024, 0L, "workcube_mikrolink", true))));
             when(jdbc.queryForList(anyString(), any(MapSqlParameterSource.class)))
                     .thenReturn(List.of());
             when(jdbc.queryForObject(anyString(), any(MapSqlParameterSource.class), eq(Long.class)))

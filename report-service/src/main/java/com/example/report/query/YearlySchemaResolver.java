@@ -26,15 +26,44 @@ public class YearlySchemaResolver {
     private static final Logger log = LoggerFactory.getLogger(YearlySchemaResolver.class);
 
     private final NamedParameterJdbcTemplate jdbc;
+    private final TenantMasterSchemaResolver tenantMasterSchemaResolver;
 
-    public YearlySchemaResolver(NamedParameterJdbcTemplate jdbc) {
+    public YearlySchemaResolver(NamedParameterJdbcTemplate jdbc,
+                                TenantMasterSchemaResolver tenantMasterSchemaResolver) {
         this.jdbc = jdbc;
+        this.tenantMasterSchemaResolver = tenantMasterSchemaResolver;
     }
 
-    /** All resolved schemas for a yearly report, given the filter context. */
-    public record ResolvedSchemas(List<String> schemas) {
+    /**
+     * Single resolved branch — one (tenant, year) pair plus its master
+     * tenant-schema and lookup availability. Codex 019e0c99 iter-3 §A absorb:
+     * branch granularity is tenant-year (not tenant-only), so the same tenant
+     * across 2024-2026 emits three branches sharing the same tenantSchema.
+     */
+    public record Branch(
+            String transactionSchema,
+            int year,
+            long tenantId,
+            String tenantSchema,
+            boolean tenantLookupAvailable) {}
+
+    /**
+     * All resolved branches for a yearly report. Each branch corresponds to
+     * one transaction schema (workcube_mikrolink_&lt;year&gt;_&lt;tenantId&gt;)
+     * plus its master tenant lookup metadata.
+     *
+     * <p>Backward-compat helpers ({@link #schemas()}, {@link #isSingle()}) keep
+     * existing call sites working during the migration; new code should use
+     * {@link #branches()} directly.
+     */
+    public record ResolvedSchemas(List<Branch> branches) {
+        /** Backward-compat: flat list of transaction schemas. */
+        public List<String> schemas() {
+            return branches.stream().map(Branch::transactionSchema).toList();
+        }
+
         public boolean isSingle() {
-            return schemas.size() == 1;
+            return branches.size() == 1;
         }
     }
 
@@ -49,7 +78,19 @@ public class YearlySchemaResolver {
     public ResolvedSchemas resolve(ReportDefinition def, AuthzMeResponse authz,
                                    Map<String, Object> agGridFilter) {
         if (!def.isYearlySchema()) {
-            return new ResolvedSchemas(List.of(def.sourceSchema()));
+            // Static schema — emit a single synthetic branch where the
+            // transaction schema is the static sourceSchema. tenantId is
+            // unknown at this layer; tenantSchema falls back to the global
+            // master so tenant-lookup placeholders short-circuit to a stable
+            // global path. lookupAvailable=false is conservative; static
+            // reports do not currently use the tenant-lookup placeholder
+            // family, so this branch is metadata-only.
+            return new ResolvedSchemas(List.of(new Branch(
+                    def.sourceSchema(),
+                    Year.now().getValue(),
+                    0L,
+                    "workcube_mikrolink",
+                    false)));
         }
 
         // Phase 2 Program 2a (Codex iter-10 §2a-AGREE absorb): tenant boundary
@@ -77,22 +118,38 @@ public class YearlySchemaResolver {
         // Get all available schemas from cache
         Set<String> available = getAvailableSchemas();
 
-        // Build schema list: for each company x each year, check if schema exists
-        List<String> resolved = new ArrayList<>();
+        // Build branch list: one branch per (tenantId, year) pair whose
+        // transaction schema actually exists. Each branch carries its master
+        // tenant-schema + lookup-availability for placeholders like
+        // {tenantSetupProcessCatRelation} (Codex 019e0c99 iter-3 §A absorb).
+        List<Branch> resolvedBranches = new ArrayList<>();
         List<String> attempted = new ArrayList<>();
         for (String companyId : companyIds) {
+            long tenantIdLong;
+            try {
+                tenantIdLong = Long.parseLong(companyId);
+            } catch (NumberFormatException ex) {
+                log.warn("Skipping non-numeric companyId in scope: {}", companyId);
+                continue;
+            }
+            String tenantSchema = tenantMasterSchemaResolver.resolveTenantSchema(tenantIdLong);
+            // Cached existence probe — tenant 1-40 typically true, 50+ inactive.
+            boolean tenantLookupAvailable = tenantMasterSchemaResolver
+                    .isTenantLookupAvailable(tenantIdLong, "SETUP_PROCESS_CAT");
+
             for (int year = startYear; year <= endYear; year++) {
                 String schema = "workcube_mikrolink_" + year + "_" + companyId;
                 attempted.add(schema);
                 if (available.contains(schema.toLowerCase(Locale.ROOT))) {
-                    resolved.add(schema);
+                    resolvedBranches.add(new Branch(
+                            schema, year, tenantIdLong, tenantSchema, tenantLookupAvailable));
                 } else {
                     log.debug("Schema not found: {}", schema);
                 }
             }
         }
 
-        if (resolved.isEmpty()) {
+        if (resolvedBranches.isEmpty()) {
             // Phase 2 Program 2a: silent def.sourceSchema() fallback removed.
             // Caller surfaces 503 schema_resolver_miss so users see a clearer
             // error rather than silently querying canonical reference data.
@@ -105,8 +162,9 @@ public class YearlySchemaResolver {
                             + "guard hardening: silent sourceSchema fallback removed.");
         }
 
-        log.debug("Resolved {} schemas for report {}: {}", resolved.size(), def.key(), resolved);
-        return new ResolvedSchemas(resolved);
+        log.debug("Resolved {} branches for report {}: {}",
+                resolvedBranches.size(), def.key(), resolvedBranches);
+        return new ResolvedSchemas(resolvedBranches);
     }
 
     /**

@@ -99,10 +99,15 @@ public class ReportExportController {
         String userId = jwt != null ? (email != null ? email : jwt.getSubject()) : authz.getUserId();
         auditClient.logReportExport(key, authz.getUserId(), userId, format);
 
+        // Codex 019e0c99 iter-3 §C: export path also propagates degradation
+        // warnings as X-Report-Degraded header (dedupe by code).
+        var degradationHeaders = com.example.report.query.DegradationHeaders.of(exportQuery.warnings());
+
         if ("excel".equalsIgnoreCase(format) || "xlsx".equalsIgnoreCase(format)) {
             StreamingResponseBody body = out ->
                     ExcelStreamingExporter.export(jdbc, exportQuery, visibleColumns, def.title(), out);
             return ResponseEntity.ok()
+                    .headers(degradationHeaders)
                     .header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                     .header("Content-Disposition", "attachment; filename=\"" + key + ".xlsx\"")
                     .body(body);
@@ -111,6 +116,7 @@ public class ReportExportController {
         StreamingResponseBody body = out ->
                 CsvStreamingExporter.export(jdbc, exportQuery, visibleColumns, out);
         return ResponseEntity.ok()
+                .headers(degradationHeaders)
                 .header("Content-Type", "text/csv; charset=UTF-8")
                 .header("Content-Disposition", "attachment; filename=\"" + key + ".csv\"")
                 .body(body);

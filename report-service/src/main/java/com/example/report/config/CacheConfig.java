@@ -35,7 +35,13 @@ public class CacheConfig {
                 buildCache("companyOptions", Duration.ofMinutes(5), 1),
                 // Phase 2 Program 8a: SchemaTruthService Tier 1 cache (Plan v2.1 §3.8 default).
                 // Keyed by schemaName; 5-min TTL matches Plan §3.8 prescription.
-                buildCache("schemaTruthSnapshot", Duration.ofMinutes(5), 100)
+                buildCache("schemaTruthSnapshot", Duration.ofMinutes(5), 100),
+                // Codex 019e0c99 iter-3 absorb: per-tenant master lookup table
+                // existence cache (workcube_mikrolink_<tenantId>.SETUP_PROCESS_CAT
+                // and similar). Keyed by "<tenantId>:<tableName>"; 5-min TTL
+                // chosen because schema provisioning drift settles within minutes
+                // (Codex iter-2 §6 prescription, 30dk too long).
+                buildCache("tenantSchemaAvailability", Duration.ofMinutes(5), 500)
         ));
         return manager;
     }
