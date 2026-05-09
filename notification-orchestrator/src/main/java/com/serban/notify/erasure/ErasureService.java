@@ -41,6 +41,22 @@ public class ErasureService {
 
     private static final Logger log = LoggerFactory.getLogger(ErasureService.class);
 
+    /**
+     * Audit event type for admin (privacy-officer) erasure.
+     *
+     * <p>Faz 23.2 PR-B baseline; codex thread {@code 019dfae5} Q2 absorb.
+     */
+    public static final String EVENT_ADMIN_ERASURE = "SUBSCRIBER_ERASURE_REQUEST";
+
+    /**
+     * Audit event type for self-service (subscriber) erasure.
+     *
+     * <p>Faz 23.2.B closure (M3 stale audit 2026-05-09 — Codex thread
+     * {@code 019e0c28} subscriber self-service path). Audit reporting/query
+     * netliği için admin scope'tan ayırt edilir.
+     */
+    public static final String EVENT_SELF_SERVICE_ERASURE = "SUBSCRIBER_SELF_ERASURE_REQUEST";
+
     private final NotificationIntentRepository intentRepo;
     private final NotificationDeliveryRepository deliveryRepo;
     private final NotificationInboxRepository inboxRepo;
@@ -76,10 +92,27 @@ public class ErasureService {
      * @param request erasure request (orgId + subscriberId + reason + evidence_ref)
      * @return EraseResult (intentsErased + deliveriesAnonymized)
      */
+    /**
+     * Default admin path (backward-compat) — emits {@link #EVENT_ADMIN_ERASURE}.
+     */
     @Transactional
     public EraseResult eraseSubscriber(EraseRequest request) {
-        log.info("KVKK erasure start: orgId={} subscriberId={} reason={} evidence={}",
-            request.orgId(), request.subscriberId(), request.reason(), request.evidenceRef());
+        return eraseSubscriber(request, EVENT_ADMIN_ERASURE);
+    }
+
+    /**
+     * Erase with explicit audit event type — supports admin vs self-service
+     * audit reporting separation (M3 stale audit 2026-05-09 P2 absorb).
+     *
+     * <p>Free-form `reason` log'a yazılmaz (Codex `019e0c28` P1 absorb:
+     * KVKK self-service path için PII risk). Reason/evidence_ref audit
+     * details içine girer; PiiRedactor whitelist'i bunu zaten korur, ama
+     * minimal log surface için INFO level'da yalnız orgId+subscriberId.
+     */
+    @Transactional
+    public EraseResult eraseSubscriber(EraseRequest request, String eventType) {
+        log.info("KVKK erasure start: orgId={} subscriberId={} eventType={} evidence={}",
+            request.orgId(), request.subscriberId(), eventType, request.evidenceRef());
 
         // Find all intents that have this subscriber in recipients_snapshot
         List<NotificationIntent> intents = intentRepo.findIntentsBySubscriber(
@@ -142,7 +175,7 @@ public class ErasureService {
                 details.put("evidence_ref", request.evidenceRef());
                 details.put("subscriber_id", request.subscriberId());  // NOT email/phone
                 details.put("deliveries_anonymized", deliveriesAnonymized);
-                audit.publish("SUBSCRIBER_ERASURE_REQUEST", intent, null, null, details);
+                audit.publish(eventType, intent, null, null, details);
             }
         }
 

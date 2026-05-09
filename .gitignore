@@ -15,3 +15,4 @@ docs/deploy/env/*.local
 
 # Maven build output
 target/
+/.claude/
