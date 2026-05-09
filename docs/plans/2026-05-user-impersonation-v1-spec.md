@@ -656,3 +656,4 @@ curl -sk -H "Authorization: Bearer $EXCHANGED" \
 |---|---|---|
 | 2026-05-09 | iter-1 | Initial draft, Codex 019e0dfb iter-1 REVISE absorb (A → A2 pivot) |
 | 2026-05-09 | iter-2 | Codex iter-2 AGREE absorb (spike-first + multi-PR sequence + edge cases extended) |
+| 2026-05-09 | iter-3 | Spike-1 koşuldu: feature/client/auth OK, **fine-grained authz policy default-deny** Spike-1 stop point. PR-A scope revize: tek atomic PR (broker client + policy + verify + smoke runbook + Vault secret reference). Spike-2 PR-A apply sonrası operator manuel; PR-B gate `PASS_NATIVE_ACT` veya `PASS_JTI_SESSION_LOOKUP`. Spike artifact: [docs/spikes/2026-05-impersonation-token-exchange-spike.md](../spikes/2026-05-impersonation-token-exchange-spike.md). `act` yoksa **`jti` + broker session lookup** primary fallback (Codex iter-3 §3 — custom JWT signing'den daha pragmatik). |
