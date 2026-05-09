@@ -6,14 +6,13 @@
   "description": "Tüm satış ve satın alma siparişleri (özet)",
   "category": "Satış",
   "source": "ORDERS",
-  "sourceSchema": "workcube_mikrolink_1",
-  "schemaMode": "static",
+  "schemaMode": "current",
   "tenantBoundary": {
     "mode": "schema",
     "scopeType": "tenant",
-    "schemaResolver": "sourceSchemaLiteral",
+    "schemaResolver": "workcube-current-company",
     "schemaPattern": "workcube_mikrolink_{tenantId}",
-    "reason": "Tenant-scoped via literal sourceSchema suffix; no yearly rotation needed"
+    "reason": "Per-tenant master schema (no yearly partition); Codex 019e0d06 iter-2 — replaces hardcoded workcube_mikrolink_1 literal that returned tenant 1 data for all tenants"
   },
   "columns": [
     {
@@ -137,11 +136,6 @@
       "reports.satis-ozet.financials": [
         "DISCOUNTTOTAL"
       ]
-    },
-    "rowFilter": {
-      "column": "COMPANY_ID",
-      "scopeType": "COMPANY",
-      "bypassPermission": "reports.satis-ozet.all-stores"
     },
     "reportGroup": "SALES_REPORTS"
   }

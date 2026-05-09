@@ -37,11 +37,16 @@ public record ReportDefinition(
         if ((source == null || source.isBlank()) && (sourceQuery == null || sourceQuery.isBlank())) {
             throw new IllegalArgumentException("Report must have either source (table name) or sourceQuery (custom SQL)");
         }
-        if (sourceSchema == null || sourceSchema.isBlank()) {
-            sourceSchema = "dbo";
-        }
         if (schemaMode == null || schemaMode.isBlank()) {
             schemaMode = "static";
+        }
+        // Codex 019e0d06 iter-2 §3 absorb: dbo default sadece literal-schema
+        // modlar için. yearly + current resolver-driven; sourceSchema null
+        // kalabilir (resolver runtime'da branch.transactionSchema üretir).
+        if (sourceSchema == null || sourceSchema.isBlank()) {
+            if (!"yearly".equals(schemaMode) && !"current".equals(schemaMode)) {
+                sourceSchema = "dbo";
+            }
         }
         if (columns == null || columns.isEmpty()) {
             throw new IllegalArgumentException("Report must have at least one column");

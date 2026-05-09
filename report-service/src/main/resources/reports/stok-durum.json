@@ -6,14 +6,13 @@
   "description": "Sipariş satırları detayı — ürün, miktar, fiyat, iskonto",
   "category": "Satış",
   "source": "ORDER_ROW",
-  "sourceSchema": "workcube_mikrolink_1",
-  "schemaMode": "static",
+  "schemaMode": "current",
   "tenantBoundary": {
     "mode": "schema",
     "scopeType": "tenant",
-    "schemaResolver": "sourceSchemaLiteral",
+    "schemaResolver": "workcube-current-company",
     "schemaPattern": "workcube_mikrolink_{tenantId}",
-    "reason": "Tenant-scoped via literal sourceSchema suffix; no yearly rotation needed"
+    "reason": "Per-tenant master schema; Codex 019e0d06 iter-2 — replaces hardcoded workcube_mikrolink_1 literal"
   },
   "columns": [
     {
@@ -132,11 +131,6 @@
         "DISCOUNT_1",
         "DISCOUNT_2"
       ]
-    },
-    "rowFilter": {
-      "column": "ORDER_ID",
-      "scopeType": "COMPANY",
-      "bypassPermission": "reports.stok-durum.all-warehouses"
     },
     "reportGroup": "SALES_REPORTS"
   }

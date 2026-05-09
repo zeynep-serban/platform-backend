@@ -1,10 +1,14 @@
 package com.example.report.controller;
 
 import com.example.report.access.ColumnFilter;
+import com.example.report.authz.CompanyHeaderScopeNarrower;
 import com.example.report.access.ReportAccessEvaluator;
 import com.example.report.audit.ReportAuditClient;
 import com.example.report.authz.AuthzMeResponse;
 import com.example.report.authz.PermissionResolver;
+import com.example.report.query.CurrentTenantSchemaResolver;
+import com.example.report.query.YearlySchemaResolver;
+import com.example.report.registry.TenantBoundary;
 import com.example.report.registry.ColumnDefinition;
 import com.example.report.registry.ReportDefinition;
 import com.example.report.registry.ReportRegistry;
@@ -63,24 +67,36 @@ public class ReportSchemaContextController {
     private final ReportAccessEvaluator accessEvaluator;
     private final ColumnFilter columnFilter;
     private final ReportAuditClient auditClient;
+    private final CompanyHeaderScopeNarrower companyHeaderNarrower;
+    private final YearlySchemaResolver yearlySchemaResolver;
+    private final CurrentTenantSchemaResolver currentTenantSchemaResolver;
 
     public ReportSchemaContextController(ReportRegistry reportRegistry,
                                            SchemaTruthService schemaTruthService,
                                            PermissionResolver permissionClient,
                                            ReportAccessEvaluator accessEvaluator,
                                            ColumnFilter columnFilter,
-                                           ReportAuditClient auditClient) {
+                                           ReportAuditClient auditClient,
+                                           CompanyHeaderScopeNarrower companyHeaderNarrower,
+                                           YearlySchemaResolver yearlySchemaResolver,
+                                           CurrentTenantSchemaResolver currentTenantSchemaResolver) {
         this.reportRegistry = reportRegistry;
         this.schemaTruthService = schemaTruthService;
         this.permissionClient = permissionClient;
         this.accessEvaluator = accessEvaluator;
         this.columnFilter = columnFilter;
         this.auditClient = auditClient;
+        this.companyHeaderNarrower = companyHeaderNarrower;
+        this.yearlySchemaResolver = yearlySchemaResolver;
+        this.currentTenantSchemaResolver = currentTenantSchemaResolver;
     }
 
     @GetMapping("/{reportKey}/schema-context")
-    public ResponseEntity<SchemaContextResponse> getSchemaContext(@PathVariable String reportKey,
-                                                                    @AuthenticationPrincipal Jwt jwt) {
+    public ResponseEntity<SchemaContextResponse> getSchemaContext(
+            @PathVariable String reportKey,
+            @org.springframework.web.bind.annotation.RequestHeader(
+                    value = CompanyHeaderScopeNarrower.HEADER_NAME, required = false) String companyHeader,
+            @AuthenticationPrincipal Jwt jwt) {
         Optional<ReportDefinition> defOpt = reportRegistry.get(reportKey);
         if (defOpt.isEmpty()) {
             return ResponseEntity.notFound().build();
@@ -90,15 +106,24 @@ public class ReportSchemaContextController {
         // Codex iter-1 §1 absorb: report-level access check + column visibility filter
         // (mevcut ReportController.metadata pattern parity).
         AuthzMeResponse authz = resolveAndCheckAccess(def, jwt);
-        List<ColumnDefinition> visibleCols = columnFilter.getVisibleColumnDefinitions(def, authz);
+        // Codex 019e0d06 iter-2 §C absorb: X-Company-Id header narrowing — schema-context
+        // endpoint'i de data endpoint'le aynı tenant resolver path'ini kullanmalı; aksi
+        // halde data fix'lendi ama schema-context dbo/null'a düşer (yarım kapanış).
+        AuthzMeResponse scopedAuthz = companyHeaderNarrower.narrow(authz, companyHeader);
+        List<ColumnDefinition> visibleCols = columnFilter.getVisibleColumnDefinitions(def, scopedAuthz);
 
         SchemaTruthLookupContext ctx = new SchemaTruthLookupContext(
                 reportKey, def.schemaMode(),
                 SchemaTruthLookupPolicy.RUNTIME_DEGRADED_TYPE,
                 "schema_context_endpoint");
 
+        // Codex 019e0d06 iter-2 §C absorb: schema-context için runtime resolved schema.
+        // yearly + current resolver-driven mod'larda def.sourceSchema() null/canonical
+        // placeholder; runtime'da branch.transactionSchema = resolved tenant schema.
+        String schemaForLookup = resolveSchemaForLookup(def, scopedAuthz);
+
         // Codex iter-1 §3 absorb: facade-owned tier orchestration; controller bypass YOK.
-        SchemaTruthResult tierResult = schemaTruthService.fetchSnapshotWithTier(ctx, def.sourceSchema());
+        SchemaTruthResult tierResult = schemaTruthService.fetchSnapshotWithTier(ctx, schemaForLookup);
 
         // Codex iter-1 §2 absorb: visible report-column shape, NOT raw DB table.columns().
         Map<String, String> columnTypes = extractVisibleColumnTypes(
@@ -110,6 +135,38 @@ public class ReportSchemaContextController {
         return ResponseEntity.ok()
                 .header(TIER_HEADER, tierResult.tier())
                 .body(body);
+    }
+
+    /**
+     * Codex 019e0d06 iter-2 §C absorb: dispatch schema lookup to the same
+     * resolver chain as {@code QueryEngine.resolveSchemas()}. yearly →
+     * yearly resolver, tenantBoundary.current → current resolver, else
+     * legacy {@code def.sourceSchema()}.
+     *
+     * <p>Throws (propagated to existing TenantGuardExceptionHandler):
+     * {@link com.example.report.query.TenantSelectionRequiredException} 400,
+     * {@link com.example.report.query.SchemaResolverMissException} 503.
+     */
+    private String resolveSchemaForLookup(ReportDefinition def, AuthzMeResponse scopedAuthz) {
+        if (def.isYearlySchema()) {
+            YearlySchemaResolver.ResolvedSchemas r =
+                    yearlySchemaResolver.resolve(def, scopedAuthz, java.util.Map.of());
+            if (r != null && !r.branches().isEmpty()) {
+                return r.branches().get(0).transactionSchema();
+            }
+        }
+        // Codex 019e0d06 iter-3 §1 BLOCKER absorb: dispatch authoritative
+        // signal is schemaMode, NOT the side-channel tenantBoundary
+        // (mismatch ile null fallback'e düşmek `[null].[TABLE]` üretirdi).
+        if ("current".equals(def.schemaMode())) {
+            YearlySchemaResolver.ResolvedSchemas r =
+                    currentTenantSchemaResolver.resolve(def, scopedAuthz);
+            if (r != null && !r.branches().isEmpty()) {
+                return r.branches().get(0).transactionSchema();
+            }
+        }
+        // Legacy literal fallback (static mode)
+        return def.sourceSchema();
     }
 
     /**

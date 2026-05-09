@@ -21,6 +21,8 @@ public class QueryEngine {
     private final ColumnFilter columnFilter;
     private final RowFilterInjector rowFilterInjector;
     private final YearlySchemaResolver yearlySchemaResolver;
+    private final CurrentTenantSchemaResolver currentTenantSchemaResolver;
+    private final com.example.report.registry.ReportRegistry reportRegistry;
     private final SqlBuilder sqlBuilder = new SqlBuilder();
 
     @Value("${report.query.max-export-rows:500000}")
@@ -29,11 +31,15 @@ public class QueryEngine {
     public QueryEngine(NamedParameterJdbcTemplate jdbc,
                        ColumnFilter columnFilter,
                        RowFilterInjector rowFilterInjector,
-                       YearlySchemaResolver yearlySchemaResolver) {
+                       YearlySchemaResolver yearlySchemaResolver,
+                       CurrentTenantSchemaResolver currentTenantSchemaResolver,
+                       com.example.report.registry.ReportRegistry reportRegistry) {
         this.jdbc = jdbc;
         this.columnFilter = columnFilter;
         this.rowFilterInjector = rowFilterInjector;
         this.yearlySchemaResolver = yearlySchemaResolver;
+        this.currentTenantSchemaResolver = currentTenantSchemaResolver;
+        this.reportRegistry = reportRegistry;
     }
 
     /**
@@ -153,10 +159,20 @@ public class QueryEngine {
     private YearlySchemaResolver.ResolvedSchemas resolveSchemas(ReportDefinition def,
                                                                   AuthzMeResponse authz,
                                                                   Map<String, Object> agGridFilter) {
-        if (!def.isYearlySchema()) {
-            return null; // SqlBuilder will use def.sourceSchema() directly
+        if (def.isYearlySchema()) {
+            return yearlySchemaResolver.resolve(def, authz, agGridFilter);
         }
-        return yearlySchemaResolver.resolve(def, authz, agGridFilter);
+        // Codex 019e0d06 iter-3 §1 BLOCKER absorb: dispatch authoritative
+        // signal is `schemaMode`, NOT the side-channel tenantBoundary.
+        // Side-channel mismatch (typo/missing schemaResolver) used to fall
+        // through to legacy null path, which would render `[null].[TABLE]`.
+        // Now schemaMode=current always routes to currentTenantSchemaResolver;
+        // ReportRegistry.validate enforces tenantBoundary.schemaResolver ==
+        // workcube-current-company at startup (fail-closed).
+        if ("current".equals(def.schemaMode())) {
+            return currentTenantSchemaResolver.resolve(def, authz);
+        }
+        return null; // legacy static — SqlBuilder uses def.sourceSchema() directly
     }
 
     private long getCount(ReportDefinition def,

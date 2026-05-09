@@ -118,8 +118,8 @@ class ReportContractGateTest {
         ContractExceptionEntry[] entries = loadExceptions();
 
         assertThat(entries)
-                .as("Total governance debt entries (2d cleaned RC-005×12; 2e migrated 2 BRANCH)")
-                .hasSize(7);
+                .as("Total governance debt entries (Codex 019e0d06 iter-2: stok-durum RC-004 closed via current-resolver fix)")
+                .hasSize(6);
 
         Map<String, Long> byRule = Arrays.stream(entries)
                 .flatMap(e -> e.ruleIds().stream())
@@ -129,8 +129,8 @@ class ReportContractGateTest {
                 .as("RC-001 debt: yearColumn ambiguous reports")
                 .isEqualTo(2L);
         assertThat(byRule.get("RC-004"))
-                .as("RC-004 debt: HR/ORDER scopeType=COMPANY misclassified (-2 from 2e BRANCH)")
-                .isEqualTo(5L);
+                .as("RC-004 debt: HR scopeType=COMPANY misclassified (-1 from stok-durum 019e0d06 absorb)")
+                .isEqualTo(4L);
         // RC-005 eliminated by Phase 2 Program 2d (rowFilter removed from 12
         // yearly reports; 2a runtime tenant guard hardening provides the
         // fail-closed precondition).

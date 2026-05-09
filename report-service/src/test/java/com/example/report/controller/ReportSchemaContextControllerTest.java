@@ -63,9 +63,20 @@ class ReportSchemaContextControllerTest {
         mockColumnFilter = mock(ColumnFilter.class);
         mockAuditClient = mock(ReportAuditClient.class);
         mockJwt = mock(Jwt.class);
+        // Codex 019e0d06 iter-2 absorb: schema-context endpoint X-Company-Id +
+        // resolver-aware schema lookup; mocks default to legacy literal path.
+        com.example.report.authz.CompanyHeaderScopeNarrower mockNarrower =
+                mock(com.example.report.authz.CompanyHeaderScopeNarrower.class);
+        when(mockNarrower.narrow(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        com.example.report.query.YearlySchemaResolver mockYearly =
+                mock(com.example.report.query.YearlySchemaResolver.class);
+        com.example.report.query.CurrentTenantSchemaResolver mockCurrent =
+                mock(com.example.report.query.CurrentTenantSchemaResolver.class);
+
         controller = new ReportSchemaContextController(
                 mockRegistry, mockFacade, mockPermissionClient,
-                mockAccessEvaluator, mockColumnFilter, mockAuditClient);
+                mockAccessEvaluator, mockColumnFilter, mockAuditClient,
+                mockNarrower, mockYearly, mockCurrent);
     }
 
     @Test
@@ -73,7 +84,7 @@ class ReportSchemaContextControllerTest {
         when(mockRegistry.get("ghost")).thenReturn(Optional.empty());
 
         ResponseEntity<ReportSchemaContextController.SchemaContextResponse> response =
-                controller.getSchemaContext("ghost", mockJwt);
+                controller.getSchemaContext("ghost", null, mockJwt);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
     }
@@ -89,7 +100,7 @@ class ReportSchemaContextControllerTest {
         when(mockAccessEvaluator.evaluate(any(), any()))
                 .thenReturn(ReportAccessEvaluator.AccessResult.DENIED_NO_REPORT_VIEW);
 
-        assertThatThrownBy(() -> controller.getSchemaContext("fin-muhasebe-detay", mockJwt))
+        assertThatThrownBy(() -> controller.getSchemaContext("fin-muhasebe-detay", null, mockJwt))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("FORBIDDEN");
     }
@@ -120,7 +131,7 @@ class ReportSchemaContextControllerTest {
                 .thenReturn(new SchemaTruthResult(Optional.of(snapshot), SchemaTruthResult.TIER_SCHEMA_SERVICE));
 
         ResponseEntity<ReportSchemaContextController.SchemaContextResponse> response =
-                controller.getSchemaContext("fin-muhasebe-detay", mockJwt);
+                controller.getSchemaContext("fin-muhasebe-detay", null, mockJwt);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getHeaders().getFirst(ReportSchemaContextController.TIER_HEADER))
@@ -152,7 +163,7 @@ class ReportSchemaContextControllerTest {
                 .thenReturn(new SchemaTruthResult(Optional.of(snapshot), SchemaTruthResult.TIER_COMMITTED_SNAPSHOT));
 
         ResponseEntity<ReportSchemaContextController.SchemaContextResponse> response =
-                controller.getSchemaContext("fin-muhasebe-detay", mockJwt);
+                controller.getSchemaContext("fin-muhasebe-detay", null, mockJwt);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getHeaders().getFirst(ReportSchemaContextController.TIER_HEADER))
@@ -176,7 +187,7 @@ class ReportSchemaContextControllerTest {
                 .thenReturn(new SchemaTruthResult(Optional.empty(), SchemaTruthResult.TIER_REGISTRY_TYPE));
 
         ResponseEntity<ReportSchemaContextController.SchemaContextResponse> response =
-                controller.getSchemaContext("fin-muhasebe-detay", mockJwt);
+                controller.getSchemaContext("fin-muhasebe-detay", null, mockJwt);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getHeaders().getFirst(ReportSchemaContextController.TIER_HEADER))
@@ -209,7 +220,7 @@ class ReportSchemaContextControllerTest {
                 .thenReturn(new SchemaTruthResult(Optional.of(snapshot), SchemaTruthResult.TIER_SCHEMA_SERVICE));
 
         ResponseEntity<ReportSchemaContextController.SchemaContextResponse> response =
-                controller.getSchemaContext("fin-muhasebe-detay", mockJwt);
+                controller.getSchemaContext("fin-muhasebe-detay", null, mockJwt);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         // AMOUNT alias not in snapshot → registry type "number" used

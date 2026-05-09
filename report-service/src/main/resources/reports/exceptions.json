@@ -40,16 +40,6 @@
     "expiresAt": "2026-08-05T00:00:00Z"
   },
   {
-    "id": "EXC-1d-007-RC004-stok-durum",
-    "ruleIds": [
-      "RC-004"
-    ],
-    "reportKey": "stok-durum",
-    "reason": "rowFilter scopeType=COMPANY but column ORDER_ID is order-level (ORDER_ROW); semantic fix scopeType review pending — Phase 2 Program 1d governance debt",
-    "owner": "halil@platform.local",
-    "expiresAt": "2026-08-05T00:00:00Z"
-  },
-  {
     "id": "EXC-1d-008-RC001-fin-alacak-yaslandirma",
     "ruleIds": [
       "RC-001"

@@ -86,10 +86,13 @@ class ReportDefinitionContractTest {
         // Phase 2 Program 2e/BRANCH migrated 2 reports (hr-giris-cikis +
         // hr-puantaj) from scopeType=COMPANY to scopeType=BRANCH (legitimate
         // BRANCH boundary; permission-service vocabulary already supports it).
-        // Remaining: RC-001×2 (yearColumn ambiguous), RC-004×5 (DEPT/EMPLOYEE/ORDER debt).
+        // Codex 019e0d06 iter-2 absorb: stok-durum RC-004 entry closed via
+        // current-resolver fix (rowFilter removed; ORDER_ID was order-level,
+        // not tenant; schema-level isolation now via current resolver).
+        // Remaining: RC-001×2 (yearColumn ambiguous), RC-004×4 (DEPT/EMPLOYEE debt).
         assertThat(CACHED.suppressedByRule())
                 .containsEntry("RC-001", 2L)
-                .containsEntry("RC-004", 5L)
+                .containsEntry("RC-004", 4L)
                 .doesNotContainKey("RC-005");
     }
 

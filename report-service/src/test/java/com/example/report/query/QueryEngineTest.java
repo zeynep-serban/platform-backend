@@ -39,7 +39,17 @@ class QueryEngineTest {
 
     @BeforeEach
     void setUp() {
-        engine = new QueryEngine(jdbc, columnFilter, rowFilterInjector, yearlySchemaResolver);
+        // Codex 019e0d06 iter-2 absorb: schemaMode=current dispatch deps —
+        // current resolver + ReportRegistry side-channel. Default: empty
+        // tenantBoundary so legacy null-fallback path runs.
+        com.example.report.query.CurrentTenantSchemaResolver currentResolver =
+                org.mockito.Mockito.mock(com.example.report.query.CurrentTenantSchemaResolver.class);
+        com.example.report.registry.ReportRegistry registry =
+                org.mockito.Mockito.mock(com.example.report.registry.ReportRegistry.class);
+        org.mockito.Mockito.when(registry.getTenantBoundary(org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(java.util.Optional.empty());
+        engine = new QueryEngine(jdbc, columnFilter, rowFilterInjector, yearlySchemaResolver,
+                currentResolver, registry);
     }
 
     private static ReportDefinition staticDef() {
