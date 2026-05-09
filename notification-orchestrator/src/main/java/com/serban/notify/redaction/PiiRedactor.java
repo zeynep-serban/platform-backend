@@ -81,7 +81,13 @@ public class PiiRedactor {
         "expire_at",                 // PR4 absorb: intent expiration
         "deleted_count",             // Faz 23.6 PR-A1: PREFERENCE_RESTORE_DEFAULTS audit detail
         "deleted_override_count",    // Faz 23.6 PR-A2: PREFERENCE_MUTE_CHANNEL audit detail
-        "shadow_deny_count"          // Faz 23.6 PR-A2 P1 absorb: topic-wide allow shadow deny count
+        "shadow_deny_count",         // Faz 23.6 PR-A2 P1 absorb: topic-wide allow shadow deny count
+        // Faz 23.2.F T1.6 abuse guards (Codex `019e0c28` P1 absorb 2026-05-09)
+        "count",                     // RATE_LIMITED current count
+        "limit",                     // RATE_LIMITED window limit
+        "window_ms",                 // RATE_LIMITED window duration
+        "webhook_count",             // WEBHOOK_FANOUT_CAPPED actual count
+        "cap"                        // WEBHOOK_FANOUT_CAPPED limit
     );
 
     private final NotifyConfig.RedactionConfig redactionConfig;

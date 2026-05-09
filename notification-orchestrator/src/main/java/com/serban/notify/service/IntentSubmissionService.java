@@ -1,11 +1,13 @@
 package com.serban.notify.service;
 
+import com.serban.notify.abuse.AbuseGuardService;
 import com.serban.notify.api.dto.SubmitIntentRequest;
 import com.serban.notify.api.dto.SubmitIntentResponse;
 import com.serban.notify.audit.AuditEventPublisher;
 import com.serban.notify.config.NotifyConfig;
 import com.serban.notify.domain.NotificationIntent;
 import com.serban.notify.domain.NotificationTemplate;
+import com.serban.notify.exception.AbuseGuardBlockedException;
 import com.serban.notify.exception.IntakeCapacityExceededException;
 import com.serban.notify.redaction.PiiRedactor;
 import com.serban.notify.repository.NotificationIntentRepository;
@@ -48,6 +50,7 @@ public class IntentSubmissionService {
     private final AuditEventPublisher auditPublisher;
     private final PiiRedactor piiRedactor;
     private final NotifyConfig config;
+    private final AbuseGuardService abuseGuard;
 
     public IntentSubmissionService(
         IdempotencyService idempotencyService,
@@ -55,7 +58,8 @@ public class IntentSubmissionService {
         NotificationIntentRepository intentRepository,
         AuditEventPublisher auditPublisher,
         PiiRedactor piiRedactor,
-        NotifyConfig config
+        NotifyConfig config,
+        AbuseGuardService abuseGuard
     ) {
         this.idempotencyService = idempotencyService;
         this.templateResolver = templateResolver;
@@ -63,6 +67,7 @@ public class IntentSubmissionService {
         this.auditPublisher = auditPublisher;
         this.piiRedactor = piiRedactor;
         this.config = config;
+        this.abuseGuard = abuseGuard;
     }
 
     /**
@@ -96,6 +101,58 @@ public class IntentSubmissionService {
             log.info("idempotency replay: orgId={} key={} originalIntentId={}",
                 request.orgId(), request.idempotencyKey(), existingIntentId.get());
             return SubmitIntentResponse.replayed(existingIntentId.get());
+        }
+
+        // Step 1.5: Abuse guard check (Faz 23.2.F T1.6 — Codex thread 019e0c28).
+        // Order rationale: idempotency replay sonrası, capacity check öncesi.
+        // Idempotent retry'lar abuse guard'ı tetiklemez (replay path bypass);
+        // gerçek yeni intent'ler abuse guard + capacity'den geçer.
+        // Critical bypass: sadece severity=critical (Codex `019e0c28` P1 absorb 2026-05-09:
+        // data_classification=security bypass kaldırıldı — request DTO client-controlled,
+        // trusted producer authority yok). Webhook fan-out cap hard safety limit;
+        // critical severity bile bypass etmez. must-have #8 alignment.
+        AbuseGuardService.Decision abuseDecision = abuseGuard.check(
+            request.orgId(),
+            request.topicKey(),
+            request.severity(),
+            request.dataClassification(),
+            request.channels()
+        );
+        if (!abuseDecision.allowed()) {
+            log.warn("AbuseGuard blocked: orgId={} topic={} reason={} eventType={}",
+                request.orgId(), request.topicKey(),
+                abuseDecision.reason(), abuseDecision.auditEventType());
+
+            // Codex `019e0c28` P1 absorb 2026-05-09: audit append BEFORE
+            // exception throw (caller-side publish; AbuseGuardService request
+            // context'i bilmediği için Decision payload caller'da topic/severity
+            // ile zenginleştirilir).
+            // standalone publish (no intent row); recipient_hash null çünkü
+            // recipient validation öncesi reject (intent INSERT yok).
+            java.util.Map<String, Object> auditDetails = new java.util.HashMap<>(abuseDecision.auditDetails());
+            auditDetails.put("topic_key", request.topicKey());
+            auditDetails.put("severity", request.severity() != null ? request.severity().name() : null);
+            auditDetails.put("data_classification",
+                request.dataClassification() != null ? request.dataClassification().name() : null);
+            auditDetails.put("reason", abuseDecision.reason());
+            if (request.correlationId() != null) {
+                auditDetails.put("correlation_id", request.correlationId());
+            }
+            // Codex `019e0c28` iter-2 P1 absorb: REQUIRES_NEW propagation
+            // çünkü hemen sonra unchecked exception throw → outer @Transactional
+            // rollback olur ama audit row ayrı txn'de commit kalır.
+            auditPublisher.publishStandaloneRequiresNew(
+                abuseDecision.auditEventType(),
+                request.orgId(),
+                null,
+                auditDetails
+            );
+
+            throw new AbuseGuardBlockedException(
+                abuseDecision.reason(),
+                abuseDecision.auditEventType(),
+                abuseDecision.auditDetails()
+            );
         }
 
         // Step 2: Bounded intake check sadece YENİ intent için (Codex Q3 PARTIAL)

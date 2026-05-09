@@ -183,6 +183,32 @@ public class AuditEventPublisher {
     @Transactional(propagation = Propagation.MANDATORY)
     public void publishStandalone(String eventType, String orgId, String recipientHash,
                                    Map<String, Object> additionalDetails) {
+        publishStandaloneInternal(eventType, orgId, recipientHash, additionalDetails);
+    }
+
+    /**
+     * Publish standalone audit event in a NEW independent transaction —
+     * Faz 23.2.F T1.6 abuse guards (Codex `019e0c28` iter-2 P1 absorb 2026-05-09).
+     *
+     * <p>Use case: caller throws unchecked exception immediately after publish
+     * (e.g., {@code AbuseGuardBlockedException} returns HTTP 429). Default
+     * Spring rollback would lose the audit row; {@code Propagation.REQUIRES_NEW}
+     * commits this audit INSERT in its own transaction so the abuse evidence
+     * survives the outer rollback.
+     *
+     * <p>Safety: yalnız BLOCKED path'te kullan; happy path için
+     * {@link #publishStandalone} (transaction-bound) tercih et.
+     *
+     * @see #publishStandalone for inherited transaction (MANDATORY) variant
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void publishStandaloneRequiresNew(String eventType, String orgId, String recipientHash,
+                                              Map<String, Object> additionalDetails) {
+        publishStandaloneInternal(eventType, orgId, recipientHash, additionalDetails);
+    }
+
+    private void publishStandaloneInternal(String eventType, String orgId, String recipientHash,
+                                            Map<String, Object> additionalDetails) {
         Map<String, Object> rawDetails = new HashMap<>();
         rawDetails.put("recipient_hash", recipientHash);
         rawDetails.put("org_id", orgId);

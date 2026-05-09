@@ -64,6 +64,7 @@ public class NotificationIntentController {
      *   <li>400 — validation error (missing/invalid field)</li>
      *   <li>403 — cross-org access denied (org_id mismatch)</li>
      *   <li>404 — template not found</li>
+     *   <li>429 — abuse guard blocked (rate limit OR webhook fan-out cap; T1.6)</li>
      *   <li>503 — intake capacity exceeded (notify.intake.maxPending threshold)</li>
      * </ul>
      */
@@ -73,6 +74,7 @@ public class NotificationIntentController {
         @ApiResponse(responseCode = "400", description = "Validation error"),
         @ApiResponse(responseCode = "403", description = "Cross-org access denied"),
         @ApiResponse(responseCode = "404", description = "Template not found"),
+        @ApiResponse(responseCode = "429", description = "Abuse guard blocked (rate limit / webhook fan-out cap; T1.6 Faz 23.2.F)"),
         @ApiResponse(responseCode = "503", description = "Intake capacity exceeded")
     })
     public ResponseEntity<SubmitIntentResponse> submit(
