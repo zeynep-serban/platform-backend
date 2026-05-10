@@ -1,6 +1,6 @@
 package com.example.apigateway.filter;
 
-import org.springframework.http.HttpCookie;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -55,8 +55,14 @@ public class AuthCookieEndpoint {
                 .maxAge(3600) // 1 hour, should match token TTL
                 .build();
 
-        exchange.getResponse().addCookie(cookie);
-        return Mono.just(ResponseEntity.ok().build());
+        // Live login bug fix (testai 2026-05-10): exchange.getResponse().addCookie()
+        // is dropped when the controller returns a freshly-built ResponseEntity —
+        // the new response builder does not propagate cookies set on the exchange.
+        // Attach Set-Cookie explicitly to the ResponseEntity so the header reaches
+        // the browser regardless of WebFlux response-commit timing.
+        return Mono.just(ResponseEntity.ok()
+                .header(HttpHeaders.SET_COOKIE, cookie.toString())
+                .<Void>build());
     }
 
     /**
@@ -70,8 +76,9 @@ public class AuthCookieEndpoint {
                 .maxAge(0) // Expire immediately
                 .build();
 
-        exchange.getResponse().addCookie(cookie);
-        return Mono.just(ResponseEntity.ok().build());
+        return Mono.just(ResponseEntity.ok()
+                .header(HttpHeaders.SET_COOKIE, cookie.toString())
+                .<Void>build());
     }
 
     private boolean isSecureContext(ServerWebExchange exchange) {
