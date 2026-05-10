@@ -435,4 +435,164 @@ class AuditEventServiceTest {
         assertThat(events).extracting(AuditEventResponse::action)
                 .containsExactlyInAnyOrder("ASSIGN_ROLE", "NON_IMPERSONATION_STARTED");
     }
+
+    // =====================================================================
+    // PR-D2 iter-3 absorb (Codex 019e10bf P1): scope-aware download path +
+    // legacy persisted-payload leak closure. Three regression scenarios:
+    //   1. Legacy job (no scope marker) → 404
+    //   2. Mismatched scope (IMPERSONATION-marked job, GENERIC requested) → 404
+    //   3. Defensive payload re-filter — if a GENERIC-marked JSON job somehow
+    //      contains an IMPERSONATION_* row, the row is stripped before return
+    // =====================================================================
+
+    private AuditExportJob completedJob(String id, String requestedBy, String filterSnapshotJson, byte[] payload) {
+        AuditExportJob job = new AuditExportJob();
+        job.setId(id);
+        job.setRequestedBy(requestedBy);
+        job.setStatus("COMPLETED");
+        job.setFormat("json");
+        job.setContentType("application/json");
+        job.setFilename("audit-events-" + id + ".json");
+        job.setPayload(payload);
+        job.setFilterSnapshot(filterSnapshotJson);
+        job.setCreatedAt(Instant.parse("2026-05-09T10:00:00Z"));
+        job.setCompletedAt(Instant.parse("2026-05-09T10:00:01Z"));
+        return job;
+    }
+
+    @Test
+    void getCompletedExportJob_legacyJobWithoutScopeMarker_returns404() {
+        // Pre-PR-D2 jobs persisted only the user filters as the snapshot —
+        // no internal scope marker. Even an AUDIT.can_manage caller must NOT
+        // be able to download a legacy completed job, because its payload
+        // may embed IMPERSONATION_* rows from before the exclusion was wired
+        // into createExportJob(). Fail-closed (404) is the contract.
+        AuditExportJob legacy = completedJob(
+                "legacy-1",
+                "admin@example.com",
+                "{\"service\":\"permission-service\"}", // no __audit_read_scope key
+                "[{\"action\":\"IMPERSONATION_STARTED\"}]".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        when(auditExportJobRepository.findById("legacy-1")).thenReturn(Optional.of(legacy));
+
+        assertThatThrownBy(() ->
+                auditEventService.getCompletedExportJob("legacy-1", "admin@example.com", AuditReadScope.GENERIC_AUDIT))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("Audit export job not found");
+    }
+
+    @Test
+    void getCompletedExportJob_mismatchedScopeMarker_returns404() {
+        // Job was created under IMPERSONATION_AUDIT scope (hypothetical — once
+        // a dedicated impersonation export endpoint is added in a future PR);
+        // a GENERIC_AUDIT caller hitting /export-jobs/{id}/download must get
+        // 404, never the impersonation payload.
+        AuditExportJob mismatched = completedJob(
+                "imp-1",
+                "admin@example.com",
+                "{\"__audit_read_scope\":\"IMPERSONATION_AUDIT\"}",
+                "[{\"action\":\"IMPERSONATION_STARTED\"}]".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        when(auditExportJobRepository.findById("imp-1")).thenReturn(Optional.of(mismatched));
+
+        assertThatThrownBy(() ->
+                auditEventService.getCompletedExportJob("imp-1", "admin@example.com", AuditReadScope.GENERIC_AUDIT))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("Audit export job not found");
+    }
+
+    @Test
+    void getCompletedExportJob_genericScopeMarker_jsonPayloadContainsImpersonationRow_stripsRowDefensively() throws Exception {
+        // Belt-and-braces: even if a GENERIC-marked JSON payload somehow
+        // contains an IMPERSONATION_* row (manual SQL edit, restored backup,
+        // future bug), the download path re-filters and the row never leaves
+        // the service. Authoritative gate is the scope marker; this is the
+        // defense-in-depth second pass per Codex iter-3 P1.
+        Map<String, Object> normalRow = new LinkedHashMap<>();
+        normalRow.put("id", "1");
+        normalRow.put("action", "ASSIGN_ROLE");
+        Map<String, Object> impRow = new LinkedHashMap<>();
+        impRow.put("id", "2");
+        impRow.put("action", ImpersonationAuditEventTypes.IMPERSONATION_STARTED);
+        byte[] poisonedPayload = objectMapper.writeValueAsBytes(List.of(normalRow, impRow));
+
+        AuditExportJob poisoned = completedJob(
+                "poisoned-1",
+                "admin@example.com",
+                "{\"__audit_read_scope\":\"GENERIC_AUDIT\"}",
+                poisonedPayload);
+        when(auditExportJobRepository.findById("poisoned-1")).thenReturn(Optional.of(poisoned));
+
+        AuditExportJob result = auditEventService.getCompletedExportJob(
+                "poisoned-1", "admin@example.com", AuditReadScope.GENERIC_AUDIT);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = objectMapper.readValue(result.getPayload(), List.class);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).get("action")).isEqualTo("ASSIGN_ROLE");
+    }
+
+    @Test
+    void getCompletedExportJob_genericScopeMarker_cleanPayload_returnsAsIs() {
+        // Happy path: scope marker matches, payload clean. Bytes pass through
+        // untouched (no defensive rewrite logged).
+        byte[] clean = "[{\"id\":\"1\",\"action\":\"ASSIGN_ROLE\"}]"
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        AuditExportJob job = completedJob(
+                "clean-1",
+                "admin@example.com",
+                "{\"__audit_read_scope\":\"GENERIC_AUDIT\"}",
+                clean);
+        when(auditExportJobRepository.findById("clean-1")).thenReturn(Optional.of(job));
+
+        AuditExportJob result = auditEventService.getCompletedExportJob(
+                "clean-1", "admin@example.com", AuditReadScope.GENERIC_AUDIT);
+        assertThat(result.getPayload()).isEqualTo(clean);
+    }
+
+    @Test
+    void getExportJob_legacyJobWithoutScopeMarker_returns404() {
+        // Status fetch (no payload involved) also fail-closes on legacy jobs:
+        // even job metadata is hidden cross-scope.
+        AuditExportJob legacy = completedJob(
+                "legacy-status-1",
+                "admin@example.com",
+                "{\"service\":\"permission-service\"}",
+                "[]".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        when(auditExportJobRepository.findById("legacy-status-1")).thenReturn(Optional.of(legacy));
+
+        assertThatThrownBy(() ->
+                auditEventService.getExportJob("legacy-status-1", "admin@example.com", AuditReadScope.GENERIC_AUDIT))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("Audit export job not found");
+    }
+
+    @Test
+    void createExportJob_persistsScopeMarkerInFilterSnapshot() {
+        // Forward-compat: every fresh job written by createExportJob must
+        // include the __audit_read_scope marker so subsequent download
+        // requests can re-validate scope. If this test ever fails, the
+        // download-path scope check above will silently 404 every legitimate
+        // job — making the marker essentially unforgeable but still required.
+        when(repository.findAll()).thenReturn(List.of());
+        when(userAuditEventMirrorRepository.findAll()).thenReturn(List.of());
+
+        // Capture the persisted job to inspect its filterSnapshot.
+        java.util.concurrent.atomic.AtomicReference<AuditExportJob> savedJob = new java.util.concurrent.atomic.AtomicReference<>();
+        when(auditExportJobRepository.save(any(AuditExportJob.class))).thenAnswer(inv -> {
+            AuditExportJob job = inv.getArgument(0);
+            savedJob.set(job);
+            return job;
+        });
+
+        auditEventService.createExportJob(
+                "admin@example.com", "json", 50, null,
+                Map.of("service", "permission-service"),
+                AuditReadScope.GENERIC_AUDIT);
+
+        AuditExportJob persisted = savedJob.get();
+        assertThat(persisted).isNotNull();
+        assertThat(persisted.getFilterSnapshot())
+                .as("scope marker must be embedded in filterSnapshot for download-time scope re-validation")
+                .contains("__audit_read_scope")
+                .contains("GENERIC_AUDIT");
+    }
 }

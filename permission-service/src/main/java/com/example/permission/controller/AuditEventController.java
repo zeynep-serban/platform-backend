@@ -134,14 +134,25 @@ public class AuditEventController {
     @RequireModule(value = "AUDIT", relation = "can_manage")
     public ResponseEntity<AuditExportJobResponseDto> getExportJob(@PathVariable String jobId,
                                                                   Authentication authentication) {
-        return ResponseEntity.ok(auditEventService.getExportJob(jobId, resolveRequestedBy(authentication)));
+        // PR-D2 iter-3 absorb (Codex 019e10bf P1): scope-aware status fetch.
+        // Pre-PR-D2 jobs and any IMPERSONATION-scoped job leak through the
+        // generic AUDIT.can_manage gate without this third argument; legacy
+        // jobs are fail-closed to 404.
+        return ResponseEntity.ok(auditEventService.getExportJob(
+                jobId, resolveRequestedBy(authentication), AuditReadScope.GENERIC_AUDIT));
     }
 
     @GetMapping("/export-jobs/{jobId}/download")
     @RequireModule(value = "AUDIT", relation = "can_manage")
     public ResponseEntity<byte[]> downloadExportJob(@PathVariable String jobId,
                                                     Authentication authentication) {
-        var job = auditEventService.getCompletedExportJob(jobId, resolveRequestedBy(authentication));
+        // PR-D2 iter-3 absorb (Codex 019e10bf P1): scope-aware download path —
+        // closes the legacy persisted-payload leak channel where AUDIT.can_manage
+        // holders could download an export job created before PR-D2 (which
+        // may embed IMPERSONATION_* rows). Fail-closed for any non-matching
+        // or legacy-marker job.
+        var job = auditEventService.getCompletedExportJob(
+                jobId, resolveRequestedBy(authentication), AuditReadScope.GENERIC_AUDIT);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=%s".formatted(job.getFilename()))
                 .contentType(MediaType.parseMediaType(job.getContentType()))

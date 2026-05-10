@@ -45,6 +45,19 @@ public class AuditEventService {
     private static final int DEFAULT_EXPORT_LIMIT = 2000;
     private static final int MAX_EXPORT_LIMIT = 10000;
 
+    /**
+     * PR-D2 iter-3 absorb (Codex 019e10bf P1): scope marker key embedded in
+     * the persisted {@link AuditExportJob#getFilterSnapshot()} JSON. Read by
+     * {@link #getCompletedExportJob(String, String, AuditReadScope)} to
+     * re-validate the requested download scope against the job's create-time
+     * scope. Pre-PR-D2 jobs do not have this marker and are fail-closed (404).
+     *
+     * <p>Underscore-prefixed key avoids collision with any
+     * {@code filter[<name>]} key from the request (request keys never start
+     * with underscore by spec).
+     */
+    private static final String SCOPE_MARKER_KEY = "__audit_read_scope";
+
     private final PermissionAuditEventRepository repository;
     private final AuditExportJobRepository auditExportJobRepository;
     private final UserAuditEventMirrorRepository userAuditEventMirrorRepository;
@@ -194,7 +207,11 @@ public class AuditEventService {
         job.setStatus("PROCESSING");
         job.setFormat(normalizedFormat);
         job.setSortValue(sort);
-        job.setFilterSnapshot(writeJsonSafe(filters == null ? Map.of() : filters));
+        // PR-D2 iter-3 absorb (Codex 019e10bf): persist the read-scope alongside
+        // the user-supplied filters so download/get paths can re-validate scope
+        // before returning the persisted payload. Pre-PR-D2 jobs lack this
+        // marker — treated as legacy (404) by getCompletedExportJob.
+        job.setFilterSnapshot(writeJsonSafe(buildFilterSnapshot(filters, scope)));
         job.setCreatedAt(Instant.now());
         auditExportJobRepository.save(job);
 
@@ -242,19 +259,65 @@ public class AuditEventService {
         return toExportJobResponse(job);
     }
 
+    /** Backward-compatible default: GENERIC_AUDIT scope. */
     public AuditExportJobResponseDto getExportJob(String jobId, String requestedBy) {
-        return toExportJobResponse(findOwnedExportJob(jobId, requestedBy));
+        return getExportJob(jobId, requestedBy, AuditReadScope.GENERIC_AUDIT);
     }
 
-    public AuditExportJob getCompletedExportJob(String jobId, String requestedBy) {
+    /**
+     * Scope-aware status fetch. PR-D2 iter-3 absorb (Codex 019e10bf P1): a
+     * GENERIC_AUDIT caller hitting an IMPERSONATION_AUDIT-scoped job (or vice
+     * versa, or a legacy pre-PR-D2 job without a scope marker) gets 404 — as
+     * if the job did not exist for this caller. Same pattern as
+     * findByIdPage(...): fail-closed; never leak metadata across scope.
+     */
+    public AuditExportJobResponseDto getExportJob(String jobId,
+                                                  String requestedBy,
+                                                  AuditReadScope scope) {
         AuditExportJob job = findOwnedExportJob(jobId, requestedBy);
+        requireMatchingScope(job, scope);
+        return toExportJobResponse(job);
+    }
+
+    /** Backward-compatible default: GENERIC_AUDIT scope. */
+    public AuditExportJob getCompletedExportJob(String jobId, String requestedBy) {
+        return getCompletedExportJob(jobId, requestedBy, AuditReadScope.GENERIC_AUDIT);
+    }
+
+    /**
+     * Scope-aware download. PR-D2 iter-3 absorb (Codex 019e10bf P1): the
+     * persisted {@code job.payload} is treated as untrusted material and
+     * re-validated against the requested scope before being returned.
+     *
+     * <p>Three layers of defense (any one is sufficient; together they are
+     * defense in depth):
+     * <ol>
+     *   <li><b>Scope marker fail-closed</b> — the job's persisted scope marker
+     *       (written at create time into the {@code filter_snapshot} JSON) must
+     *       match the requested scope; missing marker = legacy / pre-PR-D2 job
+     *       and is fail-closed to 404.</li>
+     *   <li><b>Owner check</b> — pre-existing {@link #findOwnedExportJob}
+     *       guards cross-user access.</li>
+     *   <li><b>Payload re-filter (defensive)</b> — for GENERIC_AUDIT downloads
+     *       on JSON payloads, the persisted bytes are re-deserialized and any
+     *       IMPERSONATION_* rows are stripped before return. CSV payloads do
+     *       not get this belt-and-braces re-filter (the scope-marker layer is
+     *       already authoritative); a future ticket can add CSV parsing if
+     *       business need arises.</li>
+     * </ol>
+     */
+    public AuditExportJob getCompletedExportJob(String jobId,
+                                                String requestedBy,
+                                                AuditReadScope scope) {
+        AuditExportJob job = findOwnedExportJob(jobId, requestedBy);
+        requireMatchingScope(job, scope);
         if (!"COMPLETED".equalsIgnoreCase(job.getStatus())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Export job is not ready");
         }
         if (job.getPayload() == null || job.getPayload().length == 0) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Export payload not found");
         }
-        return job;
+        return defensivelyFilterPayload(job, scope);
     }
 
     public SseEmitter openLiveStream() {
@@ -545,6 +608,126 @@ public class AuditEventService {
         String currentUser = requestedBy == null ? "" : requestedBy;
         if (!jobOwner.equalsIgnoreCase(currentUser)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Audit export job not found");
+        }
+        return job;
+    }
+
+    /**
+     * PR-D2 iter-3 absorb (Codex 019e10bf P1): builds the create-time
+     * persisted snapshot of {@code filter[*]} request keys plus an internal
+     * scope marker. The scope marker key never collides with a user-supplied
+     * filter (underscore-prefixed by construction) and is consumed by
+     * {@link #readPersistedScope(AuditExportJob)} on download.
+     */
+    private Map<String, String> buildFilterSnapshot(Map<String, String> filters, AuditReadScope scope) {
+        Map<String, String> snapshot = new LinkedHashMap<>();
+        if (filters != null) {
+            // Defensive: drop any caller-injected scope marker so they cannot
+            // forge a different scope onto a job at create time.
+            filters.forEach((key, value) -> {
+                if (!SCOPE_MARKER_KEY.equals(key)) {
+                    snapshot.put(key, value);
+                }
+            });
+        }
+        snapshot.put(SCOPE_MARKER_KEY, scope.name());
+        return snapshot;
+    }
+
+    /**
+     * Reads the persisted scope marker from a job's {@code filterSnapshot}.
+     * Returns {@code null} if the snapshot is missing, malformed, or has no
+     * marker (legacy pre-PR-D2 jobs). Callers MUST treat null as "scope
+     * unknown" and fail-closed (Codex 019e10bf P1).
+     */
+    private AuditReadScope readPersistedScope(AuditExportJob job) {
+        String snapshot = job.getFilterSnapshot();
+        if (snapshot == null || snapshot.isBlank()) {
+            return null;
+        }
+        try {
+            Map<String, Object> parsed = objectMapper.readValue(snapshot, new TypeReference<>() { });
+            Object marker = parsed.get(SCOPE_MARKER_KEY);
+            if (marker == null) {
+                return null;
+            }
+            return AuditReadScope.valueOf(marker.toString());
+        } catch (JsonProcessingException | RuntimeException error) {
+            // Covers ObjectMapper parse failures (JsonProcessingException is
+            // checked) plus IllegalArgumentException (unknown enum value via
+            // valueOf) plus any other runtime parse failure. Treat all as
+            // "scope unknown" → fail-closed by the caller.
+            log.debug("Failed to parse scope marker on export job {}", job.getId(), error);
+            return null;
+        }
+    }
+
+    /**
+     * PR-D2 iter-3 absorb (Codex 019e10bf P1): fail-closed scope guard for
+     * export-job get/download. A job without a persisted scope marker is
+     * legacy (pre-PR-D2) and is treated as "out of scope" for any caller —
+     * 404 is the safest closure (the legacy payload may contain
+     * IMPERSONATION_* rows from before the exclusion was enforced).
+     *
+     * <p>This is the same pattern as {@link #findByIdPage(String, AuditReadScope)}:
+     * the resource exists in the DB but is invisible to this caller.
+     */
+    private void requireMatchingScope(AuditExportJob job, AuditReadScope requestedScope) {
+        AuditReadScope persistedScope = readPersistedScope(job);
+        if (persistedScope == null || persistedScope != requestedScope) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Audit export job not found");
+        }
+    }
+
+    /**
+     * PR-D2 iter-3 absorb (Codex 019e10bf P1): defense-in-depth payload
+     * re-filter for GENERIC_AUDIT JSON downloads. The scope-marker check above
+     * is already authoritative, but this second pass guarantees that even if
+     * a future bug, manual SQL edit, or restored backup somehow placed an
+     * IMPERSONATION_* row inside a GENERIC_AUDIT-marked job, the row never
+     * leaves the service.
+     *
+     * <p>Returns the same job instance with an in-place updated payload; the
+     * job is detached from the persistence context here (no dirty checking
+     * triggers a write — the entity returned to the controller is read-only
+     * from this point onward).
+     */
+    private AuditExportJob defensivelyFilterPayload(AuditExportJob job, AuditReadScope scope) {
+        if (scope != AuditReadScope.GENERIC_AUDIT) {
+            return job;
+        }
+        if (!"json".equalsIgnoreCase(job.getFormat())) {
+            // CSV re-parse is intentionally out of scope for iter-3; the
+            // scope-marker layer remains authoritative for non-JSON formats.
+            return job;
+        }
+        byte[] payload = job.getPayload();
+        if (payload == null || payload.length == 0) {
+            return job;
+        }
+        try {
+            List<Map<String, Object>> rows = objectMapper.readValue(
+                    payload, new TypeReference<>() { });
+            List<Map<String, Object>> filtered = new ArrayList<>(rows.size());
+            boolean changed = false;
+            for (Map<String, Object> row : rows) {
+                Object action = row.get("action");
+                if (action != null && ImpersonationActionPredicate.isImpersonationAction(action.toString())) {
+                    changed = true;
+                    continue;
+                }
+                filtered.add(row);
+            }
+            if (changed) {
+                byte[] rewritten = objectMapper.writeValueAsBytes(filtered);
+                job.setPayload(rewritten);
+                log.warn("Defensively stripped {} impersonation row(s) from export job {} payload at download time",
+                        rows.size() - filtered.size(), job.getId());
+            }
+        } catch (RuntimeException | java.io.IOException error) {
+            log.debug("Failed to defensively re-filter export job {} payload; "
+                    + "scope-marker check already passed so returning persisted bytes",
+                    job.getId(), error);
         }
         return job;
     }

@@ -218,11 +218,16 @@ class AuditEventControllerTest {
         job.setFilename("audit-events-job-2.json");
         job.setContentType("application/json");
         job.setPayload("[]".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        when(auditEventService.getCompletedExportJob(eq("job-2"), anyString()))
+        // PR-D2 iter-3 absorb (Codex 019e10bf P1): controller now passes
+        // AuditReadScope.GENERIC_AUDIT so the service can fail-closed on
+        // legacy / mismatched-scope jobs.
+        when(auditEventService.getCompletedExportJob(eq("job-2"), anyString(), eq(AuditReadScope.GENERIC_AUDIT)))
                 .thenReturn(job);
 
         mockMvc.perform(get("/api/audit/events/export-jobs/job-2/download"))
                 .andExpect(status().isOk())
                 .andExpect(header().string("Content-Disposition", "attachment; filename=audit-events-job-2.json"));
+
+        verify(auditEventService).getCompletedExportJob(eq("job-2"), anyString(), eq(AuditReadScope.GENERIC_AUDIT));
     }
 }
