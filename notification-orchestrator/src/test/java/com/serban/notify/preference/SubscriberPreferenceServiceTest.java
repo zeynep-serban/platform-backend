@@ -207,6 +207,187 @@ class SubscriberPreferenceServiceTest {
         return p;
     }
 
+    // ── T1.1.6 quiet hours enforcement (Faz 23.2.A acceptance) ──────────
+
+    /**
+     * T1.1.6 — quiet hours within window suppresses delivery.
+     */
+    @Test
+    void quietHoursWithinWindowSuppresses() {
+        SubscriberPreference pref = preference(true, false);
+        pref.setQuietHours(java.util.Map.of(
+            "start", "22:00", "end", "07:00", "tz", "UTC"
+        ));
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyAndChannel(
+            "default", "1204", "auth.password-reset", "email")).thenReturn(Optional.of(pref));
+
+        // Set clock to 23:30 UTC — inside cross-day window 22:00-07:00
+        java.time.Instant fixedInstant = java.time.Instant.parse("2026-05-10T23:30:00Z");
+        service.setClock(java.time.Clock.fixed(fixedInstant, java.time.ZoneOffset.UTC));
+
+        NotificationIntent intent = makeIntent("auth.password-reset", NotificationIntent.Severity.info);
+        var decision = service.evaluate(intent, "email", "1204");
+
+        assertThat(decision.allowed()).isFalse();
+        assertThat(decision.reason()).isEqualTo("quiet_hours");
+    }
+
+    /**
+     * T1.1.6 — outside quiet hours window allows delivery.
+     */
+    @Test
+    void quietHoursOutsideWindowAllows() {
+        SubscriberPreference pref = preference(true, false);
+        pref.setQuietHours(java.util.Map.of(
+            "start", "22:00", "end", "07:00", "tz", "UTC"
+        ));
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyAndChannel(
+            "default", "1204", "auth.password-reset", "email")).thenReturn(Optional.of(pref));
+
+        // Set clock to 09:00 UTC — outside cross-day window
+        java.time.Instant fixedInstant = java.time.Instant.parse("2026-05-10T09:00:00Z");
+        service.setClock(java.time.Clock.fixed(fixedInstant, java.time.ZoneOffset.UTC));
+
+        NotificationIntent intent = makeIntent("auth.password-reset", NotificationIntent.Severity.info);
+        var decision = service.evaluate(intent, "email", "1204");
+
+        assertThat(decision.allowed()).isTrue();
+        assertThat(decision.reason()).isEqualTo("preference_enabled");
+    }
+
+    /**
+     * T1.1.6 — critical bypass overrides quiet hours suppression.
+     */
+    @Test
+    void quietHoursCriticalBypass() {
+        SubscriberPreference pref = preference(true, true);  // bypassForCritical=true
+        pref.setQuietHours(java.util.Map.of(
+            "start", "22:00", "end", "07:00", "tz", "UTC"
+        ));
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyAndChannel(
+            "default", "1204", "auth.password-reset", "email")).thenReturn(Optional.of(pref));
+
+        // Inside quiet window
+        java.time.Instant fixedInstant = java.time.Instant.parse("2026-05-10T23:30:00Z");
+        service.setClock(java.time.Clock.fixed(fixedInstant, java.time.ZoneOffset.UTC));
+
+        NotificationIntent intent = makeIntent("auth.password-reset", NotificationIntent.Severity.critical);
+        var decision = service.evaluate(intent, "email", "1204");
+
+        assertThat(decision.allowed())
+            .as("critical severity + bypassForCritical=true overrides quiet hours")
+            .isTrue();
+        assertThat(decision.reason()).isEqualTo("critical_bypass_quiet_hours");
+    }
+
+    /**
+     * T1.1.6 — same-day window (e.g., 09:00-17:00 working hours).
+     */
+    @Test
+    void quietHoursSameDayWindow() {
+        SubscriberPreference pref = preference(true, false);
+        pref.setQuietHours(java.util.Map.of(
+            "start", "09:00", "end", "17:00", "tz", "UTC"
+        ));
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyAndChannel(
+            "default", "1204", "auth.password-reset", "email")).thenReturn(Optional.of(pref));
+
+        // Inside 09:00-17:00 same-day window
+        java.time.Instant insideInstant = java.time.Instant.parse("2026-05-10T12:00:00Z");
+        service.setClock(java.time.Clock.fixed(insideInstant, java.time.ZoneOffset.UTC));
+
+        NotificationIntent intent = makeIntent("auth.password-reset", NotificationIntent.Severity.info);
+        var insideDecision = service.evaluate(intent, "email", "1204");
+        assertThat(insideDecision.allowed()).isFalse();
+        assertThat(insideDecision.reason()).isEqualTo("quiet_hours");
+
+        // Outside same-day window (after end)
+        java.time.Instant outsideInstant = java.time.Instant.parse("2026-05-10T18:00:00Z");
+        service.setClock(java.time.Clock.fixed(outsideInstant, java.time.ZoneOffset.UTC));
+        var outsideDecision = service.evaluate(intent, "email", "1204");
+        assertThat(outsideDecision.allowed()).isTrue();
+    }
+
+    /**
+     * T1.1.6 — non-UTC timezone (Europe/Istanbul UTC+3) cross-day window.
+     * Codex iter-1 (019e118b) PARTIAL absorb: tz contract verified non-UTC.
+     */
+    @Test
+    void quietHoursNonUtcTimezoneIstanbul() {
+        SubscriberPreference pref = preference(true, false);
+        pref.setQuietHours(java.util.Map.of(
+            "start", "22:00", "end", "07:00", "tz", "Europe/Istanbul"
+        ));
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyAndChannel(
+            "default", "1204", "auth.password-reset", "email")).thenReturn(Optional.of(pref));
+
+        // 20:30 UTC = 23:30 Europe/Istanbul (UTC+3) — inside Istanbul cross-day window
+        java.time.Instant insideInstant = java.time.Instant.parse("2026-05-10T20:30:00Z");
+        service.setClock(java.time.Clock.fixed(insideInstant, java.time.ZoneOffset.UTC));
+
+        NotificationIntent intent = makeIntent("auth.password-reset", NotificationIntent.Severity.info);
+        var insideDecision = service.evaluate(intent, "email", "1204");
+        assertThat(insideDecision.allowed())
+            .as("23:30 Europe/Istanbul (UTC+3) inside 22:00-07:00 quiet → DENY")
+            .isFalse();
+        assertThat(insideDecision.reason()).isEqualTo("quiet_hours");
+
+        // 06:30 UTC = 09:30 Europe/Istanbul — outside window
+        java.time.Instant outsideInstant = java.time.Instant.parse("2026-05-10T06:30:00Z");
+        service.setClock(java.time.Clock.fixed(outsideInstant, java.time.ZoneOffset.UTC));
+        var outsideDecision = service.evaluate(intent, "email", "1204");
+        assertThat(outsideDecision.allowed())
+            .as("09:30 Europe/Istanbul outside 22:00-07:00 → ALLOW")
+            .isTrue();
+    }
+
+    /**
+     * T1.1.6 — critical severity + bypassForCritical=false + quiet window
+     * → DENY (regression: critical alone shouldn't bypass without flag).
+     * Codex iter-1 (019e118b) PARTIAL absorb.
+     */
+    @Test
+    void quietHoursCriticalNoBypassDenies() {
+        SubscriberPreference pref = preference(true, false);  // bypassForCritical=false
+        pref.setQuietHours(java.util.Map.of(
+            "start", "22:00", "end", "07:00", "tz", "UTC"
+        ));
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyAndChannel(
+            "default", "1204", "auth.password-reset", "email")).thenReturn(Optional.of(pref));
+
+        // Inside quiet window
+        java.time.Instant fixedInstant = java.time.Instant.parse("2026-05-10T23:30:00Z");
+        service.setClock(java.time.Clock.fixed(fixedInstant, java.time.ZoneOffset.UTC));
+
+        NotificationIntent intent = makeIntent("auth.password-reset", NotificationIntent.Severity.critical);
+        var decision = service.evaluate(intent, "email", "1204");
+
+        assertThat(decision.allowed())
+            .as("critical severity + bypassForCritical=false → still DENY (no bypass without flag)")
+            .isFalse();
+        assertThat(decision.reason()).isEqualTo("quiet_hours");
+    }
+
+    /**
+     * T1.1.6 — invalid quiet_hours config fails open (no suppression).
+     */
+    @Test
+    void quietHoursInvalidConfigFailsOpen() {
+        SubscriberPreference pref = preference(true, false);
+        pref.setQuietHours(java.util.Map.of(
+            "start", "not-a-time", "end", "broken", "tz", "Invalid/Zone"
+        ));
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyAndChannel(
+            "default", "1204", "auth.password-reset", "email")).thenReturn(Optional.of(pref));
+
+        NotificationIntent intent = makeIntent("auth.password-reset", NotificationIntent.Severity.info);
+        var decision = service.evaluate(intent, "email", "1204");
+
+        assertThat(decision.allowed())
+            .as("invalid quiet_hours config fails open (preserve delivery)")
+            .isTrue();
+    }
+
     // ── Faz 23.6 PR-A1 — restore-defaults ─────────────────────────────────
 
     @Test
