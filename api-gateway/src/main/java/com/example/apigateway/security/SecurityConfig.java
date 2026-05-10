@@ -70,9 +70,16 @@ public class SecurityConfig {
                 // Faz 23.2.A T1.1.8 — public unsubscribe link landing.
                 // Email recipient browser tıklayışı; HMAC-SHA256 signed token
                 // controller seviyesinde verify edilir (UnsubscribeTokenService).
-                // POST = revoke action (RFC 8058 one-click), GET = legacy fallback;
-                // ikisi de subscriber session olmadan çalışmalı.
-                .pathMatchers("/api/v1/notify/unsubscribe", "/api/v1/notify/unsubscribe/**").permitAll()
+                // Backend UnsubscribeController mevcut kontrat: GET-only @ root
+                // (`/api/v1/notify/unsubscribe`); backend SecurityConfig de
+                // exact path permitAll (notification-orchestrator
+                // SecurityConfig.java:95). Gateway de exact root tutuyor —
+                // wildcard /unsubscribe/** YOK (Codex 019e1440 P1 absorb:
+                // unintended admin endpoint exposure önleme, backend exact
+                // contract'ına paralel kalma). RFC 8058 one-click POST
+                // gelecekteki PR'da backend @PostMapping ekledikçe scope
+                // genişletilir.
+                .pathMatchers("/api/v1/notify/unsubscribe").permitAll()
                 .anyExchange().authenticated()
             )
             .oauth2ResourceServer(oauth -> oauth

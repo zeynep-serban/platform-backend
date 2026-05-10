@@ -443,9 +443,16 @@ class GatewaySecurityTest {
     }
 
     @Test
-    void unsubscribe_post_without_jwt_returns_200() {
-        // RFC 8058 one-click unsubscribe (POST). Header dahi olmayan
-        // anonim POST cycle desteklenir.
+    void unsubscribe_post_gateway_forward_no_auth() {
+        // Gateway permitAll kontratı: POST `/api/v1/notify/unsubscribe`
+        // gateway tarafından JWT olmadan downstream'e forward edilir.
+        // Backend UnsubscribeController mevcut kontrat **GET-only** (root
+        // path @GetMapping). Bu test gateway'in HTTP method'undan
+        // bağımsız permitAll forward davranışını doğrular; backend
+        // gerçekte 405 Method Not Allowed döner (stub burada 200 dönüyor
+        // çünkü dispatcher method ayrımı yapmıyor). Codex 019e1440 P1
+        // absorb: "RFC 8058 POST one-click" claim'i backend route
+        // eklenince doğrulanır; bu PR sadece gateway gap'i kapatıyor.
         if (isLocalProfile()) {
             return;
         }
@@ -453,7 +460,13 @@ class GatewaySecurityTest {
                 .header("Content-Type", "application/json")
                 .bodyValue("{\"token\":\"test-hmac-token\"}")
                 .exchange()
-                .expectStatus().isOk();
+                // Gateway forward'ı 200/405/etc — sadece 401 OLMAMASI
+                // permitAll kontratı için yeterli. Stub 200 dönüyor; gerçek
+                // backend 405 döner (PostMapping yok); ikisinde de gateway
+                // auth-gate'i geçti.
+                .expectStatus().value(status ->
+                    org.junit.jupiter.api.Assertions.assertNotEquals(401, status,
+                        "gateway permitAll bypass: unsubscribe POST 401 OLMAMALI (backend method handling ayrı kontrat)"));
     }
 
     @Test
