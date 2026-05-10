@@ -27,9 +27,13 @@ import java.util.Optional;
  * (orgId, subscriberId, topicKey, channel=email) with {@code enabled=false}.
  * Preserves quiet hours / frequency / bypass settings (resumption-friendly).
  *
- * <p>**Global revoke** (top claim absent/null): writes both-null wildcard
- * (orgId, subscriberId, topicKey=null, channel=null) with {@code enabled=false}.
- * SubscriberPreferenceService.evaluate() honors this as "mute all".
+ * <p>**Global revoke** (top claim absent/null): calls
+ * {@link SubscriberPreferenceService#muteChannel} with channel="email" —
+ * Codex iter-1 (thread `019e12d4`) absorb: muteChannel pattern correctly
+ * shadows existing topic-wide allows + deletes exact overrides so resolver
+ * (exact > topic-wildcard > channel-wildcard > both-null) reaches a deny
+ * first for the email channel. Other channels (push, slack, sms) preserved
+ * unless their own unsubscribe link is clicked (per-channel scope).
  *
  * <p>**Idempotent**: re-clicking the same link is a no-op (preference already
  * disabled). Audit event still published per click for compliance trail.
@@ -91,10 +95,9 @@ public class UnsubscribeRevokeService {
                 null                    // preserve bypassForCritical (default true)
             );
             preferenceId = saved.getId();
-            auditDetails.put("scope", "topic_specific");
+            // Whitelist-allowed keys only (PiiRedactor.filterAuditDetails)
             auditDetails.put("topic_key", topicKey);
             auditDetails.put("channel", channelForRevoke);
-            auditDetails.put("preference_id", preferenceId);
         } else {
             // Global revoke: muteChannel pattern (Codex iter-1 thread `019e12d4`
             // absorb). Delete exact overrides + shadow topic-wide allows with
@@ -107,9 +110,10 @@ public class UnsubscribeRevokeService {
                 orgId, subscriberId, channelForRevoke
             );
             preferenceId = null;  // muteChannel writes multiple rows, no single id
-            auditDetails.put("scope", "global_email");
+            // Whitelist-allowed keys (deleted_override_count + shadow_deny_count
+            // already in PiiRedactor whitelist for PREFERENCE_MUTE_CHANNEL pattern)
             auditDetails.put("channel", channelForRevoke);
-            auditDetails.put("deleted_overrides", muteResult.deletedOverrideCount());
+            auditDetails.put("deleted_override_count", muteResult.deletedOverrideCount());
             auditDetails.put("shadow_deny_count", muteResult.shadowDenyCount());
         }
 
