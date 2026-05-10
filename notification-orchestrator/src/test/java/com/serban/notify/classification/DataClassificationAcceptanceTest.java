@@ -169,16 +169,32 @@ class DataClassificationAcceptanceTest extends AbstractPostgresTest {
         AuditEvent intentCreated = audits.get(0);
         assertThat(intentCreated.getEventType()).isEqualTo("INTENT_CREATED");
 
-        // PiiRedactor whitelist allow: data_classification surfaces; payload PII redacted
+        // Codex iter (019e1307) P1 absorb: PiiRedactor whitelist boundary assert.
+        // PiiRedactor.java:59 whitelist allows "data_classification" key; payload values
+        // (user_email, user_name) NOT in whitelist → redacted out.
         Map<String, Object> details = intentCreated.getDetails();
         assertThat(details)
-            .containsKeys("template_id", "recipient_hash")
+            .as("PiiRedactor whitelist: data_classification surfaces in audit details")
+            .containsEntry("data_classification", DataClassification.security.name());
+        assertThat(details)
+            .as("audit details contain template_id + recipient_hash (whitelist allow)")
+            .containsKeys("template_id", "recipient_hash");
+        assertThat(details)
+            .as("PiiRedactor whitelist: payload PII (user_email/user_name) redacted out")
             .doesNotContainKeys("user_email", "user_name");
 
-        // Note: data_classification may not appear in INTENT_CREATED audit (depends on
-        // AuditEventPublisher.publishIntentCreated impl); verify via intent persistence
         NotificationIntent fetched = intentRepo.findByIntentId(intentId).orElseThrow();
         assertThat(fetched.getDataClassification()).isEqualTo(DataClassification.security);
+    }
+
+    // ================================================================
+    // Codex iter (019e1307) P2 absorb: warning severity coverage
+    // ================================================================
+
+    @Test
+    @DisplayName("warning severity x system classification → audit reflects both fields")
+    void warningSystemCombination() {
+        runAcceptanceMatrix(DataClassification.system, NotificationIntent.Severity.warning);
     }
 
     // ================================================================
@@ -213,7 +229,22 @@ class DataClassificationAcceptanceTest extends AbstractPostgresTest {
         assertThat(audits)
             .as("INTENT_CREATED audit row written for %s/%s", classification, severity)
             .hasSize(1);
-        assertThat(audits.get(0).getEventType()).isEqualTo("INTENT_CREATED");
+        AuditEvent audit = audits.get(0);
+        assertThat(audit.getEventType()).isEqualTo("INTENT_CREATED");
+
+        // Codex iter (019e1307) P1 absorb: audit details serialization assert.
+        // AuditEventPublisher.java:56-57 raw details puts severity + data_classification;
+        // PiiRedactor.java:59 whitelist allow data_classification + severity (line 60).
+        // Acceptance gate: classification name + severity name surface in audit details.
+        Map<String, Object> details = audit.getDetails();
+        assertThat(details)
+            .as("audit details contain data_classification=%s for %s/%s",
+                classification.name(), classification, severity)
+            .containsEntry("data_classification", classification.name());
+        assertThat(details)
+            .as("audit details contain severity=%s for %s/%s",
+                severity.name(), classification, severity)
+            .containsEntry("severity", severity.name());
     }
 
     private SubmitIntentRequest buildRequest(String intentId, String idemKey,
