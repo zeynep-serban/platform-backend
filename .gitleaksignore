@@ -13,13 +13,3 @@
 6b4f59359a909f7c8452c4b2db29d84290f16480:notification-orchestrator/src/main/java/com/serban/notify/provider/DkimSigner.java:private-key:117
 4c7228e1f901bd0446c9795707322429361d8b7b:notification-orchestrator/src/main/java/com/serban/notify/provider/DkimSigner.java:private-key:102
 4c7228e1f901bd0446c9795707322429361d8b7b:notification-orchestrator/src/main/java/com/serban/notify/provider/DkimSigner.java:private-key:109
-
-# Faz 23.2.A T1.1.8 P0.5 — UnsubscribeRevokeServiceIntegrationTest test fixture
-# value `integration-test-signing-secret-32-char-fixed` is a test-only HMAC
-# signing secret bound via @TestPropertySource. NOT a leaked production secret.
-# Pattern matches gitleaks generic-api-key rule (entropy 3.79). Test fixture
-# provides deterministic signature for HMAC verify round-trip in 4 e2e tests.
-# Production secret comes from Vault/ESO `unsubscribe_signing_secret` key
-# (kv/platform/notification-orchestrator) — already in test cluster Vault since
-# Session 44 P0.3 (2026-05-10 17:41Z) + ESO 15. key wired via gitops PR #498.
-eaf1d326da69d4a059a3392f900a9d67471f076c:notification-orchestrator/src/test/java/com/serban/notify/unsubscribe/UnsubscribeRevokeServiceIntegrationTest.java:generic-api-key:58
