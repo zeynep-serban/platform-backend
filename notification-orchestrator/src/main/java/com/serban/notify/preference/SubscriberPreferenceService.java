@@ -9,8 +9,13 @@ import com.serban.notify.repository.SubscriberContactRepository;
 import com.serban.notify.repository.SubscriberPreferenceRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.time.Clock;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.Map;
 import java.util.Optional;
 
@@ -41,6 +46,12 @@ public class SubscriberPreferenceService {
     private final SubscriberPreferenceRepository preferenceRepo;
     private final AuditEventPublisher auditPublisher;
     private final PiiRedactor piiRedactor;
+    /**
+     * Quiet hours enforcement clock (T1.1.6 Faz 23.2.A acceptance gate).
+     * Default {@link Clock#systemDefaultZone()}; tests override via
+     * {@link #setClock(Clock)} to deterministic instants.
+     */
+    private Clock clock = Clock.systemDefaultZone();
 
     public SubscriberPreferenceService(
         SubscriberContactRepository contactRepo,
@@ -52,6 +63,17 @@ public class SubscriberPreferenceService {
         this.preferenceRepo = preferenceRepo;
         this.auditPublisher = auditPublisher;
         this.piiRedactor = piiRedactor;
+    }
+
+    /**
+     * Test-only setter for deterministic quiet hours timing (T1.1.6).
+     * Production runtime uses default systemDefaultZone clock.
+     */
+    @Autowired(required = false)
+    public void setClock(Clock clock) {
+        if (clock != null) {
+            this.clock = clock;
+        }
     }
 
     /**
@@ -132,7 +154,80 @@ public class SubscriberPreferenceService {
             return PreferenceDecision.deny("preference_disabled");
         }
 
+        // T1.1.6 quiet hours enforcement (Faz 23.2.A acceptance gate).
+        // JSON contract: {"start":"22:00","end":"07:00","tz":"Europe/Istanbul"}.
+        // Critical bypass also applies for quiet hours (severity=critical +
+        // bypassForCritical=true → ALLOW even within quiet window).
+        if (p.getQuietHours() != null && !p.getQuietHours().isEmpty()
+            && isInQuietHoursWindow(p.getQuietHours())) {
+            if (intent.getSeverity() == NotificationIntent.Severity.critical
+                && p.isBypassForCritical()) {
+                log.debug("quiet_hours deny BYPASSED (critical severity): subscriberId={} channel={} topic={}",
+                    subscriberId, channel, intent.getTopicKey());
+                return PreferenceDecision.allow("critical_bypass_quiet_hours");
+            }
+            log.debug("quiet_hours suppression: subscriberId={} channel={} topic={} window={}",
+                subscriberId, channel, intent.getTopicKey(), p.getQuietHours());
+            return PreferenceDecision.deny("quiet_hours");
+        }
+
         return PreferenceDecision.allow("preference_enabled");
+    }
+
+    /**
+     * Quiet hours window check (T1.1.6).
+     *
+     * <p>JSON contract:
+     * <pre>{@code
+     * {
+     *   "start": "22:00",         // LocalTime HH:mm
+     *   "end":   "07:00",
+     *   "tz":    "Europe/Istanbul" // optional, defaults to UTC
+     * }
+     * }</pre>
+     *
+     * <p>Cross-day windows (start > end, e.g., 22:00→07:00) span midnight.
+     *
+     * <p>Invalid config (parse error, missing fields) → fail-open (no
+     * suppression) with WARN log, since a misconfigured preference shouldn't
+     * silently block all delivery.
+     *
+     * @return true if current time is within quiet hours window (suppress)
+     */
+    private boolean isInQuietHoursWindow(Map<String, Object> quietHours) {
+        Object startObj = quietHours.get("start");
+        Object endObj = quietHours.get("end");
+        Object tzObj = quietHours.getOrDefault("tz", "UTC");
+
+        if (!(startObj instanceof String) || !(endObj instanceof String)) {
+            log.warn("quiet_hours invalid config (missing start/end): {}", quietHours);
+            return false;
+        }
+        String start = (String) startObj;
+        String end = (String) endObj;
+        String tz = tzObj instanceof String ? (String) tzObj : "UTC";
+
+        try {
+            LocalTime startTime = LocalTime.parse(start);
+            LocalTime endTime = LocalTime.parse(end);
+            ZoneId zone = ZoneId.of(tz);
+            LocalTime now = ZonedDateTime.now(clock.withZone(zone)).toLocalTime();
+
+            if (startTime.equals(endTime)) {
+                return false;  // empty window
+            }
+            if (startTime.isBefore(endTime)) {
+                // Same-day window (e.g., 09:00-17:00)
+                return !now.isBefore(startTime) && now.isBefore(endTime);
+            } else {
+                // Cross-day window (e.g., 22:00-07:00 spans midnight)
+                return !now.isBefore(startTime) || now.isBefore(endTime);
+            }
+        } catch (Exception e) {
+            log.warn("quiet_hours parse error (start={} end={} tz={}): {} — fail-open",
+                start, end, tz, e.getMessage());
+            return false;
+        }
     }
 
     /**
