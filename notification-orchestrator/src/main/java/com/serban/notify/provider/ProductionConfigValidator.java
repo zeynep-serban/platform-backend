@@ -56,6 +56,12 @@ public class ProductionConfigValidator {
      * Default dev value MUST NOT leak to prod.
      */
     private final String unsubscribeSigningSecret;
+    /**
+     * T1.1.8 (Faz 23.2.A) P0.4 — unsubscribe link base URL production-host guard.
+     * Default dev value `https://testai.acik.com/...` MUST NOT leak to prod;
+     * prod must use `https://ai.acik.com/...` prefix (Codex 019e12d4 absorb).
+     */
+    private final String unsubscribeBaseUrl;
 
     public ProductionConfigValidator(
         Environment springEnv,
@@ -67,6 +73,8 @@ public class ProductionConfigValidator {
             String authzInternalApiKey,
         @Value("${notify.unsubscribe.signing-secret:dev-only-unsubscribe-secret-not-for-production}")
             String unsubscribeSigningSecret,
+        @Value("${notify.unsubscribe.base-url:https://testai.acik.com/api/v1/notify/unsubscribe}")
+            String unsubscribeBaseUrl,
         @Value("${notify.smtp.tls.enforce:false}") boolean smtpTlsEnforce,
         @Value("${notify.smtp.tls.check-server-identity:true}") boolean smtpTlsCheckServerIdentity,
         @Value("${notify.preferences.enabled:true}") boolean preferencesEnabled,
@@ -77,6 +85,7 @@ public class ProductionConfigValidator {
         this.webhookLegacySecret = webhookLegacySecret;
         this.authzInternalApiKey = authzInternalApiKey;
         this.unsubscribeSigningSecret = unsubscribeSigningSecret;
+        this.unsubscribeBaseUrl = unsubscribeBaseUrl;
         this.smtpTlsEnforce = smtpTlsEnforce;
         this.smtpTlsCheckServerIdentity = smtpTlsCheckServerIdentity;
         this.preferencesEnabled = preferencesEnabled;
@@ -125,6 +134,11 @@ public class ProductionConfigValidator {
         // Email link integrity boundary; default dev value MUST NOT leak to prod.
         validateSecret(errors, "notify.unsubscribe.signing-secret",
             unsubscribeSigningSecret, "dev-only-unsubscribe-secret-not-for-production");
+
+        // T1.1.8 P0.4 — unsubscribe base URL prod-host guard (Codex 019e12d4 absorb).
+        // Email link routing integrity boundary; test/dev URLs MUST NOT leak to prod
+        // (subscribers click link → wrong host → 404 / wrong-cluster credential drift).
+        validateUnsubscribeBaseUrl(errors, unsubscribeBaseUrl);
 
         // Preferences (Codex PR5 Q1)
         if (!preferencesEnabled) {
@@ -180,6 +194,50 @@ public class ProductionConfigValidator {
         if (value.trim().length() != value.length()) {
             errors.add(key + " contains leading/trailing whitespace — likely config "
                 + "injection error (Vault value should be raw secret without surrounding spaces)");
+        }
+    }
+
+    /**
+     * Validate unsubscribe base URL for production (T1.1.8 P0.4 + Codex 019e12d4).
+     *
+     * Rejects:
+     * <ul>
+     *   <li>Null or blank value</li>
+     *   <li>Test/dev hosts (testai.acik.com, localhost, 127.0.0.1, *.test, *.dev)</li>
+     *   <li>HTTP scheme (HTTPS required for email-link integrity over public network)</li>
+     * </ul>
+     *
+     * <p>**Why prod-host guard**: subscriber clicks unsubscribe link in email →
+     * link routing must hit prod cluster. Test URL leak → wrong cluster reaches
+     * (subscriber's `subscriberId` doesn't exist there → 401/404 → user can't
+     * opt-out → KVKK Art.13 right-to-info compliance gap + GDPR-equivalent risk).
+     *
+     * <p>**Allowed prod prefixes**: `https://ai.acik.com/`, `https://*.acik.com/`
+     * (custom subdomain pattern allowed for multi-tenant), HTTPS-only.
+     */
+    private static void validateUnsubscribeBaseUrl(List<String> errors, String url) {
+        String key = "notify.unsubscribe.base-url";
+        if (url == null || url.isBlank()) {
+            errors.add(key + "=blank — production must set non-blank value");
+            return;
+        }
+        // HTTPS required (cleartext HTTP fallback YASAK in prod)
+        if (!url.startsWith("https://")) {
+            errors.add(key + "=" + url + " — production must use HTTPS scheme "
+                + "(email links over public network; HTTP fallback exposes token query param)");
+            return;
+        }
+        // Reject known dev/test hosts
+        String lower = url.toLowerCase();
+        if (lower.contains("testai.acik.com")
+            || lower.contains("localhost")
+            || lower.contains("127.0.0.1")
+            || lower.contains(".test/")
+            || lower.contains(".dev/")
+            || lower.contains("staging-sw")) {
+            errors.add(key + "=" + url + " — production must NOT use test/dev host "
+                + "(subscriber link routing → wrong cluster → 404/credential drift; "
+                + "expected prod prefix `https://ai.acik.com/`)");
         }
     }
 }
