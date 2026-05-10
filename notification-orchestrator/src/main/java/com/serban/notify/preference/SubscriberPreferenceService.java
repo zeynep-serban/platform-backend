@@ -66,8 +66,17 @@ public class SubscriberPreferenceService {
     }
 
     /**
-     * Test-only setter for deterministic quiet hours timing (T1.1.6).
-     * Production runtime uses default systemDefaultZone clock.
+     * Clock injection for deterministic quiet hours timing (T1.1.6).
+     *
+     * <p>**Intended use**: tests inject a fixed clock via this setter to
+     * exercise window boundaries deterministically. Production keeps the
+     * default {@link Clock#systemDefaultZone()} unless an operator explicitly
+     * registers a Clock bean (e.g., for time-zone freeze drills); such bean
+     * would be a deliberate operational change, not silent.
+     *
+     * <p>Codex iter-1 (thread `019e118b`) PARTIAL absorb: documented the
+     * non-test injection path so future Clock bean introduction is a
+     * conscious choice with explicit annotation rationale.
      */
     @Autowired(required = false)
     public void setClock(Clock clock) {
