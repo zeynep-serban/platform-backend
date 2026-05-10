@@ -49,21 +49,21 @@ class VaultFailfastFallbackHandlerTest {
     /**
      * 2026-05-10 regression guard (login flow hot-fix):
      * Before this fix, ANY {@link org.springframework.web.reactive.function.client.WebClientRequestException}
-     * unconditionally fired the 503 + VAULT_UNAVAILABLE response — even
-     * a transient HTTP-level error with no underlying connect failure.
-     * Live cluster smoke 2026-05-10:
-     *   /realms/platform-test/protocol/openid-connect/auth → 503 (first attempt)
-     *   /realms/platform-test/protocol/openid-connect/auth → 200 (retry)
-     * Classic transient hiccup that should NOT have surfaced as a vault
+     * on a gateway-routed endpoint unconditionally fired the
+     * 503 + VAULT_UNAVAILABLE response — even a transient HTTP-level
+     * error with no underlying connect failure. Earlier session
+     * observed this on {@code /api/auth/cookie} POST: classic
+     * transient hiccup that should NOT have surfaced as a vault
      * outage page; the misleading 503 broke the user's login flow.
      *
      * <p>The fix narrows the catch to genuine connection-level failures
-     * via the unwrapped root cause — a WebClientRequestException whose
-     * underlying cause is something else (e.g. a generic transport
-     * issue, a malformed response, a slow connection that didn't reach
-     * actual timeout) now falls through to Spring's default 502 Bad
-     * Gateway error handler so the client sees a retriable error
-     * instead of a "vault down" outage page.
+     * via the unwrapped root cause + cause-chain walk. A
+     * WebClientRequestException whose underlying cause is something
+     * else (e.g. a generic transport issue, a malformed response, a
+     * slow connection that didn't reach actual timeout) now writes
+     * an explicit 502 Bad Gateway with stable JSON shape and
+     * {@code X-Serban-Outage-Code: GATEWAY_TRANSIENT} so the client
+     * sees a retriable error distinct from a "vault down" outage.
      */
     @Test
     void writesBadGatewayForWebClientRequestExceptionWithoutConnectionRootCause() {

@@ -131,12 +131,15 @@ public class VaultFailfastFallbackHandler implements ErrorWebExceptionHandler, O
         //   {@code if (throwable instanceof WebClientRequestException) return true;}
         // converted any transient WebClient failure (DNS retry, brief
         // connection drop, slow upstream) into a 503 with a misleading
-        // "Kimlik altyapısı devrede değil" page, breaking the user's
-        // login flow even when the actual root cause was a
-        // healthy-cluster transient. Live cluster smoke 2026-05-10:
-        // /realms/platform-test/protocol/openid-connect/auth observed
-        // returning 503 on first attempt then 200 on retry — classic
-        // transient that should never have surfaced as a vault outage.
+        // "Kimlik altyapısı devrede değil" page, breaking user-facing
+        // gateway-routed endpoints (e.g. {@code /api/auth/cookie} POST
+        // observed in earlier session smoke) even when the actual
+        // root cause was a healthy-cluster HTTP-level transient.
+        //
+        // Scope: this fixes /api/* gateway-routed errors. KC routes
+        // ({@code /realms/**}) bypass the gateway entirely (host
+        // nginx proxy_pass to KC pod directly) — KC pod 503s require
+        // a separate KC pod / host nginx investigation.
         //
         // {@code Exceptions.unwrap()} only unwraps reactor-specific
         // wrappers (CompositeException, ReactiveException); it does
