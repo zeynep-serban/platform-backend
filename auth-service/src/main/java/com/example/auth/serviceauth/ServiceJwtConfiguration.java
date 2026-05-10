@@ -17,6 +17,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtEncoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
@@ -55,7 +56,36 @@ public class ServiceJwtConfiguration {
         return new NimbusJwtEncoder(jwkSource);
     }
 
+    /**
+     * Service-to-service JWT decoder. Sadece {@code local} ve {@code dev}
+     * profillerinde devreye girer; {@code k8s} (test/prod) profilinde Spring
+     * Boot OAuth2 Resource Server auto-config {@code jwk-set-uri} üzerinden
+     * Keycloak JWKS decoder'ı üretir.
+     *
+     * <p><b>Codex iter-1 REVISE absorb (2026-05-10, thread 019e1183)</b>:
+     * Önceki revizyon {@code @ConditionalOnProperty(matchIfMissing = false)}
+     * kullanıyordu, ancak Spring Boot 3.5.6 {@code OnPropertyCondition$Spec.isMatch}
+     * semantiği gereği "property tamamen yok" durumunu test eder.
+     * {@code application.properties:32} ve {@code application-k8s.yml:119}
+     * boş fallback ({@code ${AUTH_SERVICE_JWT_PRIVATE_KEY:}}) tanımladığı için
+     * property test cluster'da <b>present (boş string)</b> olarak görünüyor
+     * ve {@code havingValue} verilmediğinden condition match ederek
+     * decoder bean instantiate ediliyordu — hot-fix etkisiz.
+     *
+     * <p>{@code @Profile({"local","dev"})} ile k8s/prod profilinde bean
+     * hiçbir koşulda instantiate olmaz; Spring auto-config primary
+     * {@code JwtDecoder} (jwk-set-uri based) Keycloak access tokenlarını
+     * doğru public key ile decode eder. Local/dev'de mevcut
+     * {@link com.example.auth.security.JwtTokenProvider} flow'u (legacy
+     * service-to-service) korunur.
+     *
+     * <p>Prod'da service-to-service JWT decode gerekirse (mevcut akışta
+     * yok), follow-up: resource server config'de explicit
+     * {@code jwt(jwt -> jwt.decoder(keycloakJwtDecoder))} ile decoder
+     * bağla, service decoder'ı {@code @Qualifier} ile sınırla.
+     */
     @Bean
+    @Profile({"local", "dev"})
     public JwtDecoder jwtDecoder(RSAKey rsaKey) {
         try {
             return NimbusJwtDecoder.withPublicKey(rsaKey.toRSAPublicKey()).build();
