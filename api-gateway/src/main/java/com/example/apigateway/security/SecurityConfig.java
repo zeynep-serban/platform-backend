@@ -57,6 +57,22 @@ public class SecurityConfig {
                 // call goes without Authorization header. Registry data is not
                 // sensitive (just CSS variable key→list mappings). Suppress 401.
                 .pathMatchers(HttpMethod.GET, "/api/v1/theme-registry", "/api/v1/theme-registry/**").permitAll()
+                // Faz 23.4 T3.1.7 — SMS DLR (Delivery Receipt) provider webhooks
+                // public path. NetGSM / İletimerkezi external POST yapacak, JWT
+                // yok. Backend (notification-orchestrator) controller seviyesinde
+                // shared-secret header token (X-NetGSM-DLR-Token) ile constant-time
+                // compare + Spring Security DLR path permitAll (defense-in-depth).
+                // Without gateway permitAll, NetGSM webhook → 401 → provider
+                // exhausts retries; DLR state mutation hiç gerçekleşmez. Tek satır
+                // gap (PR #85 backend permitAll'a paralel gateway tarafı eksikti).
+                // POST only — diğer HTTP methodlar default authenticated().
+                .pathMatchers(HttpMethod.POST, "/api/v1/notify/dlr/**").permitAll()
+                // Faz 23.2.A T1.1.8 — public unsubscribe link landing.
+                // Email recipient browser tıklayışı; HMAC-SHA256 signed token
+                // controller seviyesinde verify edilir (UnsubscribeTokenService).
+                // POST = revoke action (RFC 8058 one-click), GET = legacy fallback;
+                // ikisi de subscriber session olmadan çalışmalı.
+                .pathMatchers("/api/v1/notify/unsubscribe", "/api/v1/notify/unsubscribe/**").permitAll()
                 .anyExchange().authenticated()
             )
             .oauth2ResourceServer(oauth -> oauth

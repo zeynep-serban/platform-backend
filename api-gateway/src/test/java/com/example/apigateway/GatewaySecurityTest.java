@@ -100,6 +100,25 @@ class GatewaySecurityTest {
                             .addHeader("Content-Type", "text/event-stream")
                             .setBody(": connected\n\nevent: unread-count\ndata: {\"count\":0}\n\n");
                 }
+                // Faz 23.4 T3.1.7 — DLR provider webhook stub. Backend
+                // (notification-orchestrator) DlrController handles
+                // shared-secret token verification (X-NetGSM-DLR-Token);
+                // here we only stub the downstream so we can assert the
+                // gateway permitAll bypass works for the public path.
+                if (path != null && path.startsWith("/api/v1/notify/dlr/")) {
+                    return new MockResponse().setResponseCode(200)
+                            .addHeader("Content-Type", "application/json")
+                            .setBody("{\"action\":\"UPDATED\",\"provider_msg_id\":\"netgsm-test\"}");
+                }
+                // Faz 23.2.A T1.1.8 — unsubscribe landing/revoke stub.
+                // Backend UnsubscribeController verifies HMAC-SHA256
+                // signed token; gateway permitAll only ensures the path
+                // is publicly reachable.
+                if (path != null && path.startsWith("/api/v1/notify/unsubscribe")) {
+                    return new MockResponse().setResponseCode(200)
+                            .addHeader("Content-Type", "application/json")
+                            .setBody("{\"action\":\"REVOKED\"}");
+                }
                 return new MockResponse().setResponseCode(404);
             }
         };
@@ -352,6 +371,89 @@ class GatewaySecurityTest {
                 .expectHeader().contentType("application/json")
                 .expectBody()
                 .jsonPath("$.error").isEqualTo("unauthorized");
+    }
+
+    // ─── Faz 23.4 T3.1.7 — SMS DLR provider webhook gateway permitAll ─────
+    // NetGSM external POST yapacak (Internet → ingress → api-gateway →
+    // notification-orchestrator). JWT yok — backend kendi
+    // shared-secret token (X-NetGSM-DLR-Token) ile constant-time compare.
+    // Gateway tarafında `/api/v1/notify/dlr/**` POST permitAll olmalı; aksi
+    // halde provider 401 alır, retry exhaust eder, DLR state mutation
+    // gerçekleşmez. Aşağıdaki testler bu kontratı doğrular.
+
+    @Test
+    void dlr_netgsm_post_without_jwt_returns_200() {
+        if (isLocalProfile()) {
+            // local profile zaten permitAll — kontrat zaten karşılanıyor
+            return;
+        }
+        webClient.post().uri("http://localhost:" + port + "/api/v1/notify/dlr/netgsm")
+                .header("X-NetGSM-DLR-Token", "shared-secret")
+                .header("Content-Type", "application/json")
+                .bodyValue("{\"jobid\":\"test-job\",\"code\":\"00\"}")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.action").isEqualTo("UPDATED");
+    }
+
+    @Test
+    void dlr_netgsm_post_with_jwt_still_works() {
+        // Defensive: JWT varlığı POST'u kırmamalı (permitAll path JWT'yi
+        // ignore eder ama exception fırlatmaz). Bu test PR-time'da
+        // bilinçli auth karışmasına karşı koruma.
+        String t = token();
+        webClient.post().uri("http://localhost:" + port + "/api/v1/notify/dlr/netgsm")
+                .header("Authorization", "Bearer " + t)
+                .header("Content-Type", "application/json")
+                .bodyValue("{\"jobid\":\"test-job\",\"code\":\"00\"}")
+                .exchange()
+                .expectStatus().isOk();
+    }
+
+    @Test
+    void dlr_netgsm_get_without_jwt_returns_401() {
+        // Sadece POST permitAll edildi (HttpMethod.POST). GET yöntemi
+        // hâlâ `.anyExchange().authenticated()` matrisinde — provider
+        // misconfiguration veya saldırgan probing'e karşı GET 401 dönmeli.
+        if (isLocalProfile()) {
+            return;
+        }
+        webClient.get().uri("http://localhost:" + port + "/api/v1/notify/dlr/netgsm")
+                .exchange()
+                .expectStatus().isUnauthorized();
+    }
+
+    // ─── Faz 23.2.A T1.1.8 — Public unsubscribe gateway permitAll ─────────
+    // Email recipient browser'da link tıklar; subscriber session olmayabilir.
+    // Backend (notification-orchestrator) HMAC-SHA256 signed token verifier
+    // (UnsubscribeTokenService) controller seviyesinde gate. Gateway permitAll
+    // sadece path'in publicly reachable olmasını sağlar.
+
+    @Test
+    void unsubscribe_get_without_jwt_returns_200() {
+        if (isLocalProfile()) {
+            return;
+        }
+        webClient.get().uri("http://localhost:" + port + "/api/v1/notify/unsubscribe?token=test-hmac-token")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.action").isEqualTo("REVOKED");
+    }
+
+    @Test
+    void unsubscribe_post_without_jwt_returns_200() {
+        // RFC 8058 one-click unsubscribe (POST). Header dahi olmayan
+        // anonim POST cycle desteklenir.
+        if (isLocalProfile()) {
+            return;
+        }
+        webClient.post().uri("http://localhost:" + port + "/api/v1/notify/unsubscribe")
+                .header("Content-Type", "application/json")
+                .bodyValue("{\"token\":\"test-hmac-token\"}")
+                .exchange()
+                .expectStatus().isOk();
     }
 
     @Test
