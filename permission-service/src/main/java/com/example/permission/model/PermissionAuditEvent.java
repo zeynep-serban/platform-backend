@@ -3,12 +3,15 @@ package com.example.permission.model;
 import jakarta.persistence.*;
 
 import java.time.Instant;
+import java.util.UUID;
 
 @Entity
 @Table(name = "permission_audit_events", indexes = {
         @Index(name = "idx_permission_audit_events_type", columnList = "event_type"),
         @Index(name = "idx_permission_audit_events_user", columnList = "user_email"),
-        @Index(name = "idx_permission_audit_events_service", columnList = "service")
+        @Index(name = "idx_permission_audit_events_service", columnList = "service"),
+        @Index(name = "idx_permission_audit_events_imp_session", columnList = "impersonation_session_id"),
+        @Index(name = "idx_permission_audit_events_imp_target", columnList = "target_user_id")
 })
 public class PermissionAuditEvent {
 
@@ -51,6 +54,36 @@ public class PermissionAuditEvent {
 
     @Column(name = "occurred_at", nullable = false, updatable = false)
     private Instant occurredAt = Instant.now();
+
+    // ── User Impersonation v1 audit context (V19 migration) ──
+    // Codex iter-27 mandate: audit completeness — start/stop/fail/blocked
+    // path'lerinde event yazımı yeni V19 kolonlarını doldurmadan kapanmış sayılmaz.
+    @Column(name = "impersonation_session_id")
+    private UUID impersonationSessionId;
+
+    @Column(name = "is_impersonated", nullable = false)
+    private boolean impersonated = false;
+
+    @Column(name = "impersonator_user_id")
+    private Long impersonatorUserId;
+
+    @Column(name = "impersonator_subject", length = 255)
+    private String impersonatorSubject;
+
+    @Column(name = "impersonator_email", length = 255)
+    private String impersonatorEmail;
+
+    @Column(name = "target_user_id")
+    private Long targetUserId;
+
+    @Column(name = "target_subject", length = 255)
+    private String targetSubject;
+
+    @Column(name = "target_email", length = 255)
+    private String targetEmail;
+
+    @Column(name = "impersonation_reason", length = 500)
+    private String impersonationReason;
 
     public PermissionAuditEvent() {
     }
@@ -187,5 +220,77 @@ public class PermissionAuditEvent {
 
     public void setAfterState(String afterState) {
         this.afterState = afterState;
+    }
+
+    public UUID getImpersonationSessionId() {
+        return impersonationSessionId;
+    }
+
+    public void setImpersonationSessionId(UUID impersonationSessionId) {
+        this.impersonationSessionId = impersonationSessionId;
+    }
+
+    public boolean isImpersonated() {
+        return impersonated;
+    }
+
+    public void setImpersonated(boolean impersonated) {
+        this.impersonated = impersonated;
+    }
+
+    public Long getImpersonatorUserId() {
+        return impersonatorUserId;
+    }
+
+    public void setImpersonatorUserId(Long impersonatorUserId) {
+        this.impersonatorUserId = impersonatorUserId;
+    }
+
+    public String getImpersonatorSubject() {
+        return impersonatorSubject;
+    }
+
+    public void setImpersonatorSubject(String impersonatorSubject) {
+        this.impersonatorSubject = impersonatorSubject;
+    }
+
+    public String getImpersonatorEmail() {
+        return impersonatorEmail;
+    }
+
+    public void setImpersonatorEmail(String impersonatorEmail) {
+        this.impersonatorEmail = impersonatorEmail;
+    }
+
+    public Long getTargetUserId() {
+        return targetUserId;
+    }
+
+    public void setTargetUserId(Long targetUserId) {
+        this.targetUserId = targetUserId;
+    }
+
+    public String getTargetSubject() {
+        return targetSubject;
+    }
+
+    public void setTargetSubject(String targetSubject) {
+        this.targetSubject = targetSubject;
+    }
+
+    public String getTargetEmail() {
+        return targetEmail;
+    }
+
+    public void setTargetEmail(String targetEmail) {
+        this.targetEmail = targetEmail;
+    }
+
+    public String getImpersonationReason() {
+        return impersonationReason;
+    }
+
+    public void setImpersonationReason(String impersonationReason) {
+        this.impersonationReason = impersonationReason;
     }
 }

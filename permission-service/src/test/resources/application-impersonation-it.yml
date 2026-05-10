@@ -1,0 +1,83 @@
+# User Impersonation v1 (PR-B Step 2f) integration test profile.
+#
+# Activated via @ActiveProfiles("impersonation-it") on
+# ImpersonationSessionIntegrationTest. Forces the primary DataSource onto
+# a real PostgreSQL (Testcontainers) so V19 PG-specific schema features
+# (INET, TIMESTAMPTZ, partial UNIQUE indexes, CHECK constraints) can be
+# validated.
+#
+# Inherits the H2 + Flyway-off setup from application.properties (test
+# profile) and overrides:
+#   - flyway.enabled=true (apply V1..V19 migrations to the PG container)
+#   - hibernate ddl-auto=validate (make sure entities match V19 schema)
+#   - vault/eureka/discovery still off
+spring:
+  cloud:
+    vault:
+      enabled: false
+    discovery:
+      enabled: false
+    service-registry:
+      auto-registration:
+        enabled: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  datasource:
+    # url/username/password set at runtime by Testcontainers
+    # @DynamicPropertySource — only static metadata here.
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 4
+      minimum-idle: 1
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:8081/realms/serban
+          jwk-set-uri: http://localhost:8081/realms/serban/protocol/openid-connect/certs
+
+eureka:
+  client:
+    enabled: false
+
+audit:
+  live-stream:
+    enabled: false
+
+erp:
+  openfga:
+    enabled: false
+    api-url: http://localhost:4000
+    store-id: test-store
+    model-id: test-model
+
+permission:
+  authz:
+    user-table: user_service.users
+    user-lookup-base-url: http://localhost:8089
+
+auth:
+  security:
+    mock: true
+
+management:
+  endpoints:
+    access:
+      default: none
+  prometheus:
+    metrics:
+      export:
+        enabled: false
+
+logging:
+  level:
+    root: WARN
+    org.testcontainers: INFO
+    org.flywaydb: INFO

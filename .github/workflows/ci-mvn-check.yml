@@ -127,7 +127,7 @@ jobs:
         run: ./mvnw -q -pl common-auth install -DskipTests
 
       - name: Run permission-service Testcontainers integration tests
-        run: ./mvnw -q -pl permission-service test -Pintegration-tests -Dtest='DataAccessIntegrationTest,DataAccessActivationContractTest'
+        run: ./mvnw -q -pl permission-service test -Pintegration-tests -Dtest='DataAccessIntegrationTest,DataAccessActivationContractTest,ImpersonationSessionIntegrationTest'
 
   report-service-mssql-integration-test:
     name: report-service MSSQL Testcontainers integration test (PR-0.5)

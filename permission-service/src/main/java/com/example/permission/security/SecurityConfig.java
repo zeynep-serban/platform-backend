@@ -51,7 +51,8 @@ public class SecurityConfig {
     public SecurityFilterChain securityFilterChain(HttpSecurity http,
                                                    JwtDecoder jwtDecoder,
                                                    CompositeJwtAuthenticationConverter jwtAuthenticationConverter,
-                                                   InternalApiKeyAuthFilter internalApiKeyAuthFilter) throws Exception {
+                                                   InternalApiKeyAuthFilter internalApiKeyAuthFilter,
+                                                   ImpersonationContextFilter impersonationContextFilter) throws Exception {
         http
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
@@ -76,6 +77,10 @@ public class SecurityConfig {
                 );
 
         http.addFilterBefore(internalApiKeyAuthFilter, BearerTokenAuthenticationFilter.class);
+        // Codex iter-27 P0 absorb: jti_session_lookup binding enforcement
+        // runs AFTER bearer auth populates SecurityContext so JwtAuthenticationToken
+        // is available to the extractor.
+        http.addFilterAfter(impersonationContextFilter, BearerTokenAuthenticationFilter.class);
 
         return http.build();
     }
