@@ -444,7 +444,46 @@ async function startImpersonation(targetUserId: number, reason: string) {
 
 Symmetric `stopImpersonation` aynı pattern.
 
-### 3.4 Audit dashboard (PR-D, MVP sonrası)
+### 3.4 Audit dashboard (PR-D2, MVP sonrası)
+
+> **2026-05-10 update**: PR-D #138 (closed) → PR-D2 fresh start (Codex
+> 019e10bf iter-2 AGREE WITH AMENDMENTS). See [ADR-0014](../adr/0014-audit-module-gating.md).
+
+#### 3.4.1 FGA module gating
+
+PR-D2 introduces a dedicated **`IMPERSONATION_AUDIT`** OpenFGA module key,
+distinct from generic `AUDIT`. Tuples shape: `module:IMPERSONATION_AUDIT
+can_view|can_manage user:<id>` against the existing `type module` model
+(no schema change). ADMIN role gets `MANAGE` seeded by default via
+`PermissionDataInitializer.DEFAULT_ROLE_GRANULES`; the
+`RoleChangeEvent` after-commit pipeline propagates the granule to OpenFGA
+through `TupleSyncService` (raw FGA tuple seeds in
+`backend/openfga/tuples-seed.json` are forbidden — CNS-20260415-004).
+
+#### 3.4.2 Endpoint contract
+
+| Endpoint | Module gate | Behavior |
+|---|---|---|
+| `GET /api/audit/events` | `AUDIT.can_view` | **IMPERSONATION_*** rows excluded unconditionally (id-shortcut also 404s) |
+| `GET /api/audit/events/impersonation` | `IMPERSONATION_AUDIT.can_view` | Only IMPERSONATION_* rows; strict `filter[action]` enum |
+| `GET /api/audit/events/export` | `AUDIT.can_manage` | GENERIC_AUDIT scope (no impersonation rows in payload) |
+| `POST /api/audit/events/export-jobs` | `AUDIT.can_manage` | GENERIC_AUDIT scope embedded in job payload |
+| `GET /api/audit/events/live` | `AUDIT.can_view` | SSE stream suppresses IMPERSONATION_* events at source |
+
+#### 3.4.3 Action filter strict enum
+
+The dedicated impersonation endpoint accepts **only** these values for
+`filter[action]` (else 400 Bad Request):
+
+- `null` (absent) — returns all 5 types
+- `IMPERSONATION` (alias) — returns all 5 types
+- `IMPERSONATION_STARTED` / `STOPPED` / `BLOCKED` / `FAILED` / `REVOKED`
+
+Substring/case-different/fabricated values (e.g. `FOO_IMPERSONATION_BAR`,
+`impersonation_started`) are rejected. The previous "silently rewrite to
+IMPERSONATION" behavior is gone.
+
+#### 3.4.4 Frontend (post-MVP)
 
 ```
 /admin/audit/impersonation-logs
@@ -458,7 +497,17 @@ Export: CSV/Excel (compliance reporting)
 Yeni rapor JSON: `report-service/src/main/resources/reports/audit-impersonation-logs.json`
 - schemaMode: static
 - source: impersonation_sessions JOIN permission_audit_events
-- access.permission: IMPERSONATION_AUDIT_VIEW (SuperAdmin only by default)
+- access.module: IMPERSONATION_AUDIT (gated by `can_view` for read,
+  `can_manage` for export — ADMIN role seeded MANAGE by default)
+
+#### 3.4.5 Known security debt (post-MVP)
+
+PR-D2 closes the AUDIT-side leak channels but does NOT yet implement
+**cross-org tenant-aware impersonation audit**: today, an
+`IMPERSONATION_AUDIT.can_view` holder sees impersonation events across
+all tenants. Multi-tenant SaaS deployments will need tenant-scoped
+guards (tuple `tenant:X#impersonation_audit_viewer@user:Y`); follow-up
+ticket out of PR-D2 scope.
 
 ## 4. Spike (impl öncesi şart)
 
@@ -657,3 +706,4 @@ curl -sk -H "Authorization: Bearer $EXCHANGED" \
 | 2026-05-09 | iter-1 | Initial draft, Codex 019e0dfb iter-1 REVISE absorb (A → A2 pivot) |
 | 2026-05-09 | iter-2 | Codex iter-2 AGREE absorb (spike-first + multi-PR sequence + edge cases extended) |
 | 2026-05-09 | iter-3 | Spike-1 koşuldu: feature/client/auth OK, **fine-grained authz policy default-deny** Spike-1 stop point. PR-A scope revize: tek atomic PR (broker client + policy + verify + smoke runbook + Vault secret reference). Spike-2 PR-A apply sonrası operator manuel; PR-B gate `PASS_NATIVE_ACT` veya `PASS_JTI_SESSION_LOOKUP`. Spike artifact: [docs/spikes/2026-05-impersonation-token-exchange-spike.md](../spikes/2026-05-impersonation-token-exchange-spike.md). `act` yoksa **`jti` + broker session lookup** primary fallback (Codex iter-3 §3 — custom JWT signing'den daha pragmatik). |
+| 2026-05-10 | iter-4 | PR-D #138 closed (3 P1 leaks identified by Codex iter-1: containsIgnoreCase substring leak, AUDIT module too broad, flat permission inert). PR-D2 fresh start (Codex `019e10bf` iter-2 AGREE WITH AMENDMENTS): dedicated `IMPERSONATION_AUDIT` module key, `ImpersonationActionPredicate` central allowlist, `AuditReadScope` enum, scope-aware `AuditEventService`, generic feed unconditional impersonation exclusion (id-shortcut + list + export + live SSE), strict action filter enum (no silent rewrite), granule-managed ADMIN seed via `RoleChangeEvent` after-commit. ADR-0014 added. |

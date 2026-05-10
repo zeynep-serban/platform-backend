@@ -20,6 +20,18 @@ public final class PermissionCodes {
     public static final String MODULE_PURCHASE = "PURCHASE";
     public static final String MODULE_THEME = "THEME";
     public static final String MODULE_COMPANY = "COMPANY";
+    /**
+     * User Impersonation v1 (PR-D2) — dedicated module key for impersonation
+     * audit dashboard. Separate from generic AUDIT so an AUDIT viewer/manager
+     * cannot read impersonation events through the dashboard or live stream.
+     *
+     * <p>Generic OpenFGA {@code type module} is reused (no new model type);
+     * tuples shape: {@code module:IMPERSONATION_AUDIT can_view|can_manage user:<id>}.
+     * Granule seed pattern (see {@link com.example.permission.config.PermissionDataInitializer})
+     * is the authoritative seeding path — raw FGA tuple seeds in
+     * {@code backend/openfga/tuples-seed.json} are forbidden (CNS-20260415-004).
+     */
+    public static final String MODULE_IMPERSONATION_AUDIT = "IMPERSONATION_AUDIT";
 
     // OpenFGA relations
     public static final String RELATION_CAN_VIEW = "can_view";

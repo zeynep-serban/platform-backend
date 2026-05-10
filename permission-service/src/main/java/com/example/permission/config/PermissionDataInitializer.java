@@ -1,11 +1,13 @@
 package com.example.permission.config;
 
+import com.example.permission.event.RoleChangeEvent;
 import com.example.permission.model.GrantType;
 import com.example.permission.model.Permission;
 import com.example.permission.model.PermissionType;
 import com.example.permission.model.Role;
 import com.example.permission.model.RolePermission;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import com.example.permission.repository.PermissionRepository;
 import com.example.permission.repository.RolePermissionRepository;
@@ -14,6 +16,7 @@ import com.example.permission.service.RolePermissionGranuleDefaults;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,6 +34,7 @@ public class PermissionDataInitializer implements CommandLineRunner {
     private final PermissionRepository permissionRepository;
     private final RoleRepository roleRepository;
     private final RolePermissionRepository rolePermissionRepository;
+    private final ApplicationEventPublisher eventPublisher;
 
     // P1-B: Simplified permissions (~35) — granular reports→groups, user duplicates→3-tier
     // Consultation CNS-20260410-001 (Claude + Codex consensus: kademeli 93→35)
@@ -99,10 +103,20 @@ public class PermissionDataInitializer implements CommandLineRunner {
             String key,
             GrantType grant) {}
 
+    /**
+     * PR-D2 (User Impersonation v1): {@code MODULE:IMPERSONATION_AUDIT:MANAGE}
+     * granule seeded onto the ADMIN role. Granule-managed seeding is the
+     * authoritative path — raw FGA tuples in
+     * {@code backend/openfga/tuples-seed.json} are forbidden
+     * (CNS-20260415-004). The TupleSyncService propagates the granule to a
+     * {@code module:IMPERSONATION_AUDIT can_manage user:<adminUserId>} tuple
+     * via {@link RoleChangeEvent} after-commit (publishImpersonationAuditSeedEvent).
+     */
+    private static final GranuleSeed IMPERSONATION_AUDIT_ADMIN_GRANULE = new GranuleSeed(
+            PermissionType.MODULE, "IMPERSONATION_AUDIT", GrantType.MANAGE);
+
     private static final Map<String, List<GranuleSeed>> DEFAULT_ROLE_GRANULES = Map.ofEntries(
-            Map.entry("ADMIN",           buildDashboardGranules(
-                    GrantType.MANAGE,
-                    DEFAULT_HR_DASHBOARD_KEYS, DEFAULT_FIN_DASHBOARD_KEYS)),
+            Map.entry("ADMIN",           buildAdminGranules()),
             Map.entry("REPORT_MANAGER",  buildDashboardGranules(
                     GrantType.MANAGE,
                     DEFAULT_HR_DASHBOARD_KEYS, DEFAULT_FIN_DASHBOARD_KEYS)),
@@ -119,6 +133,17 @@ public class PermissionDataInitializer implements CommandLineRunner {
                     GrantType.VIEW,
                     DEFAULT_FIN_DASHBOARD_KEYS))
     );
+
+    /**
+     * ADMIN granule seed list = dashboard MANAGE (HR + Finans) + dedicated
+     * IMPERSONATION_AUDIT MANAGE module grant (PR-D2).
+     */
+    private static List<GranuleSeed> buildAdminGranules() {
+        List<GranuleSeed> out = new ArrayList<>(buildDashboardGranules(
+                GrantType.MANAGE, DEFAULT_HR_DASHBOARD_KEYS, DEFAULT_FIN_DASHBOARD_KEYS));
+        out.add(IMPERSONATION_AUDIT_ADMIN_GRANULE);
+        return List.copyOf(out);
+    }
 
     @SafeVarargs
     private static List<GranuleSeed> buildDashboardGranules(
@@ -174,10 +199,12 @@ public class PermissionDataInitializer implements CommandLineRunner {
 
     public PermissionDataInitializer(PermissionRepository permissionRepository,
                                      RoleRepository roleRepository,
-                                     RolePermissionRepository rolePermissionRepository) {
+                                     RolePermissionRepository rolePermissionRepository,
+                                     ApplicationEventPublisher eventPublisher) {
         this.permissionRepository = permissionRepository;
         this.roleRepository = roleRepository;
         this.rolePermissionRepository = rolePermissionRepository;
+        this.eventPublisher = eventPublisher;
     }
 
     private record PermissionDefinition(String description, String moduleName) { }
@@ -289,6 +316,11 @@ public class PermissionDataInitializer implements CommandLineRunner {
         // PermissionCatalogService. Seed them as raw role_permissions rows
         // (permission_id IS NULL) keyed on (role_id, type, key); idempotent
         // via the partial unique index uk_role_permissions_role_granule.
+        // PR-D2: roles whose granule set actually changed during this seed pass
+        // — used to publish RoleChangeEvent so TupleSyncService propagates the
+        // new module/report granules to OpenFGA after the transaction commits.
+        Set<Long> rolesNeedingTuplePropagation = new HashSet<>();
+
         DEFAULT_ROLE_GRANULES.forEach((roleName, granules) -> {
             String normalizedRoleName = roleName.toUpperCase();
             Role role = existingRoles.get(normalizedRoleName);
@@ -314,8 +346,24 @@ public class PermissionDataInitializer implements CommandLineRunner {
                 rolePermissionRepository.save(rolePermission);
                 log.info("Seeded default granule {}/{}/{} for role {}",
                         seed.type(), seed.key(), seed.grant(), normalizedRoleName);
+                if (role.getId() != null) {
+                    rolesNeedingTuplePropagation.add(role.getId());
+                }
             }
         });
+
+        // PR-D2: publish RoleChangeEvent for every role whose granules
+        // changed. The handler is @TransactionalEventListener(BEFORE_COMMIT
+        // + AFTER_COMMIT) — outbox row written in this transaction (durable),
+        // OpenFGA tuple propagation runs async after commit (RoleChangeEventHandler
+        // → TupleSyncService.propagateRoleChange). This guarantees the
+        // IMPERSONATION_AUDIT MANAGE granule reaches OpenFGA without
+        // running tuple-sync inside the initializer transaction (which would
+        // mix DB rollback risk with FGA writes).
+        for (Long roleId : rolesNeedingTuplePropagation) {
+            eventPublisher.publishEvent(new RoleChangeEvent(roleId));
+            log.debug("Published RoleChangeEvent for role {} (granule seed propagation)", roleId);
+        }
     }
 
     /**

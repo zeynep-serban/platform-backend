@@ -21,6 +21,11 @@ public class PermissionCatalogService {
             new ModuleCatalogItem("USER_MANAGEMENT", "Kullanıcı Yönetimi", List.of("VIEW", "MANAGE")),
             new ModuleCatalogItem("ACCESS", "Erişim Yönetimi", List.of("VIEW", "MANAGE")),
             new ModuleCatalogItem("AUDIT", "Denetim", List.of("VIEW", "MANAGE")),
+            // PR-D2 (User Impersonation v1): IMPERSONATION_AUDIT is intentionally
+            // separated from AUDIT so an AUDIT viewer/manager CANNOT see
+            // impersonation events. ADMIN role gets MANAGE seeded by default
+            // (PermissionDataInitializer.DEFAULT_ROLE_GRANULES).
+            new ModuleCatalogItem("IMPERSONATION_AUDIT", "Impersonation Denetim", List.of("VIEW", "MANAGE")),
             new ModuleCatalogItem("REPORT", "Raporlama", List.of("VIEW", "MANAGE")),
             new ModuleCatalogItem("WAREHOUSE", "Depo", List.of("VIEW", "MANAGE")),
             new ModuleCatalogItem("PURCHASE", "Satın Alma", List.of("VIEW", "MANAGE")),

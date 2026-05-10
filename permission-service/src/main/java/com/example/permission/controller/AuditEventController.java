@@ -1,15 +1,17 @@
 package com.example.permission.controller;
 
 import com.example.commonauth.openfga.RequireModule;
+import com.example.permission.audit.AuditReadScope;
+import com.example.permission.audit.ImpersonationActionPredicate;
 import com.example.permission.dto.AuditEventPageResponse;
 import com.example.permission.dto.v1.AuditExportJobCreateRequestDto;
 import com.example.permission.dto.v1.AuditExportJobResponseDto;
 import com.example.permission.service.AuditEventService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -18,6 +20,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.HashMap;
@@ -45,17 +48,48 @@ public class AuditEventController {
             try { effectiveSize = Integer.parseInt(query.get("size")); } catch (Exception ignored) {}
         }
 
-        // id shortcut: deterministic fetch or 404
+        // id shortcut: deterministic fetch or 404. PR-D2: scope-aware
+        // — IMPERSONATION_* event ids return 404 here (the AUDIT viewer
+        // cannot bypass the generic-feed exclusion via id guess).
         String id = query.get("id");
         if (id != null && !id.isBlank()) {
-            AuditEventPageResponse single = auditEventService.findByIdPage(id);
+            AuditEventPageResponse single = auditEventService.findByIdPage(id, AuditReadScope.GENERIC_AUDIT);
             return ResponseEntity.ok(single);
         }
 
         Map<String, String> filters = extractFilters(query);
         // Convert 1-based 'page' to 0-based for Spring Data
         int zeroBasedPage = Math.max(1, page) - 1;
-        AuditEventPageResponse result = auditEventService.listEvents(zeroBasedPage, effectiveSize, sort, filters);
+        AuditEventPageResponse result = auditEventService.listEvents(
+                zeroBasedPage, effectiveSize, sort, filters, AuditReadScope.GENERIC_AUDIT);
+        return ResponseEntity.ok(result);
+    }
+
+    /**
+     * PR-D2 (User Impersonation v1): dedicated audit feed for the 5 canonical
+     * IMPERSONATION_* events. Gated by {@code IMPERSONATION_AUDIT.can_view}
+     * — distinct from the generic AUDIT module so an AUDIT viewer cannot read
+     * impersonation events through this endpoint or the generic feed.
+     *
+     * <p>{@code filter[action]} is strictly validated against the canonical
+     * 5-set (or alias {@code "IMPERSONATION"}) — fabricated values like
+     * {@code FOO_IMPERSONATION_BAR} return 400 Bad Request. The previous
+     * "silently rewrite to IMPERSONATION" behavior is gone.
+     *
+     * <p>Codex peer review thread {@code 019e10bf} iter-2 AGREE WITH AMENDMENTS.
+     */
+    @GetMapping("/impersonation")
+    @RequireModule(value = "IMPERSONATION_AUDIT", relation = "can_view")
+    public ResponseEntity<AuditEventPageResponse> listImpersonationEvents(
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(name = "pageSize", defaultValue = "50") int pageSize,
+            @RequestParam(required = false) String sort,
+            @RequestParam Map<String, String> query) {
+        Map<String, String> filters = extractFilters(query);
+        validateImpersonationActionFilter(filters);
+        int zeroBasedPage = Math.max(1, page) - 1;
+        AuditEventPageResponse result = auditEventService.listEvents(
+                zeroBasedPage, pageSize, sort, filters, AuditReadScope.IMPERSONATION_AUDIT);
         return ResponseEntity.ok(result);
     }
 
@@ -66,7 +100,7 @@ public class AuditEventController {
                                                @RequestParam(required = false) String sort,
                                                @RequestParam Map<String, String> query) {
         Map<String, String> filters = extractFilters(query);
-        var events = auditEventService.exportEvents(sort, filters, limit);
+        var events = auditEventService.exportEvents(sort, filters, limit, AuditReadScope.GENERIC_AUDIT);
         byte[] payload = auditEventService.buildExportPayload(events, format);
 
         String sanitizedFormat = "csv".equalsIgnoreCase(format) ? "csv" : "json";
@@ -90,7 +124,8 @@ public class AuditEventController {
                 payload.getFormat(),
                 payload.getLimit(),
                 payload.getSort(),
-                payload.getFilters()
+                payload.getFilters(),
+                AuditReadScope.GENERIC_AUDIT
         );
         return ResponseEntity.status(201).body(response);
     }
@@ -99,14 +134,25 @@ public class AuditEventController {
     @RequireModule(value = "AUDIT", relation = "can_manage")
     public ResponseEntity<AuditExportJobResponseDto> getExportJob(@PathVariable String jobId,
                                                                   Authentication authentication) {
-        return ResponseEntity.ok(auditEventService.getExportJob(jobId, resolveRequestedBy(authentication)));
+        // PR-D2 iter-3 absorb (Codex 019e10bf P1): scope-aware status fetch.
+        // Pre-PR-D2 jobs and any IMPERSONATION-scoped job leak through the
+        // generic AUDIT.can_manage gate without this third argument; legacy
+        // jobs are fail-closed to 404.
+        return ResponseEntity.ok(auditEventService.getExportJob(
+                jobId, resolveRequestedBy(authentication), AuditReadScope.GENERIC_AUDIT));
     }
 
     @GetMapping("/export-jobs/{jobId}/download")
     @RequireModule(value = "AUDIT", relation = "can_manage")
     public ResponseEntity<byte[]> downloadExportJob(@PathVariable String jobId,
                                                     Authentication authentication) {
-        var job = auditEventService.getCompletedExportJob(jobId, resolveRequestedBy(authentication));
+        // PR-D2 iter-3 absorb (Codex 019e10bf P1): scope-aware download path —
+        // closes the legacy persisted-payload leak channel where AUDIT.can_manage
+        // holders could download an export job created before PR-D2 (which
+        // may embed IMPERSONATION_* rows). Fail-closed for any non-matching
+        // or legacy-marker job.
+        var job = auditEventService.getCompletedExportJob(
+                jobId, resolveRequestedBy(authentication), AuditReadScope.GENERIC_AUDIT);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=%s".formatted(job.getFilename()))
                 .contentType(MediaType.parseMediaType(job.getContentType()))
@@ -158,5 +204,23 @@ public class AuditEventController {
             return "unknown";
         }
         return authentication.getName();
+    }
+
+    /**
+     * PR-D2: strict validation for {@code filter[action]} on the dedicated
+     * impersonation endpoint. Anything outside the canonical 5-set or the
+     * alias {@code "IMPERSONATION"} returns 400 Bad Request.
+     */
+    private void validateImpersonationActionFilter(Map<String, String> filters) {
+        if (filters == null) {
+            return;
+        }
+        String actionFilter = filters.get("action");
+        if (actionFilter != null && !ImpersonationActionPredicate.isAllowedImpersonationFilter(actionFilter)) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Invalid filter[action]; allowed: IMPERSONATION (alias) or one of "
+                            + ImpersonationActionPredicate.allActions());
+        }
     }
 }
