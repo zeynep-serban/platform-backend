@@ -10,6 +10,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -205,10 +207,22 @@ public class ProviderConfigService {
         to.setActivatedAt(now);
         repo.save(to);
 
-        // Cache invalidation (after commit; transaction sync would be better but
-        // simple post-commit semantic acceptable: cache TTL expires within 30s
-        // worst-case if cache invalidation visible before commit replication).
-        invalidateCache();
+        // Codex iter-1 (019e116e) RED absorb: cache invalidation post-commit
+        // via TransactionSynchronization.afterCommit so concurrent reader doesn't
+        // observe stale entry briefly between in-tx invalidate and commit.
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(
+                new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        invalidateCache();
+                    }
+                });
+        } else {
+            // Fallback (no active transaction sync — defensive, shouldn't happen
+            // because @Transactional registers sync by default).
+            invalidateCache();
+        }
 
         log.info("Provider config switch: orgId={} channel={} from={} to={} reason='{}'",
             from.getOrgId(), from.getChannel(), fromConfigId, toConfigId, reason);

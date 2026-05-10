@@ -80,7 +80,11 @@ class ProviderConfigRollbackIntegrationTest extends AbstractPostgresTest {
 
     @BeforeEach
     void cleanup() {
-        jdbc.execute("DELETE FROM notify.provider_config_history");
+        // Codex iter-1 (019e116e) RED absorb: provider_config_history table has
+        // PG rule "ON DELETE DO INSTEAD NOTHING" + JPA @Immutable for audit-trail
+        // protection. DELETE is a no-op. Use TRUNCATE which bypasses rules
+        // (PG-specific). For provider_config no immutable rule, DELETE works.
+        jdbc.execute("TRUNCATE TABLE notify.provider_config_history");
         jdbc.execute("DELETE FROM notify.provider_config");
         service.invalidateCache();
     }
@@ -188,11 +192,24 @@ class ProviderConfigRollbackIntegrationTest extends AbstractPostgresTest {
             pool.awaitTermination(5, TimeUnit.SECONDS);
         }
 
-        // Exactly one thread succeeded (other got IllegalStateException because
-        // first commit transitioned `from.active` to false; second saw `from`
-        // not active and threw IllegalStateException at validation).
+        // Exactly one thread succeeded; the loser hits one of two paths:
+        // (a) first thread commits, second sees `from.active=false` after read
+        //     and throws IllegalStateException at validation, OR
+        // (b) PG SERIALIZABLE+partial unique constraint serializes both;
+        //     second's flush fails with DataIntegrityViolationException.
+        // Both are valid race outcomes; Codex iter-1 (019e116e) suggested
+        // strict exception assertion.
         long failedThreads = (errA.get() != null ? 1 : 0) + (errB.get() != null ? 1 : 0);
         assertThat(failedThreads).as("exactly one thread failed (loser race)").isEqualTo(1);
+
+        Throwable loserError = errA.get() != null ? errA.get() : errB.get();
+        assertThat(loserError)
+            .as("loser thread threw expected exception type")
+            .isInstanceOfAny(IllegalStateException.class,
+                             DataIntegrityViolationException.class,
+                             org.springframework.dao.CannotAcquireLockException.class,
+                             org.springframework.dao.PessimisticLockingFailureException.class,
+                             org.springframework.transaction.TransactionSystemException.class);
 
         // End state: exactly one active provider in (org_id, provider_key, env)
         long activeCount = configRepo.findActiveByOrgChannelOrderByPriority("*", "email", "test")
