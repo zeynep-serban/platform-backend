@@ -6,11 +6,13 @@ import com.serban.notify.delivery.DeliveryTarget;
 import com.serban.notify.provider.GraphTokenService;
 import com.serban.notify.template.RenderedMessage;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
+import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.core5.http.ContentType;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.http.io.entity.StringEntity;
+import org.apache.hc.core5.util.Timeout;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -29,8 +31,8 @@ import java.util.UUID;
  *
  * <p>Endpoint: {@code POST https://graph.microsoft.com/v1.0/users/{senderMailbox}/sendMail}
  *
- * <p>Auth: OAuth 2.0 client_credentials (delegated app permission — admin consent).
- * Token cached + auto-refresh by {@link GraphTokenService}.
+ * <p>Auth: OAuth 2.0 client_credentials (Application permission / app-only —
+ * admin consent required). Token cached + auto-refresh by {@link GraphTokenService}.
  *
  * <p>Configuration:
  * <ul>
@@ -44,11 +46,10 @@ import java.util.UUID;
  *
  * <p>Multi-provider switching: {@link com.serban.notify.adapter.SmtpAdapter} ve
  * GraphMailAdapter aynı {@code channelKey()="email"} verir. SmtpAdapter
- * {@code @ConditionalOnProperty(notify.adapters.email.provider=smtp, missingValue=true)}
+ * {@code @ConditionalOnProperty(notify.adapters.graph.enabled=false, matchIfMissing=true)}
  * Graph {@code @ConditionalOnProperty(notify.adapters.graph.enabled=true)}. Test
  * profile'da Graph disabled → SmtpAdapter aktif (Mailpit/local). Prod profile'da
- * Graph enabled → Graph aktif (SmtpAdapter conditional off — ayrı PR'da @Profile
- * ile keskin ayrım).
+ * Graph enabled → Graph aktif (SmtpAdapter conditional off, mutual exclusion).
  *
  * <p>DKIM signing: **otomatik** — Office 365 outbound mail flow DKIM signature
  * ekler ({@code <selector>._domainkey.<domain>} DNS TXT record varsa).
@@ -67,6 +68,11 @@ public class GraphMailAdapter implements ChannelAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(GraphMailAdapter.class);
     private static final String GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
+
+    /** HTTP timeout (Codex iter P1 absorb 2026-05-11): bounded failure for adapter. */
+    private static final Timeout CONNECT_TIMEOUT = Timeout.ofSeconds(5);
+    private static final Timeout RESPONSE_TIMEOUT = Timeout.ofSeconds(15);
+    private static final Timeout CONNECTION_REQUEST_TIMEOUT = Timeout.ofSeconds(3);
 
     private final GraphTokenService tokenService;
     private final String senderMailbox;
@@ -96,6 +102,16 @@ public class GraphMailAdapter implements ChannelAdapter {
     @Override
     public DeliveryAttemptResult send(DeliveryTarget target, RenderedMessage message) {
         String messageId = "<" + UUID.randomUUID() + "@notification-orchestrator-graph>";
+
+        // Codex iter P1 absorb 2026-05-11: empty body guard — SMTP semantic parity.
+        // SmtpAdapter blank/null both → FAILED. Graph adapter aynı kontratı korur.
+        boolean htmlEmpty = message.bodyHtml() == null || message.bodyHtml().isBlank();
+        boolean textEmpty = message.bodyText() == null || message.bodyText().isBlank();
+        if (htmlEmpty && textEmpty) {
+            log.warn("graph mail: template body empty (no html or text) — FAILED terminal");
+            return DeliveryAttemptResult.failed("template body empty (no html or text)", null);
+        }
+
         try {
             // Get Bearer token (cached/refreshed by service)
             String accessToken = tokenService.getAccessToken();
@@ -108,6 +124,14 @@ public class GraphMailAdapter implements ChannelAdapter {
             post.setHeader("Authorization", "Bearer " + accessToken);
             post.setHeader("Content-Type", "application/json");
             post.setEntity(new StringEntity(payload, ContentType.APPLICATION_JSON));
+
+            // Codex iter P1 absorb: explicit timeout (bounded failure)
+            RequestConfig requestConfig = RequestConfig.custom()
+                .setConnectTimeout(CONNECT_TIMEOUT)
+                .setResponseTimeout(RESPONSE_TIMEOUT)
+                .setConnectionRequestTimeout(CONNECTION_REQUEST_TIMEOUT)
+                .build();
+            post.setConfig(requestConfig);
 
             try (CloseableHttpClient http = HttpClients.createDefault()) {
                 return http.execute(post, response -> {
@@ -155,11 +179,11 @@ public class GraphMailAdapter implements ChannelAdapter {
         ObjectNode emailAddr = recipientWrapper.putObject("emailAddress");
         emailAddr.put("address", target.targetRef());
 
-        // From (Graph allows custom From within sender's mailbox scope)
-        ObjectNode from = msg.putObject("from");
-        ObjectNode fromAddr = from.putObject("emailAddress");
-        fromAddr.put("address", senderMailbox);
-        fromAddr.put("name", fromName);
+        // Codex iter P1 absorb 2026-05-11: `message.from` field KALDIRILDI.
+        // POST /v1.0/users/{senderMailbox}/sendMail — sender path'ten alır.
+        // Payload'da from set edilirse Graph 400 BadRequest döner (mailbox ownership /
+        // SendAs permission mismatch). FROM_NAME display sadece header görünür
+        // — Graph outbound flow sender mailbox display name'i otomatik kullanır.
 
         // Internet message headers (custom Message-ID for trace)
         ObjectNode headers = msg.putArray("internetMessageHeaders").addObject();

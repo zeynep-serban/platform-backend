@@ -3,9 +3,11 @@ package com.serban.notify.provider;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
+import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.entity.UrlEncodedFormEntity;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.core5.util.Timeout;
 import org.apache.hc.core5.http.NameValuePair;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.http.message.BasicNameValuePair;
@@ -66,6 +68,15 @@ public class GraphTokenService {
     private static final Logger log = LoggerFactory.getLogger(GraphTokenService.class);
     private static final String GRAPH_SCOPE = "https://graph.microsoft.com/.default";
     private static final int REFRESH_BUFFER_SECONDS = 300;  // refresh 5 min before expiry
+
+    /**
+     * HTTP timeout config (Codex iter P1 absorb 2026-05-11).
+     * Adapter'ın varlık sebebi outbound TCP 587 ISP block timeout'a karşı bypass.
+     * Graph/AAD DNS/TLS/TCP stall'ında bounded failure → adapter RETRY.
+     */
+    private static final Timeout CONNECT_TIMEOUT = Timeout.ofSeconds(5);
+    private static final Timeout RESPONSE_TIMEOUT = Timeout.ofSeconds(10);
+    private static final Timeout CONNECTION_REQUEST_TIMEOUT = Timeout.ofSeconds(3);
 
     private final String tenantId;
     private final String clientId;
@@ -130,6 +141,13 @@ public class GraphTokenService {
         params.add(new BasicNameValuePair("client_secret", clientSecret));
         params.add(new BasicNameValuePair("scope", GRAPH_SCOPE));
         post.setEntity(new UrlEncodedFormEntity(params, StandardCharsets.UTF_8));
+
+        RequestConfig requestConfig = RequestConfig.custom()
+            .setConnectTimeout(CONNECT_TIMEOUT)
+            .setResponseTimeout(RESPONSE_TIMEOUT)
+            .setConnectionRequestTimeout(CONNECTION_REQUEST_TIMEOUT)
+            .build();
+        post.setConfig(requestConfig);
 
         try (CloseableHttpClient http = HttpClients.createDefault()) {
             return http.execute(post, response -> {

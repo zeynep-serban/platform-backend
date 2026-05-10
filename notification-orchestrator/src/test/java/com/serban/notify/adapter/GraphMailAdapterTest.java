@@ -102,9 +102,10 @@ class GraphMailAdapterTest {
         assertThat(toRecipients.get(0).get("emailAddress").get("address").asText())
             .isEqualTo("halil.kocoglu@serban.com.tr");
 
-        JsonNode from = message.get("from");
-        assertThat(from.get("emailAddress").get("address").asText()).isEqualTo("ai@acik.com");
-        assertThat(from.get("emailAddress").get("name").asText()).isEqualTo("Ai - Açık Holding");
+        // Codex iter P1 absorb: payload.from KALDIRILDI; sender URL path'ten alınır
+        assertThat(message.has("from"))
+            .as("payload.from removed — Graph 400 BadRequest risk")
+            .isFalse();
 
         JsonNode headers = message.get("internetMessageHeaders");
         assertThat(headers.isArray()).isTrue();
@@ -137,6 +138,39 @@ class GraphMailAdapterTest {
     // ====================================================================
     // Response classification tests
     // ====================================================================
+
+    // ====================================================================
+    // Empty body guard (Codex iter P1 absorb — SMTP semantic parity)
+    // ====================================================================
+
+    @Test
+    void sendWithEmptyBodyReturnsFailed() {
+        com.serban.notify.delivery.DeliveryTarget target = new com.serban.notify.delivery.DeliveryTarget(
+            "email", "external", null, "hash",
+            "test@example.com", "graph"
+        );
+        com.serban.notify.template.RenderedMessage emptyMsg = new com.serban.notify.template.RenderedMessage(
+            "Subject", null, null, "tr-TR"
+        );
+
+        ChannelAdapter.DeliveryAttemptResult result = adapter.send(target, emptyMsg);
+        assertThat(result.status()).isEqualTo(ChannelAdapter.DeliveryAttemptResult.Status.FAILED);
+        assertThat(result.failureReason()).contains("template body empty");
+    }
+
+    @Test
+    void sendWithBlankWhitespaceBodyReturnsFailed() {
+        com.serban.notify.delivery.DeliveryTarget target = new com.serban.notify.delivery.DeliveryTarget(
+            "email", "external", null, "hash",
+            "test@example.com", "graph"
+        );
+        com.serban.notify.template.RenderedMessage blankMsg = new com.serban.notify.template.RenderedMessage(
+            "Subject", "   \n\t   ", "  \n  ", "tr-TR"
+        );
+
+        ChannelAdapter.DeliveryAttemptResult result = adapter.send(target, blankMsg);
+        assertThat(result.status()).isEqualTo(ChannelAdapter.DeliveryAttemptResult.Status.FAILED);
+    }
 
     @Test
     void classifyResponse202ReturnsDelivered() throws Exception {
