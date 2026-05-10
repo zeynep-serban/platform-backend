@@ -69,7 +69,36 @@ A single allowlist of 5 canonical impersonation action codes lives in
 - `IMPERSONATION_FAILED`
 - `IMPERSONATION_REVOKED`
 
-All read paths consult the predicate — **substring matching is forbidden**.
+**Impersonation classification and scoped action filtering never use
+substring matching.** The predicate uses an exact-match allowlist for two
+specific roles:
+
+1. **Scope predicate** (`isImpersonationAction`) — used by
+   `AuditEventService.matchesScope(...)` to include/exclude rows on the
+   generic vs. dedicated feed. PR-D iter-1 P1 closed a substring leak
+   here: under the old `containsIgnoreCase("IMPERSONATION", ...)` matcher,
+   any action code containing the literal "IMPERSONATION" (e.g.
+   `NON_IMPERSONATION_STARTED`) was misclassified — leaking out of the
+   generic feed and bleeding into the dedicated feed. PR-D2 codifies the
+   exact-match allowlist via `ImpersonationActionPredicate.ALLOWED`.
+   `NON_IMPERSONATION_STARTED` and similar codes correctly land in the
+   GENERIC_AUDIT scope (regression test:
+   `AuditEventServiceTest.listEvents_genericScope_excludesImpersonationActions`).
+
+2. **Dedicated-endpoint filter validation** (`isAllowedImpersonationFilter`)
+   — used by `AuditEventController.validateImpersonationActionFilter(...)`
+   to 400 fabricated codes like `FOO_IMPERSONATION_BAR` on the
+   `/impersonation` endpoint. The previous "silently rewrite to
+   IMPERSONATION" behavior is gone.
+
+**Out of scope (intentional, non-security path)**: the generic
+`AuditEventService.matchesFilters(...)` continues to use case-insensitive
+substring containment for `userEmail`, `service`, `search`, and the
+generic-scope `action` filter. These are user-experience filters on
+non-impersonation rows (impersonation rows have already been excluded by
+`matchesScope` upstream), not a security boundary. Substring usage there
+cannot leak impersonation rows because no impersonation row reaches that
+code path in GENERIC_AUDIT scope.
 
 ### Scope-aware service layer
 
@@ -80,7 +109,17 @@ through every read method on `AuditEventService`:
 - `findByIdPage(id, scope)` — id-shortcut returns 404 when the loaded
   event is in the wrong scope (closes leak #5)
 - `exportEvents(..., scope)` — payload built scope-aware
-- `createExportJob(..., scope)` — scope embedded in job creation
+- `createExportJob(..., scope)` — scope embedded in job creation; the
+  `__audit_read_scope` marker is persisted inside `filter_snapshot` JSON
+  so download/get can re-validate scope (PR-D2 iter-3 absorb)
+- `getCompletedExportJob(jobId, requestedBy, scope)` — fail-closed
+  re-validation: a legacy pre-PR-D2 job (no scope marker) or a job whose
+  marker does not match the requested scope returns 404; a defensive
+  second pass re-deserializes JSON payloads on GENERIC_AUDIT downloads
+  and strips any `IMPERSONATION_*` row that somehow slipped through
+  (manual SQL edit, restored backup, future bug)
+- `getExportJob(jobId, requestedBy, scope)` — same fail-closed scope
+  guard for the status fetch path
 
 ### At-source live stream suppression
 
@@ -114,13 +153,71 @@ Raw FGA tuples in `backend/openfga/tuples-seed.json` for feature gating
 are **forbidden** (CNS-20260415-004). The granule seed → outbox →
 async tuple write is the only sanctioned path.
 
+#### Why MANAGE (not VIEW) for ADMIN?
+
+ADMIN is granted `IMPERSONATION_AUDIT.can_manage` (not just `can_view`).
+Two reasons:
+
+1. **OpenFGA model**: `can_manage` implies `can_view` via the relation
+   union `define can_view as viewer or can_manage` declared on the
+   generic `module` type in `backend/openfga/model.fga`. A single
+   MANAGE grant on ADMIN is therefore sufficient for both reading the
+   dashboard and (when the feature lands) revoking active impersonation
+   sessions or deleting impersonation history.
+2. **Role contract**: ADMIN is the highest-privilege role in the
+   platform; granting it the dashboard-only `can_view` would be
+   surprising to operators who expect ADMIN to retain full control over
+   security-sensitive features by default. Lower-privilege auditor
+   roles (future: `IMPERSONATION_AUDITOR`) can be defined with `can_view`
+   only — see Negative / open work below.
+
+#### ADMIN org-admin bypass — explicit assumption
+
+`RequireModuleInterceptor.isOrganizationAdmin` short-circuits any
+`@RequireModule` check for users flagged as organization administrators.
+This means freshly-bootstrapped ADMIN users (who are also organization
+admins by convention in this platform) gain `IMPERSONATION_AUDIT.can_view`
+access immediately on login, even before the async outbox writes the
+`module:IMPERSONATION_AUDIT can_manage user:<adminId>` tuple to OpenFGA.
+This is a deliberate ergonomics decision — without it, the
+seed-transaction-vs-outbox-poll-cadence gap (typically seconds, but up
+to the configured poll interval) would leave the dashboard inaccessible
+right after a fresh DB rebuild.
+
+Tenants that disable the `isOrganizationAdmin` bypass (planned future
+flag, not implemented in PR-D2) will see the bypass-free path: ADMIN
+users wait until the outbox poller propagates the granule before the
+dashboard becomes accessible. Test coverage:
+`PermissionDataInitializerImpersonationAdminSeedTest` asserts the
+granule row insert + `RoleChangeEvent` publication shape that drives
+the outbox.
+
 ## Consequences
 
 ### Positive
 
-- **Defense in depth**: 5 leak channels closed (substring, broad gate,
-  inert permission, live SSE, id-shortcut). Generic AUDIT feed is now a
-  pure non-impersonation view by construction, not by hopeful filtering.
+- **Defense in depth**: 6 leak channels closed:
+  1. **Substring leak** in impersonation event classification (PR-D
+     iter-1 P1) — although in practice this was an inert design vector
+     even before PR-D2 because no concrete production code path
+     exercised it adversarially, PR-D2 codifies the closure via the
+     central allowlist (`ImpersonationActionPredicate.ALLOWED`) so
+     future read paths cannot reintroduce it.
+  2. **Broad gate** on the dedicated endpoint — replaced
+     `AUDIT.can_view` with `IMPERSONATION_AUDIT.can_view`.
+  3. **Inert permission** (`impersonation-audit-view` flat row never
+     read by any check) — removed; granule-managed seed is the only
+     path.
+  4. **Live SSE** — `dispatchLiveEvent` suppresses `IMPERSONATION_*`
+     events at source.
+  5. **id-shortcut** — `findByIdPage(..., scope)` returns 404 across
+     scope.
+  6. **Persisted export-job payload** (PR-D2 iter-3 absorb) —
+     `getCompletedExportJob(..., scope)` fails closed on legacy or
+     mismatched-scope jobs and defensively re-filters JSON payloads.
+
+  Generic AUDIT feed is now a pure non-impersonation view by
+  construction, not by hopeful filtering.
 - **Audit integrity**: `NON_IMPERSONATION_*` rows are no longer
   accidentally dropped by the generic feed (substring matcher gone).
 - **Governance**: granule-managed seed obeys the
@@ -132,17 +229,46 @@ async tuple write is the only sanctioned path.
 
 ### Negative / open work
 
-- **Cross-org tenant scoping**: `IMPERSONATION_AUDIT.can_view` is global
-  today. Multi-tenant SaaS deployments will need tenant-scoped guards
-  (tuple `tenant:X#impersonation_audit_viewer@user:Y`). Out of PR-D2
-  scope; tracked as security debt note in spec §3.4.5.
+- **No tenant-aware impersonation audit (V19 schema)**: PR-D2 does not
+  implement tenant-scoped impersonation audit. The V19 migration adds
+  `impersonation_sessions` without an org/tenant column, and
+  `permission_audit_events` likewise has no organization key on the
+  impersonation rows. Consequences:
+
+  - A cross-org admin with `IMPERSONATION_AUDIT.can_view` reads
+    impersonation events from every organization in a single feed.
+    There is no per-org filtering, no `tenant:X#impersonation_audit_viewer`
+    tuple, no row-level security in the SQL.
+  - This is acceptable for the current single-tenant pre-production
+    deployment, but is a hard blocker for multi-tenant SaaS use.
+
+  **Follow-up: V20 schema migration** is required before multi-tenant
+  rollout. V20 must:
+  1. Add `organization_id` (or `tenant_id`) column to
+     `impersonation_sessions` and to the impersonation rows in
+     `permission_audit_events` (backfilled from the impersonator's
+     org membership at session start).
+  2. Introduce a `tenant` type into `backend/openfga/model.fga` with
+     a relation `impersonation_audit_viewer` and tuple shape
+     `tenant:X#impersonation_audit_viewer@user:Y`.
+  3. Update `AuditEventService` read paths to filter by
+     `tenant_id IN (orgs caller can view)` driven by FGA list-objects.
+  4. Extend `IMPERSONATION_AUDIT` granule with a `tenant_id` scope so
+     `PermissionDataInitializer` can seed per-tenant ADMIN grants
+     instead of the global MANAGE used today.
+
+  Tracked as security debt note in spec §3.4.5; this ADR is the
+  authoritative pointer for the V20 follow-up.
+
 - **Initializer tuple propagation lag**: the granule seed runs in the
   bootstrap transaction; the OpenFGA tuple is written async via the
   outbox. ADMIN users may briefly fail an `IMPERSONATION_AUDIT.can_view`
   check immediately after a fresh DB rebuild. The outbox poller closes
   the gap within the poll cadence (seconds). Acceptable for bootstrap
   because the 6 ADMIN users are already organization admins (bypass
-  takes effect immediately via `RequireModuleInterceptor.isOrganizationAdmin`).
+  takes effect immediately via `RequireModuleInterceptor.isOrganizationAdmin`)
+  — see the "ADMIN org-admin bypass — explicit assumption" subsection
+  above.
 
 ### Alternatives considered
 
