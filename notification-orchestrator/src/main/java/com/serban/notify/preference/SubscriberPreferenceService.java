@@ -195,7 +195,7 @@ public class SubscriberPreferenceService {
         }
 
         // T1.1.7 frequency limit per-user (Faz 23.2.A acceptance gate).
-        // Sliding window check: if this send would exceed
+        // Fixed-window check: if this send would exceed
         // preference.frequency_limit_per_day, suppress with reason
         // "frequency_limit". Critical bypass: severity=critical +
         // bypassForCritical=true → ALLOW (do not record toward window).
