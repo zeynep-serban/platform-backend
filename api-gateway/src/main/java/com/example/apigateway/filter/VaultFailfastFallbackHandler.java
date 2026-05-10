@@ -27,7 +27,6 @@ import java.util.Map;
 import java.util.concurrent.TimeoutException;
 
 import org.springframework.cloud.gateway.support.NotFoundException;
-import org.springframework.web.reactive.function.client.WebClientRequestException;
 
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
@@ -70,18 +69,53 @@ public class VaultFailfastFallbackHandler implements ErrorWebExceptionHandler, O
         if (throwable instanceof NotFoundException) {
             return true;
         }
-        if (throwable instanceof WebClientRequestException) {
-            return true;
-        }
         if (throwable instanceof ResponseStatusException rse) {
             HttpStatus status = HttpStatus.resolve(rse.getStatusCode().value());
             return status != null && (status == HttpStatus.SERVICE_UNAVAILABLE || status == HttpStatus.GATEWAY_TIMEOUT);
         }
+        // 2026-05-10 hot-fix (login flow):
+        // Only fire on GENUINE connection-level failures, not on every
+        // WebClientRequestException. The previous broad catch:
+        //   {@code if (throwable instanceof WebClientRequestException) return true;}
+        // converted any transient WebClient failure (DNS retry, brief
+        // connection drop, slow upstream) into a 503 with a misleading
+        // "Kimlik altyapısı devrede değil" page, breaking the user's
+        // login flow even when the actual root cause was a
+        // healthy-cluster transient. Live cluster smoke 2026-05-10:
+        // /realms/platform-test/protocol/openid-connect/auth observed
+        // returning 503 on first attempt then 200 on retry — classic
+        // transient that should never have surfaced as a vault outage.
+        //
+        // {@code Exceptions.unwrap()} only unwraps reactor-specific
+        // wrappers (CompositeException, ReactiveException); it does
+        // NOT follow {@code getCause()}. WebClientRequestException
+        // typically wraps a ConnectException via getCause(), so we
+        // must walk the cause chain explicitly to find the
+        // connection-level root.
         Throwable root = Exceptions.unwrap(throwable);
-        return root instanceof ConnectException
-                || root instanceof NoRouteToHostException
-                || root instanceof SocketTimeoutException
-                || root instanceof TimeoutException;
+        return hasConnectionLevelCause(root);
+    }
+
+    /**
+     * Walk the {@code getCause()} chain looking for a genuine
+     * connection-level failure: ConnectException, NoRouteToHostException,
+     * SocketTimeoutException, or TimeoutException. Bounded depth (8)
+     * to avoid infinite loops on circular cause chains.
+     */
+    private static boolean hasConnectionLevelCause(Throwable t) {
+        Throwable cur = t;
+        int depth = 0;
+        while (cur != null && depth < 8) {
+            if (cur instanceof ConnectException
+                    || cur instanceof NoRouteToHostException
+                    || cur instanceof SocketTimeoutException
+                    || cur instanceof TimeoutException) {
+                return true;
+            }
+            cur = cur.getCause();
+            depth++;
+        }
+        return false;
     }
 
     private Map<String, Object> buildPayload(ServerWebExchange exchange) {
