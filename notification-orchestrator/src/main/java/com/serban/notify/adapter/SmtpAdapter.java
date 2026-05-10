@@ -37,6 +37,11 @@ import java.util.UUID;
  * </ul>
  */
 @Component
+@org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(
+    name = "notify.adapters.graph.enabled",
+    havingValue = "false",
+    matchIfMissing = true
+)
 public class SmtpAdapter implements ChannelAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(SmtpAdapter.class);
