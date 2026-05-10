@@ -26,7 +26,9 @@ class ProviderConfigServiceTest {
         when(repo.findActiveByOrgChannelOrderByPriority("acme", "email", "test"))
             .thenReturn(List.of(p1, p2));
 
-        ProviderConfigService svc = new ProviderConfigService(repo, 30);
+        com.serban.notify.repository.ProviderConfigHistoryRepository historyRepo =
+            mock(com.serban.notify.repository.ProviderConfigHistoryRepository.class);
+        ProviderConfigService svc = new ProviderConfigService(repo, historyRepo, 30);
         var primary = svc.findPrimary("acme", "email", "test");
 
         assertThat(primary).isPresent();
@@ -39,7 +41,9 @@ class ProviderConfigServiceTest {
         when(repo.findActiveByOrgChannelOrderByPriority(anyString(), anyString(), anyString()))
             .thenReturn(List.of());
 
-        ProviderConfigService svc = new ProviderConfigService(repo, 30);
+        com.serban.notify.repository.ProviderConfigHistoryRepository historyRepo =
+            mock(com.serban.notify.repository.ProviderConfigHistoryRepository.class);
+        ProviderConfigService svc = new ProviderConfigService(repo, historyRepo, 30);
         assertThat(svc.findPrimary("acme", "email", "test")).isEmpty();
     }
 
@@ -51,7 +55,9 @@ class ProviderConfigServiceTest {
         when(repo.findActiveByOrgChannelOrderByPriority("acme", "email", "test"))
             .thenReturn(List.of(p1, p2));
 
-        ProviderConfigService svc = new ProviderConfigService(repo, 30);
+        com.serban.notify.repository.ProviderConfigHistoryRepository historyRepo =
+            mock(com.serban.notify.repository.ProviderConfigHistoryRepository.class);
+        ProviderConfigService svc = new ProviderConfigService(repo, historyRepo, 30);
         var next = svc.findNextFailover("acme", "email", "test", p1);
 
         assertThat(next).isPresent();
@@ -65,7 +71,9 @@ class ProviderConfigServiceTest {
         when(repo.findActiveByOrgChannelOrderByPriority(anyString(), anyString(), anyString()))
             .thenReturn(List.of(p1));
 
-        ProviderConfigService svc = new ProviderConfigService(repo, 30);
+        com.serban.notify.repository.ProviderConfigHistoryRepository historyRepo =
+            mock(com.serban.notify.repository.ProviderConfigHistoryRepository.class);
+        ProviderConfigService svc = new ProviderConfigService(repo, historyRepo, 30);
         var next = svc.findNextFailover("acme", "email", "test", p1);
 
         assertThat(next).isEmpty();
@@ -78,7 +86,9 @@ class ProviderConfigServiceTest {
         when(repo.findActiveByOrgChannelOrderByPriority("acme", "email", "test"))
             .thenReturn(List.of(p));
 
-        ProviderConfigService svc = new ProviderConfigService(repo, 30);
+        com.serban.notify.repository.ProviderConfigHistoryRepository historyRepo =
+            mock(com.serban.notify.repository.ProviderConfigHistoryRepository.class);
+        ProviderConfigService svc = new ProviderConfigService(repo, historyRepo, 30);
 
         // 3 lookups within TTL → 1 repo call
         svc.findPrimary("acme", "email", "test");
@@ -95,7 +105,9 @@ class ProviderConfigServiceTest {
         when(repo.findActiveByOrgChannelOrderByPriority(anyString(), anyString(), anyString()))
             .thenReturn(List.of(p));
 
-        ProviderConfigService svc = new ProviderConfigService(repo, 30);
+        com.serban.notify.repository.ProviderConfigHistoryRepository historyRepo =
+            mock(com.serban.notify.repository.ProviderConfigHistoryRepository.class);
+        ProviderConfigService svc = new ProviderConfigService(repo, historyRepo, 30);
         svc.findPrimary("acme", "email", "test");
         svc.invalidateCache();
         svc.findPrimary("acme", "email", "test");
