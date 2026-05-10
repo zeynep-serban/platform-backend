@@ -22,6 +22,8 @@ class ProductionConfigValidatorTest {
     private static final String OK_WEBHOOK = "rotated-webhook-secret-32-char-vault-x";
     private static final String OK_AUTHZ = "rotated-authz-key-32-char-from-vault-xx";
     private static final String OK_UNSUB = "rotated-unsubscribe-secret-32-char-vault";
+    /** P0.4 — production-host base URL (HTTPS, ai.acik.com prefix). */
+    private static final String OK_BASE_URL = "https://ai.acik.com/api/v1/notify/unsubscribe";
 
     @Test
     void nonProdProfileSkipsValidation() {
@@ -34,6 +36,7 @@ class ProductionConfigValidatorTest {
             "dev-only-secret-not-for-production",
             "dev-only-key-not-for-production",
             "dev-only-unsubscribe-secret-not-for-production",
+            "https://testai.acik.com/api/v1/notify/unsubscribe",
             false, false, false, false  // all production guards off
         );
 
@@ -161,15 +164,17 @@ class ProductionConfigValidatorTest {
             "dev-only-secret-not-for-production",
             "dev-only-key-not-for-production",
             "dev-only-unsubscribe-secret-not-for-production",
+            "https://testai.acik.com/api/v1/notify/unsubscribe",
             false, false, false, false);
 
         // Errors: tls.enforce + check-server-identity + pepper DEFAULT
         // + webhook DEFAULT + authz disabled + authz key DEFAULT + preferences disabled
         // + unsubscribe secret DEFAULT (T1.1.8 Codex iter-1 absorb)
-        // = 8 errors
+        // + unsubscribe base-url test-host (T1.1.8 P0.4 Codex 019e12d4 absorb)
+        // = 9 errors
         assertThatThrownBy(v::validate)
             .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("(8 error(s))");
+            .hasMessageContaining("(9 error(s))");
     }
 
     private ProductionConfigValidator prodValidator(
@@ -177,7 +182,7 @@ class ProductionConfigValidatorTest {
         boolean tlsEnforce, boolean tlsCheckIdentity,
         boolean preferences, boolean authz
     ) {
-        return prodValidator(pepper, webhookSecret, authzKey, OK_UNSUB,
+        return prodValidator(pepper, webhookSecret, authzKey, OK_UNSUB, OK_BASE_URL,
             tlsEnforce, tlsCheckIdentity, preferences, authz);
     }
 
@@ -186,10 +191,20 @@ class ProductionConfigValidatorTest {
         boolean tlsEnforce, boolean tlsCheckIdentity,
         boolean preferences, boolean authz
     ) {
+        return prodValidator(pepper, webhookSecret, authzKey, unsubSecret, OK_BASE_URL,
+            tlsEnforce, tlsCheckIdentity, preferences, authz);
+    }
+
+    private ProductionConfigValidator prodValidator(
+        String pepper, String webhookSecret, String authzKey, String unsubSecret,
+        String baseUrl,
+        boolean tlsEnforce, boolean tlsCheckIdentity,
+        boolean preferences, boolean authz
+    ) {
         Environment env = mock(Environment.class);
         when(env.getActiveProfiles()).thenReturn(new String[] { "prod" });
         return new ProductionConfigValidator(
-            env, pepper, webhookSecret, authzKey, unsubSecret,
+            env, pepper, webhookSecret, authzKey, unsubSecret, baseUrl,
             tlsEnforce, tlsCheckIdentity, preferences, authz
         );
     }
@@ -208,5 +223,184 @@ class ProductionConfigValidatorTest {
         assertThatThrownBy(v::validate)
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("notify.unsubscribe.signing-secret=DEFAULT");
+    }
+
+    // ====================================================================
+    // T1.1.8 P0.4 — unsubscribe base URL prod-host guard (Codex 019e12d4)
+    // ====================================================================
+
+    @Test
+    void prodProfileWithTestaiHostBaseUrlFails() {
+        // Default test-cluster URL leaked to prod profile
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "https://testai.acik.com/api/v1/notify/unsubscribe",
+            true, true, true, true);
+
+        assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.unsubscribe.base-url")
+            .hasMessageContaining("testai.acik.com")
+            .hasMessageContaining("test/dev/staging subdomain blocklist");
+    }
+
+    @Test
+    void prodProfileWithLocalhostBaseUrlFails() {
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "https://localhost:8080/api/v1/notify/unsubscribe",
+            true, true, true, true);
+
+        assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("localhost");
+    }
+
+    @Test
+    void prodProfileWithHttpSchemeBaseUrlFails() {
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "http://ai.acik.com/api/v1/notify/unsubscribe",  // HTTP not HTTPS
+            true, true, true, true);
+
+        assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.unsubscribe.base-url")
+            .hasMessageContaining("HTTPS scheme");
+    }
+
+    @Test
+    void prodProfileWithBlankBaseUrlFails() {
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "   ",
+            true, true, true, true);
+
+        assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.unsubscribe.base-url=blank");
+    }
+
+    @Test
+    void prodProfileWith127LoopbackBaseUrlFails() {
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "https://127.0.0.1:8443/api/v1/notify/unsubscribe",
+            true, true, true, true);
+
+        assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("127.0.0.1");
+    }
+
+    @Test
+    void prodProfileWithProdHostBaseUrlPasses() {
+        // Production hostname (https://ai.acik.com/...) — all guards pass
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "https://ai.acik.com/api/v1/notify/unsubscribe",
+            true, true, true, true);
+
+        v.validate();  // No throw
+    }
+
+    @Test
+    void prodProfileWithCustomSubdomainProdHostPasses() {
+        // Custom subdomain pattern (multi-tenant prefix) — must pass
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "https://tenant1.acik.com/api/v1/notify/unsubscribe",
+            true, true, true, true);
+
+        v.validate();  // No throw
+    }
+
+    // ====================================================================
+    // T1.1.8 P0.4 Codex iter-2 (019e1307) absorb — allowlist host pattern
+    // ====================================================================
+
+    @Test
+    void prodProfileWithArbitraryHttpsHostFails() {
+        // Codex iter-2 P1: substring deny-list let arbitrary HTTPS host pass.
+        // URI parser allowlist must reject any host not matching ai.acik.com
+        // canonical or .acik.com suffix.
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "https://evil.example/api/v1/notify/unsubscribe",
+            true, true, true, true);
+
+        assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.unsubscribe.base-url")
+            .hasMessageContaining("not in allowlist");
+    }
+
+    @Test
+    void prodProfileWithSuffixAttackHostFails() {
+        // Codex iter-2 P1: prefix deny-list let `https://ai.acik.com.evil.example`
+        // through. URI.getHost() returns canonical `ai.acik.com.evil.example`
+        // — does NOT match ai.acik.com exact and does NOT end with .acik.com
+        // (ends with .example) → rejected.
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "https://ai.acik.com.evil.example/api/v1/notify/unsubscribe",
+            true, true, true, true);
+
+        assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("not in allowlist")
+            .hasMessageContaining("ai.acik.com.evil.example");
+    }
+
+    @Test
+    void prodProfileWithIpv6LoopbackBaseUrlFails() {
+        // Codex iter-2 P1: IPv6 loopback [::1] not caught by substring 127.0.0.1.
+        // URI.getHost() returns "[::1]" → not in allowlist.
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "https://[::1]:8443/api/v1/notify/unsubscribe",
+            true, true, true, true);
+
+        assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("not in allowlist");
+    }
+
+    @Test
+    void prodProfileWithMalformedUrlFails() {
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "not-a-valid-url ::: bad",
+            true, true, true, true);
+
+        // Either malformed URL OR HTTPS scheme OR host check fires;
+        // the validator must reject this in some form.
+        assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.unsubscribe.base-url");
+    }
+
+    @Test
+    void prodProfileWithUppercaseHttpsSchemeIsAccepted() {
+        // Scheme comparison must be case-insensitive (RFC 3986 §3.1)
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "HTTPS://ai.acik.com/api/v1/notify/unsubscribe",
+            true, true, true, true);
+
+        v.validate();  // No throw — case-insensitive scheme match
+    }
+
+    @Test
+    void prodProfileWithProdHostQueryStringContainingTestaiPasses() {
+        // Codex iter-2 finding: substring deny-list false-positive risk —
+        // a safe prod URL with "testai.acik.com" in path/query was rejected.
+        // Allowlist via URI.getHost() canonical comparison eliminates this.
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB,
+            "https://ai.acik.com/api/v1/notify/unsubscribe?ref=testai.acik.com",
+            true, true, true, true);
+
+        v.validate();  // No throw — host is ai.acik.com, query/path doesn't matter
     }
 }

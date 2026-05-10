@@ -13,3 +13,14 @@
 6b4f59359a909f7c8452c4b2db29d84290f16480:notification-orchestrator/src/main/java/com/serban/notify/provider/DkimSigner.java:private-key:117
 4c7228e1f901bd0446c9795707322429361d8b7b:notification-orchestrator/src/main/java/com/serban/notify/provider/DkimSigner.java:private-key:102
 4c7228e1f901bd0446c9795707322429361d8b7b:notification-orchestrator/src/main/java/com/serban/notify/provider/DkimSigner.java:private-key:109
+
+# Faz 23.2.A T1.1.8 P0.5 — historical commit suppression (Codex iter-2 absorb).
+# Original commit `eaf1d326...` introduced UnsubscribeRevokeServiceIntegrationTest
+# with unsplit fixture string `integration-test-signing-secret-32-char-fixed`.
+# Subsequent commit `220b542...` split the string for gitleaks compatibility,
+# but PR-time gitleaks scans ALL PR commits in history and still flags the
+# original commit. Squash-merge will produce a single commit with the SPLIT
+# version on main, so post-merge gitleaks (run on main push) will PASS
+# naturally — no SHA-bound entry needed for the squashed commit. This entry
+# only suppresses the historical PR commit that no longer exists post-squash.
+eaf1d326da69d4a059a3392f900a9d67471f076c:notification-orchestrator/src/test/java/com/serban/notify/unsubscribe/UnsubscribeRevokeServiceIntegrationTest.java:generic-api-key:58

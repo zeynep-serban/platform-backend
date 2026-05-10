@@ -7,6 +7,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -56,6 +58,12 @@ public class ProductionConfigValidator {
      * Default dev value MUST NOT leak to prod.
      */
     private final String unsubscribeSigningSecret;
+    /**
+     * T1.1.8 (Faz 23.2.A) P0.4 — unsubscribe link base URL production-host guard.
+     * Default dev value `https://testai.acik.com/...` MUST NOT leak to prod;
+     * prod must use `https://ai.acik.com/...` prefix (Codex 019e12d4 absorb).
+     */
+    private final String unsubscribeBaseUrl;
 
     public ProductionConfigValidator(
         Environment springEnv,
@@ -67,6 +75,8 @@ public class ProductionConfigValidator {
             String authzInternalApiKey,
         @Value("${notify.unsubscribe.signing-secret:dev-only-unsubscribe-secret-not-for-production}")
             String unsubscribeSigningSecret,
+        @Value("${notify.unsubscribe.base-url:https://testai.acik.com/api/v1/notify/unsubscribe}")
+            String unsubscribeBaseUrl,
         @Value("${notify.smtp.tls.enforce:false}") boolean smtpTlsEnforce,
         @Value("${notify.smtp.tls.check-server-identity:true}") boolean smtpTlsCheckServerIdentity,
         @Value("${notify.preferences.enabled:true}") boolean preferencesEnabled,
@@ -77,6 +87,7 @@ public class ProductionConfigValidator {
         this.webhookLegacySecret = webhookLegacySecret;
         this.authzInternalApiKey = authzInternalApiKey;
         this.unsubscribeSigningSecret = unsubscribeSigningSecret;
+        this.unsubscribeBaseUrl = unsubscribeBaseUrl;
         this.smtpTlsEnforce = smtpTlsEnforce;
         this.smtpTlsCheckServerIdentity = smtpTlsCheckServerIdentity;
         this.preferencesEnabled = preferencesEnabled;
@@ -125,6 +136,11 @@ public class ProductionConfigValidator {
         // Email link integrity boundary; default dev value MUST NOT leak to prod.
         validateSecret(errors, "notify.unsubscribe.signing-secret",
             unsubscribeSigningSecret, "dev-only-unsubscribe-secret-not-for-production");
+
+        // T1.1.8 P0.4 — unsubscribe base URL prod-host guard (Codex 019e12d4 absorb).
+        // Email link routing integrity boundary; test/dev URLs MUST NOT leak to prod
+        // (subscribers click link → wrong host → 404 / wrong-cluster credential drift).
+        validateUnsubscribeBaseUrl(errors, unsubscribeBaseUrl);
 
         // Preferences (Codex PR5 Q1)
         if (!preferencesEnabled) {
@@ -180,6 +196,93 @@ public class ProductionConfigValidator {
         if (value.trim().length() != value.length()) {
             errors.add(key + " contains leading/trailing whitespace — likely config "
                 + "injection error (Vault value should be raw secret without surrounding spaces)");
+        }
+    }
+
+    /**
+     * Validate unsubscribe base URL for production (T1.1.8 P0.4 + Codex iter-2
+     * 019e1307 absorb — allowlist host pattern, not deny-list substring).
+     *
+     * <p>**Implementation contract**:
+     * <ol>
+     *   <li>Parse URL with {@link URI} — invalid URL → fail-closed</li>
+     *   <li>Scheme MUST equal {@code https} (case-insensitive)</li>
+     *   <li>Host MUST equal {@code ai.acik.com} OR end with {@code .acik.com}
+     *       suffix (canonical multi-tenant pattern)</li>
+     * </ol>
+     *
+     * <p>**Why allowlist not deny-list (Codex iter-2 finding)**: substring
+     * deny-list lets {@code https://evil.example/...} pass. Worse, a maliciously
+     * crafted host like {@code ai.acik.com.evil.example} passes string-prefix
+     * checks. Allowlist via {@code URI.getHost()} canonical match is the only
+     * safe approach for security-boundary URL validation.
+     *
+     * <p>**Why prod-host guard**: subscriber clicks unsubscribe link in email →
+     * link routing must hit prod cluster. Test URL leak → wrong cluster reaches
+     * (subscriber's `subscriberId` doesn't exist there → 401/404 → user can't
+     * opt-out → KVKK Art.13 right-to-info compliance gap + GDPR-equivalent risk).
+     *
+     * <p>**Rejected hosts** (allowlist-implicit): all non-{@code .acik.com} hosts,
+     * IPv4 loopback ({@code 127.0.0.1}), IPv6 loopback ({@code ::1}), localhost,
+     * test/dev TLDs, IP literals — none match {@code ai.acik.com} canonical or
+     * {@code .acik.com} suffix.
+     */
+    private static void validateUnsubscribeBaseUrl(List<String> errors, String url) {
+        String key = "notify.unsubscribe.base-url";
+        if (url == null || url.isBlank()) {
+            errors.add(key + "=blank — production must set non-blank value");
+            return;
+        }
+        URI uri;
+        try {
+            uri = new URI(url);
+        } catch (URISyntaxException e) {
+            errors.add(key + "=" + url + " — malformed URL ("
+                + e.getMessage() + "); production must use valid URI syntax");
+            return;
+        }
+        String scheme = uri.getScheme();
+        if (scheme == null || !"https".equalsIgnoreCase(scheme)) {
+            errors.add(key + "=" + url + " — production must use HTTPS scheme "
+                + "(email links over public network; HTTP fallback exposes token query param). "
+                + "Found scheme: " + scheme);
+            return;
+        }
+        String host = uri.getHost();
+        if (host == null || host.isBlank()) {
+            errors.add(key + "=" + url + " — URL missing host component "
+                + "(IPv6 literal/userinfo without authority not allowed in prod; "
+                + "URI.getHost() returned " + host + ")");
+            return;
+        }
+        // Canonical host allowlist: exact ai.acik.com OR .acik.com suffix
+        // (multi-tenant subdomain pattern). Case-insensitive comparison.
+        // Codex iter-2 absorb: also blocklist known test/dev subdomains within
+        // .acik.com (testai.*, staging-sw.* etc) — they share the parent suffix
+        // but are NOT prod cluster routes.
+        String hostLower = host.toLowerCase();
+        boolean exactMatch = "ai.acik.com".equals(hostLower);
+        boolean suffixMatch = hostLower.endsWith(".acik.com")
+            && !hostLower.equals(".acik.com");  // defense: bare suffix invalid
+        if (!exactMatch && !suffixMatch) {
+            errors.add(key + "=" + url + " — production host '" + host
+                + "' not in allowlist. Allowed: 'ai.acik.com' (exact) or '*.acik.com' "
+                + "suffix (multi-tenant). Subscriber link routing → wrong cluster → "
+                + "404/credential drift; KVKK Art.13 right-to-info compliance gap.");
+            return;
+        }
+        // Test/dev subdomain blocklist — even within .acik.com suffix
+        if ("testai.acik.com".equals(hostLower)
+            || hostLower.startsWith("test.")
+            || hostLower.startsWith("dev.")
+            || hostLower.startsWith("staging.")
+            || hostLower.startsWith("staging-")
+            || hostLower.contains(".staging-sw.")) {
+            errors.add(key + "=" + url + " — production host '" + host
+                + "' matches test/dev/staging subdomain blocklist. "
+                + "Production must use 'ai.acik.com' (exact) or non-test "
+                + "tenant subdomain. Subscriber link routing → wrong cluster → "
+                + "404/credential drift; KVKK Art.13 right-to-info compliance gap.");
         }
     }
 }
