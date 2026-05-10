@@ -11,10 +11,17 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * FrequencyLimitService — per-user sliding window rate limiter
+ * FrequencyLimitService — per-user **fixed-window** rate limiter
  * (T1.1.7, Faz 23.2.A acceptance gate).
  *
- * <p>Per-(orgId, subscriberId) sliding window check. Uses
+ * <p>**Window semantics**: not a true sliding window — a per-key fixed
+ * window starting from first send. Window rolls (counter resets) when
+ * elapsed time reaches the configured `windowMillis`. Codex iter-1
+ * (thread `019e1199`) REVISE absorb: contract clarified as fixed-window
+ * soft limiter (not a sliding window), matching {@link
+ * com.serban.notify.abuse.AbuseGuardService} pattern.
+ *
+ * <p>Per-(orgId, subscriberId) check. Uses
  * {@code SubscriberPreference.frequencyLimitPerDay} column as the limit
  * (24-hour window). When the count of recorded sends within the window
  * reaches the limit, subsequent {@link #checkAndRecord} calls return false
@@ -23,13 +30,13 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>**In-memory implementation** (multi-pod soft enforcement, like
  * AbuseGuardService): single-pod windows lose state on restart; multi-pod
  * deployment effective limit ≈ pod_count × per_pod_limit. Strict
- * enforcement requires PG-backed counter or Redis (deferred — see TODO
- * note below + R14 risk).
+ * enforcement requires PG-backed counter or Redis (deferred — see R14).
  *
- * <p>**Thread safety**: ConcurrentHashMap shards + AtomicLong counter with
- * window epoch atomic rotate. Race window: between getAndIncrement and
- * window roll a small over-count is possible (acceptable for soft
- * enforcement; deterministic-ish given window granularity).
+ * <p>**Thread safety**: per-key {@code synchronized} block covers the
+ * window-roll + increment + limit-check + decrements-back path
+ * atomically. Codex iter-1 absorb: single-mutex per state eliminates
+ * the rollover race where a thread could decrement into negative
+ * after another thread resets the window.
  */
 @Service
 public class FrequencyLimitService {
@@ -103,23 +110,29 @@ public class FrequencyLimitService {
 
         WindowState state = windows.computeIfAbsent(key, k -> new WindowState(now));
 
-        // Window roll if expired
+        // Codex iter-1 (019e1199) REVISE absorb: window-roll + increment +
+        // limit-check + decrements-back must be one atomic critical section
+        // per-key. Without single-mutex coverage a thread could:
+        //   (a) increment over limit → decision deny
+        //   (b) another thread resets window between deny+decrement
+        //   (c) deny thread's decrement subtracts from new window → negative
         synchronized (state) {
+            // Window roll if expired
             if (now - state.windowStartMs >= windowMillis) {
                 state.count.set(0);
                 state.windowStartMs = now;
             }
-        }
 
-        long newCount = state.count.incrementAndGet();
-        if (newCount > limit) {
-            // Decrement back — the send is suppressed, don't count
-            state.count.decrementAndGet();
-            log.debug("frequency_limit deny: orgId={} subscriberId={} count={}+1 limit={}",
-                orgId, subscriberId, newCount - 1, limit);
-            return false;
+            long newCount = state.count.incrementAndGet();
+            if (newCount > limit) {
+                // Decrement back inside same critical section — no rollover race
+                state.count.decrementAndGet();
+                log.debug("frequency_limit deny: orgId={} subscriberId={} count={}+1 limit={}",
+                    orgId, subscriberId, newCount - 1, limit);
+                return false;
+            }
+            return true;
         }
-        return true;
     }
 
     /**
