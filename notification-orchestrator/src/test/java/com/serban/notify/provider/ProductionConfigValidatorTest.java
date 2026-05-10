@@ -21,6 +21,7 @@ class ProductionConfigValidatorTest {
     private static final String OK_PEPPER = "rotated-pepper-from-vault-32-char-xxx";
     private static final String OK_WEBHOOK = "rotated-webhook-secret-32-char-vault-x";
     private static final String OK_AUTHZ = "rotated-authz-key-32-char-from-vault-xx";
+    private static final String OK_UNSUB = "rotated-unsubscribe-secret-32-char-vault";
 
     @Test
     void nonProdProfileSkipsValidation() {
@@ -32,6 +33,7 @@ class ProductionConfigValidatorTest {
             "dev-only-pepper-not-for-production",
             "dev-only-secret-not-for-production",
             "dev-only-key-not-for-production",
+            "dev-only-unsubscribe-secret-not-for-production",
             false, false, false, false  // all production guards off
         );
 
@@ -158,14 +160,16 @@ class ProductionConfigValidatorTest {
             "dev-only-pepper-not-for-production",
             "dev-only-secret-not-for-production",
             "dev-only-key-not-for-production",
+            "dev-only-unsubscribe-secret-not-for-production",
             false, false, false, false);
 
         // Errors: tls.enforce + check-server-identity + pepper DEFAULT
         // + webhook DEFAULT + authz disabled + authz key DEFAULT + preferences disabled
-        // = 7 errors
+        // + unsubscribe secret DEFAULT (T1.1.8 Codex iter-1 absorb)
+        // = 8 errors
         assertThatThrownBy(v::validate)
             .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("(7 error(s))");
+            .hasMessageContaining("(8 error(s))");
     }
 
     private ProductionConfigValidator prodValidator(
@@ -173,11 +177,36 @@ class ProductionConfigValidatorTest {
         boolean tlsEnforce, boolean tlsCheckIdentity,
         boolean preferences, boolean authz
     ) {
+        return prodValidator(pepper, webhookSecret, authzKey, OK_UNSUB,
+            tlsEnforce, tlsCheckIdentity, preferences, authz);
+    }
+
+    private ProductionConfigValidator prodValidator(
+        String pepper, String webhookSecret, String authzKey, String unsubSecret,
+        boolean tlsEnforce, boolean tlsCheckIdentity,
+        boolean preferences, boolean authz
+    ) {
         Environment env = mock(Environment.class);
         when(env.getActiveProfiles()).thenReturn(new String[] { "prod" });
         return new ProductionConfigValidator(
-            env, pepper, webhookSecret, authzKey,
+            env, pepper, webhookSecret, authzKey, unsubSecret,
             tlsEnforce, tlsCheckIdentity, preferences, authz
         );
+    }
+
+    /**
+     * T1.1.8 (Faz 23.2.A) Codex iter-1 (019e12c0) absorb — unsubscribe signing
+     * secret production guard.
+     */
+    @Test
+    void prodProfileWithDefaultUnsubscribeSecretFails() {
+        ProductionConfigValidator v = prodValidator(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ,
+            "dev-only-unsubscribe-secret-not-for-production",
+            true, true, true, true);
+
+        assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.unsubscribe.signing-secret=DEFAULT");
     }
 }

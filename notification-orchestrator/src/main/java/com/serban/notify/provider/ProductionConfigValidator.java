@@ -51,6 +51,11 @@ public class ProductionConfigValidator {
     private final boolean smtpTlsCheckServerIdentity;
     private final boolean preferencesEnabled;
     private final boolean authzEnabled;
+    /**
+     * T1.1.8 (Faz 23.2.A) — unsubscribe HMAC signing secret production guard.
+     * Default dev value MUST NOT leak to prod.
+     */
+    private final String unsubscribeSigningSecret;
 
     public ProductionConfigValidator(
         Environment springEnv,
@@ -60,6 +65,8 @@ public class ProductionConfigValidator {
             String webhookLegacySecret,
         @Value("${notify.authz.internal-api-key:dev-only-key-not-for-production}")
             String authzInternalApiKey,
+        @Value("${notify.unsubscribe.signing-secret:dev-only-unsubscribe-secret-not-for-production}")
+            String unsubscribeSigningSecret,
         @Value("${notify.smtp.tls.enforce:false}") boolean smtpTlsEnforce,
         @Value("${notify.smtp.tls.check-server-identity:true}") boolean smtpTlsCheckServerIdentity,
         @Value("${notify.preferences.enabled:true}") boolean preferencesEnabled,
@@ -69,6 +76,7 @@ public class ProductionConfigValidator {
         this.redactionPepper = redactionPepper;
         this.webhookLegacySecret = webhookLegacySecret;
         this.authzInternalApiKey = authzInternalApiKey;
+        this.unsubscribeSigningSecret = unsubscribeSigningSecret;
         this.smtpTlsEnforce = smtpTlsEnforce;
         this.smtpTlsCheckServerIdentity = smtpTlsCheckServerIdentity;
         this.preferencesEnabled = preferencesEnabled;
@@ -112,6 +120,11 @@ public class ProductionConfigValidator {
         }
         validateSecret(errors, "notify.authz.internal-api-key",
             authzInternalApiKey, "dev-only-key-not-for-production");
+
+        // T1.1.8 unsubscribe HMAC signing secret (Codex 019e12c0 iter-1 absorb).
+        // Email link integrity boundary; default dev value MUST NOT leak to prod.
+        validateSecret(errors, "notify.unsubscribe.signing-secret",
+            unsubscribeSigningSecret, "dev-only-unsubscribe-secret-not-for-production");
 
         // Preferences (Codex PR5 Q1)
         if (!preferencesEnabled) {

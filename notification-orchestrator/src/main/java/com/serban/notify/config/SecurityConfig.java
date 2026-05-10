@@ -88,6 +88,11 @@ public class SecurityConfig {
                 // shared-secret token (X-NetGSM-DLR-Token) ile constant-time
                 // compare. Provider Internet'ten POST yapacağı için JWT yok.
                 .requestMatchers("/api/v1/notify/dlr/**").permitAll()
+                // T1.1.8 (Faz 23.2.A) — public unsubscribe endpoint. Email
+                // recipient browser'da link tıklar; HMAC-SHA256 signed token
+                // controller seviyesinde verify edilir (UnsubscribeTokenService).
+                // JWT yok çünkü subscriber may not have an active session.
+                .requestMatchers("/api/v1/notify/unsubscribe").permitAll()
                 // /api/v1/admin/notify/** — @PreAuthorize method-level (AdminErasureController)
                 // Burada path-level authenticated() yeterli; role gate method seviyesinde.
                 .requestMatchers("/api/v1/admin/notify/**").authenticated()
