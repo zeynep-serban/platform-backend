@@ -368,6 +368,110 @@ class SubscriberPreferenceServiceTest {
         assertThat(decision.reason()).isEqualTo("quiet_hours");
     }
 
+    // ── T1.1.7 frequency limit per-user (Faz 23.2.A acceptance) ──────────
+
+    /**
+     * T1.1.7 — frequency limit exceeded denies subsequent sends.
+     */
+    @Test
+    void frequencyLimitExceededDenies() {
+        SubscriberPreference pref = preference(true, false);
+        pref.setFrequencyLimitPerDay(5);
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyAndChannel(
+            "default", "1204", "auth.password-reset", "email")).thenReturn(Optional.of(pref));
+
+        FrequencyLimitService freqService = new FrequencyLimitService(24);
+        service.setFrequencyLimitService(freqService);
+
+        NotificationIntent intent = makeIntent("auth.password-reset", NotificationIntent.Severity.info);
+
+        // 5 sends within limit → all ALLOW
+        for (int i = 1; i <= 5; i++) {
+            var dec = service.evaluate(intent, "email", "1204");
+            assertThat(dec.allowed()).as("send #" + i + " within limit").isTrue();
+        }
+
+        // 6th send exceeds → DENY
+        var dec6 = service.evaluate(intent, "email", "1204");
+        assertThat(dec6.allowed()).as("send #6 exceeds limit").isFalse();
+        assertThat(dec6.reason()).isEqualTo("frequency_limit");
+    }
+
+    /**
+     * T1.1.7 — null/zero limit means no enforcement.
+     */
+    @Test
+    void frequencyLimitNullDoesNotEnforce() {
+        SubscriberPreference pref = preference(true, false);
+        pref.setFrequencyLimitPerDay(null);  // no limit configured
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyAndChannel(
+            "default", "1204", "auth.password-reset", "email")).thenReturn(Optional.of(pref));
+
+        FrequencyLimitService freqService = new FrequencyLimitService(24);
+        service.setFrequencyLimitService(freqService);
+
+        NotificationIntent intent = makeIntent("auth.password-reset", NotificationIntent.Severity.info);
+
+        // 100 sends — all ALLOW because no limit
+        for (int i = 1; i <= 100; i++) {
+            var dec = service.evaluate(intent, "email", "1204");
+            assertThat(dec.allowed()).isTrue();
+        }
+    }
+
+    /**
+     * T1.1.7 — critical severity + bypassForCritical=true → ALLOW (don't count).
+     */
+    @Test
+    void frequencyLimitCriticalBypass() {
+        SubscriberPreference pref = preference(true, true);  // bypass=true
+        pref.setFrequencyLimitPerDay(2);
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyAndChannel(
+            "default", "1204", "auth.password-reset", "email")).thenReturn(Optional.of(pref));
+
+        FrequencyLimitService freqService = new FrequencyLimitService(24);
+        service.setFrequencyLimitService(freqService);
+
+        // 2 normal info sends → fill window
+        NotificationIntent infoIntent = makeIntent("auth.password-reset", NotificationIntent.Severity.info);
+        service.evaluate(infoIntent, "email", "1204");
+        service.evaluate(infoIntent, "email", "1204");
+
+        // Critical sends should bypass without consuming window
+        NotificationIntent criticalIntent = makeIntent("auth.password-reset", NotificationIntent.Severity.critical);
+        for (int i = 1; i <= 5; i++) {
+            var dec = service.evaluate(criticalIntent, "email", "1204");
+            assertThat(dec.allowed())
+                .as("critical send #" + i + " bypasses frequency limit")
+                .isTrue();
+            assertThat(dec.reason()).isEqualTo("critical_bypass_frequency");
+        }
+    }
+
+    /**
+     * T1.1.7 — when FrequencyLimitService bean not set, frequency_limit
+     * column is ignored (backward compat with services that haven't wired it).
+     */
+    @Test
+    void frequencyLimitServiceUnsetSkipsCheck() {
+        SubscriberPreference pref = preference(true, false);
+        pref.setFrequencyLimitPerDay(2);
+        when(prefRepo.findByOrgIdAndSubscriberIdAndTopicKeyAndChannel(
+            "default", "1204", "auth.password-reset", "email")).thenReturn(Optional.of(pref));
+
+        // setFrequencyLimitService NOT called — service field remains null
+
+        NotificationIntent intent = makeIntent("auth.password-reset", NotificationIntent.Severity.info);
+
+        // 10 sends — all ALLOW because frequency check is null-skipped
+        for (int i = 1; i <= 10; i++) {
+            var dec = service.evaluate(intent, "email", "1204");
+            assertThat(dec.allowed())
+                .as("send #" + i + " allowed (no FrequencyLimitService bean)")
+                .isTrue();
+        }
+    }
+
     /**
      * T1.1.6 — invalid quiet_hours config fails open (no suppression).
      */

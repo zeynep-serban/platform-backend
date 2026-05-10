@@ -47,6 +47,12 @@ public class SubscriberPreferenceService {
     private final AuditEventPublisher auditPublisher;
     private final PiiRedactor piiRedactor;
     /**
+     * T1.1.7 frequency limit per-user fixed-window soft limiter (Faz 23.2.A).
+     * Optional — if bean not registered, frequency_limit_per_day check is
+     * skipped (no enforcement).
+     */
+    private FrequencyLimitService frequencyLimitService;
+    /**
      * Quiet hours enforcement clock (T1.1.6 Faz 23.2.A acceptance gate).
      * Default {@link Clock#systemDefaultZone()}; tests override via
      * {@link #setClock(Clock)} to deterministic instants.
@@ -63,6 +69,14 @@ public class SubscriberPreferenceService {
         this.preferenceRepo = preferenceRepo;
         this.auditPublisher = auditPublisher;
         this.piiRedactor = piiRedactor;
+    }
+
+    /**
+     * T1.1.7 — FrequencyLimitService injection (optional).
+     */
+    @Autowired(required = false)
+    public void setFrequencyLimitService(FrequencyLimitService frequencyLimitService) {
+        this.frequencyLimitService = frequencyLimitService;
     }
 
     /**
@@ -178,6 +192,29 @@ public class SubscriberPreferenceService {
             log.debug("quiet_hours suppression: subscriberId={} channel={} topic={} window={}",
                 subscriberId, channel, intent.getTopicKey(), p.getQuietHours());
             return PreferenceDecision.deny("quiet_hours");
+        }
+
+        // T1.1.7 frequency limit per-user (Faz 23.2.A acceptance gate).
+        // Fixed-window check: if this send would exceed
+        // preference.frequency_limit_per_day, suppress with reason
+        // "frequency_limit". Critical bypass: severity=critical +
+        // bypassForCritical=true → ALLOW (do not record toward window).
+        if (frequencyLimitService != null && p.getFrequencyLimitPerDay() != null
+            && p.getFrequencyLimitPerDay() > 0) {
+            if (intent.getSeverity() == NotificationIntent.Severity.critical
+                && p.isBypassForCritical()) {
+                log.debug("frequency_limit deny BYPASSED (critical severity): subscriberId={} channel={}",
+                    subscriberId, channel);
+                return PreferenceDecision.allow("critical_bypass_frequency");
+            }
+            boolean within = frequencyLimitService.checkAndRecord(
+                intent.getOrgId(), subscriberId, p.getFrequencyLimitPerDay()
+            );
+            if (!within) {
+                log.debug("frequency_limit suppression: subscriberId={} channel={} limit={}",
+                    subscriberId, channel, p.getFrequencyLimitPerDay());
+                return PreferenceDecision.deny("frequency_limit");
+            }
         }
 
         return PreferenceDecision.allow("preference_enabled");
