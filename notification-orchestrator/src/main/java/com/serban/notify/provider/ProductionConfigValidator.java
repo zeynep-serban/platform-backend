@@ -64,6 +64,15 @@ public class ProductionConfigValidator {
      * prod must use `https://ai.acik.com/...` prefix (Codex 019e12d4 absorb).
      */
     private final String unsubscribeBaseUrl;
+    /**
+     * A4 DKIM (Faz 23.2 R3 mitigation) — Codex 019e1307 P0/P1 absorb 2026-05-10.
+     * Prod profile: notify.dkim.enabled=true required + selector + domain +
+     * private-key-pem populated. App-side DKIM signing active path.
+     */
+    private final boolean dkimEnabled;
+    private final String dkimSelector;
+    private final String dkimDomain;
+    private final String dkimPrivateKeyPem;
 
     public ProductionConfigValidator(
         Environment springEnv,
@@ -77,6 +86,10 @@ public class ProductionConfigValidator {
             String unsubscribeSigningSecret,
         @Value("${notify.unsubscribe.base-url:https://testai.acik.com/api/v1/notify/unsubscribe}")
             String unsubscribeBaseUrl,
+        @Value("${notify.dkim.enabled:false}") boolean dkimEnabled,
+        @Value("${notify.dkim.selector:}") String dkimSelector,
+        @Value("${notify.dkim.domain:}") String dkimDomain,
+        @Value("${notify.dkim.private-key-pem:}") String dkimPrivateKeyPem,
         @Value("${notify.smtp.tls.enforce:false}") boolean smtpTlsEnforce,
         @Value("${notify.smtp.tls.check-server-identity:true}") boolean smtpTlsCheckServerIdentity,
         @Value("${notify.preferences.enabled:true}") boolean preferencesEnabled,
@@ -88,6 +101,10 @@ public class ProductionConfigValidator {
         this.authzInternalApiKey = authzInternalApiKey;
         this.unsubscribeSigningSecret = unsubscribeSigningSecret;
         this.unsubscribeBaseUrl = unsubscribeBaseUrl;
+        this.dkimEnabled = dkimEnabled;
+        this.dkimSelector = dkimSelector;
+        this.dkimDomain = dkimDomain;
+        this.dkimPrivateKeyPem = dkimPrivateKeyPem;
         this.smtpTlsEnforce = smtpTlsEnforce;
         this.smtpTlsCheckServerIdentity = smtpTlsCheckServerIdentity;
         this.preferencesEnabled = preferencesEnabled;
@@ -141,6 +158,11 @@ public class ProductionConfigValidator {
         // Email link routing integrity boundary; test/dev URLs MUST NOT leak to prod
         // (subscribers click link → wrong host → 404 / wrong-cluster credential drift).
         validateUnsubscribeBaseUrl(errors, unsubscribeBaseUrl);
+
+        // A4 DKIM mail security boundary (Codex 019e1307 P0/P1 absorb 2026-05-10).
+        // Prod profile: notify.dkim.enabled=true required + selector + domain +
+        // private-key-pem populated. App-side DKIM signing active path enforced.
+        validateDkim(errors, dkimEnabled, dkimSelector, dkimDomain, dkimPrivateKeyPem);
 
         // Preferences (Codex PR5 Q1)
         if (!preferencesEnabled) {
@@ -283,6 +305,52 @@ public class ProductionConfigValidator {
                 + "Production must use 'ai.acik.com' (exact) or non-test "
                 + "tenant subdomain. Subscriber link routing → wrong cluster → "
                 + "404/credential drift; KVKK Art.13 right-to-info compliance gap.");
+        }
+    }
+
+    /**
+     * Validate DKIM mail security boundary (A4 — Codex 019e1307 P0/P1 absorb).
+     *
+     * Production fail-closed contract:
+     * <ul>
+     *   <li>{@code notify.dkim.enabled=true} required (R3 mitigation)</li>
+     *   <li>{@code notify.dkim.selector} non-blank (DNS TXT record name)</li>
+     *   <li>{@code notify.dkim.domain} non-blank (signing domain, must align with From: domain)</li>
+     *   <li>{@code notify.dkim.private-key-pem} populated + parseable (PKCS#8)</li>
+     * </ul>
+     *
+     * <p>**Why prod fail-closed**: outbound emails without DKIM signature land
+     * in spam folders or bounce; corporate relays may mark unsigned mail as
+     * suspicious. R3 risk register requires app-side DKIM in prod profile.
+     *
+     * <p>**Operator alternative**: corporate relay DKIM authoritative pattern
+     * (Plan B) can disable app-side DKIM — explicit ops alignment + 90-day
+     * rotation SLA. Plan B activation requires ADR + alternate validator
+     * contract (out of scope this PR; flag-gated future iter).
+     */
+    private static void validateDkim(List<String> errors, boolean enabled,
+                                      String selector, String domain, String privateKeyPem) {
+        if (!enabled) {
+            errors.add("notify.dkim.enabled=false — production must enable app-side "
+                + "DKIM (R3 mitigation: outbound mail integrity + spam folder defense). "
+                + "Plan B (corporate relay DKIM) requires explicit ADR + flag-gated "
+                + "alternative validator contract.");
+            return;
+        }
+        if (selector == null || selector.isBlank()) {
+            errors.add("notify.dkim.selector=blank — production DKIM signer requires "
+                + "selector (DNS TXT record name; e.g. 's1' for s1._domainkey.<domain>)");
+        }
+        if (domain == null || domain.isBlank()) {
+            errors.add("notify.dkim.domain=blank — production DKIM signer requires "
+                + "signing domain (must align with From: header domain for valid signatures)");
+        }
+        if (privateKeyPem == null || privateKeyPem.isBlank()) {
+            errors.add("notify.dkim.private-key-pem=blank — production DKIM signer requires "
+                + "RSA PKCS#8 private key (Vault inject; openssl pkcs8 -topk8 -nocrypt format)");
+        } else if (!privateKeyPem.contains("BEGIN") || !privateKeyPem.contains("END")) {
+            errors.add("notify.dkim.private-key-pem malformed — must be PEM-encoded PKCS#8 "
+                + "(BEGIN/END markers required; Vault inject from openssl pkcs8 output)");
         }
     }
 }

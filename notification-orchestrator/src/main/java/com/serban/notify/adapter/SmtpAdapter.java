@@ -42,6 +42,12 @@ public class SmtpAdapter implements ChannelAdapter {
     private static final Logger log = LoggerFactory.getLogger(SmtpAdapter.class);
 
     private final JavaMailSender mailSender;
+    /**
+     * Optional DKIM signer (Codex 019e1307 P0 absorb 2026-05-10).
+     * Bean only present when notify.dkim.enabled=true (ConditionalOnProperty
+     * gate); Optional<> wrapper enables disabled-channel fallback.
+     */
+    private final java.util.Optional<com.serban.notify.provider.DkimSigner> dkimSigner;
 
     @Value("${notify.adapters.smtp.from-address:noreply@localhost}")
     private String fromAddress;
@@ -49,8 +55,13 @@ public class SmtpAdapter implements ChannelAdapter {
     @Value("${notify.adapters.smtp.from-name:Notification Orchestrator}")
     private String fromName;
 
-    public SmtpAdapter(JavaMailSender mailSender) {
+    public SmtpAdapter(
+        JavaMailSender mailSender,
+        java.util.Optional<com.serban.notify.provider.DkimSigner> dkimSigner
+    ) {
         this.mailSender = mailSender;
+        this.dkimSigner = dkimSigner;
+        log.info("SmtpAdapter activated: dkimEnabled={}", dkimSigner.isPresent());
     }
 
     @Override
@@ -82,7 +93,20 @@ public class SmtpAdapter implements ChannelAdapter {
             }
 
             String messageId = "<" + UUID.randomUUID() + "@notification-orchestrator>";
+
+            // Codex 019e1307 P0 + P1 absorb 2026-05-10:
+            // saveChanges() ordering MUST precede DKIM sign so Date header is
+            // populated by Jakarta Mail. setHeader("Message-ID", ...) AFTER
+            // saveChanges() because saveChanges() updates Message-ID to default
+            // <id>@<host> form. Order: saveChanges → setHeader Message-ID →
+            // DKIM sign → send. Manuel Message-ID koruma + DKIM signature
+            // canonical Date dahil.
+            mime.saveChanges();
             mime.setHeader("Message-ID", messageId);
+            if (dkimSigner.isPresent()) {
+                dkimSigner.get().sign(mime);
+                log.debug("smtp DKIM-Signature applied: messageId={}", messageId);
+            }
 
             mailSender.send(mime);
             log.info("smtp delivered: to=<redacted-hash:{}> subject=<{}> message_id={}",
