@@ -20,19 +20,32 @@ class UnsubscribeTokenServiceTest {
 
     @Test
     void generateAndVerifyHappyPath() {
-        String token = service.generate("subscriber-1204", "auth.password-reset");
+        String token = service.generate("default", "subscriber-1204", "auth.password-reset");
 
         Optional<UnsubscribeTokenService.UnsubscribeClaims> verified = service.verify(token);
 
         assertThat(verified).isPresent();
+        assertThat(verified.get().orgId()).isEqualTo("default");
         assertThat(verified.get().subscriberId()).isEqualTo("subscriber-1204");
         assertThat(verified.get().topicKey()).isEqualTo("auth.password-reset");
         assertThat(verified.get().expiresAt()).isGreaterThan(verified.get().issuedAt());
     }
 
     @Test
+    void generateRequiresOrgId() {
+        org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> service.generate(null, "sub-1", "topic")
+        );
+        org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> service.generate("", "sub-1", "topic")
+        );
+    }
+
+    @Test
     void generateGlobalUnsubscribeNullTopic() {
-        String token = service.generate("subscriber-1204", null);
+        String token = service.generate("default", "subscriber-1204", null);
 
         Optional<UnsubscribeTokenService.UnsubscribeClaims> verified = service.verify(token);
 
@@ -49,7 +62,7 @@ class UnsubscribeTokenServiceTest {
         );
         Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
         svcAtT0.setClock(Clock.fixed(t0, ZoneOffset.UTC));
-        String token = svcAtT0.generate("subscriber-1204", "auth.password-reset");
+        String token = svcAtT0.generate("default", "subscriber-1204", "auth.password-reset");
 
         // Roll forward 91 days — should be expired
         UnsubscribeTokenService svcAtT1 = new UnsubscribeTokenService(
@@ -64,7 +77,7 @@ class UnsubscribeTokenServiceTest {
 
     @Test
     void verifyTamperedTokenRejects() {
-        String token = service.generate("subscriber-1204", "auth.password-reset");
+        String token = service.generate("default", "subscriber-1204", "auth.password-reset");
 
         // Tamper signature (last char flip)
         String tampered = token.substring(0, token.length() - 1)
@@ -85,7 +98,7 @@ class UnsubscribeTokenServiceTest {
 
     @Test
     void verifyDifferentSecretRejects() {
-        String token = service.generate("subscriber-1204", "auth.password-reset");
+        String token = service.generate("default", "subscriber-1204", "auth.password-reset");
 
         // Different secret → signature mismatch
         UnsubscribeTokenService altSvc = new UnsubscribeTokenService(
@@ -100,7 +113,7 @@ class UnsubscribeTokenServiceTest {
         Instant t0 = Instant.parse("2026-05-10T12:00:00Z");
         service.setClock(Clock.fixed(t0, ZoneOffset.UTC));
 
-        String token = service.generate("subscriber-1204", "billing.invoice");
+        String token = service.generate("default", "subscriber-1204", "billing.invoice");
         Optional<UnsubscribeTokenService.UnsubscribeClaims> verified = service.verify(token);
 
         assertThat(verified).isPresent();

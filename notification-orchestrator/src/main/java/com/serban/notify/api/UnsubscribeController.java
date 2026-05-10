@@ -1,5 +1,7 @@
 package com.serban.notify.api;
 
+import com.serban.notify.unsubscribe.UnsubscribeRevokeService;
+import com.serban.notify.unsubscribe.UnsubscribeRevokeService.RevokeResult;
 import com.serban.notify.unsubscribe.UnsubscribeTokenService;
 import com.serban.notify.unsubscribe.UnsubscribeTokenService.UnsubscribeClaims;
 import org.slf4j.Logger;
@@ -41,9 +43,14 @@ public class UnsubscribeController {
     private static final Logger log = LoggerFactory.getLogger(UnsubscribeController.class);
 
     private final UnsubscribeTokenService tokenService;
+    private final UnsubscribeRevokeService revokeService;
 
-    public UnsubscribeController(UnsubscribeTokenService tokenService) {
+    public UnsubscribeController(
+        UnsubscribeTokenService tokenService,
+        UnsubscribeRevokeService revokeService
+    ) {
         this.tokenService = tokenService;
+        this.revokeService = revokeService;
     }
 
     /**
@@ -67,15 +74,20 @@ public class UnsubscribeController {
         }
 
         UnsubscribeClaims c = claims.get();
-        log.info("unsubscribe verify: subscriberId={} topicKey={} expiresAt={}",
-            c.subscriberId(), c.topicKey() != null ? c.topicKey() : "<global>", c.expiresAt());
+        log.info("unsubscribe verify: orgId={} subscriberId={} topicKey={} expiresAt={}",
+            c.orgId(), c.subscriberId(),
+            c.topicKey() != null ? c.topicKey() : "<global>", c.expiresAt());
+
+        // T1.1.8 PR-C: apply preference revoke (idempotent)
+        RevokeResult result = revokeService.revoke(c);
 
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("subscriberId", c.subscriberId());
-        body.put("topicKey", c.topicKey());
-        body.put("status", "verified");
-        // PR-A scope: verify only. PR-C will add actual preference revoke + audit event.
-        body.put("note", "Token verified. Preference revocation pending PR-C wire-up.");
+        body.put("orgId", result.orgId());
+        body.put("subscriberId", result.subscriberId());
+        body.put("topicKey", result.topicKey());
+        body.put("channel", result.channel());
+        body.put("status", "unsubscribed");
+        body.put("preferenceId", result.preferenceId());
         return ResponseEntity.ok(body);
     }
 }

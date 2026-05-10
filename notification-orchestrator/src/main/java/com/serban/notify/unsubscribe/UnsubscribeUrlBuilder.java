@@ -54,18 +54,32 @@ public class UnsubscribeUrlBuilder {
     /**
      * Build full unsubscribe URL for an email recipient.
      *
+     * @param orgId        tenant scope (org claim) — required
      * @param subscriberId recipient subscriber ID (sub claim)
      * @param topicKey     topic-specific unsubscribe; null = global unsubscribe
      * @return absolute URL with signed token
      */
-    public String build(String subscriberId, String topicKey) {
+    public String build(String orgId, String subscriberId, String topicKey) {
+        if (orgId == null || orgId.isBlank()) {
+            throw new IllegalArgumentException("orgId required for unsubscribe URL");
+        }
         if (subscriberId == null || subscriberId.isBlank()) {
             throw new IllegalArgumentException("subscriberId required for unsubscribe URL");
         }
-        String token = tokenService.generate(subscriberId, topicKey);
+        String token = tokenService.generate(orgId, subscriberId, topicKey);
         return UriComponentsBuilder.fromUriString(baseUrl)
             .queryParam("token", token)
             .build()
             .toUriString();
+    }
+
+    /**
+     * Backward-compat overload (PR-B signature) — defaults orgId="default".
+     *
+     * @deprecated use {@link #build(String, String, String)} with explicit orgId
+     */
+    @Deprecated
+    public String build(String subscriberId, String topicKey) {
+        return build("default", subscriberId, topicKey);
     }
 }
