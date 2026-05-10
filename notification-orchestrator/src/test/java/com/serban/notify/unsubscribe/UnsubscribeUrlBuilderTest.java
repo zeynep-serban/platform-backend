@@ -21,7 +21,7 @@ class UnsubscribeUrlBuilderTest {
 
     @Test
     void buildIncludesTokenQueryParam() {
-        String url = builder.build("subscriber-1204", "auth.password-reset");
+        String url = builder.build("default", "subscriber-1204", "auth.password-reset");
 
         assertThat(url).startsWith("https://testai.acik.com/api/v1/notify/unsubscribe?token=");
         assertThat(url).contains(".");  // token has payload.signature dot
@@ -36,7 +36,7 @@ class UnsubscribeUrlBuilderTest {
 
     @Test
     void buildGlobalUnsubscribeNullTopic() {
-        String url = builder.build("subscriber-1204", null);
+        String url = builder.build("default", "subscriber-1204", null);
 
         assertThat(url).startsWith("https://testai.acik.com/api/v1/notify/unsubscribe?token=");
 
@@ -49,15 +49,15 @@ class UnsubscribeUrlBuilderTest {
 
     @Test
     void buildRejectsNullOrBlankSubscriberId() {
-        assertThatThrownBy(() -> builder.build(null, "topic"))
+        assertThatThrownBy(() -> builder.build("default", null, "topic"))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("subscriberId required");
 
-        assertThatThrownBy(() -> builder.build("", "topic"))
+        assertThatThrownBy(() -> builder.build("default", "", "topic"))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("subscriberId required");
 
-        assertThatThrownBy(() -> builder.build("   ", "topic"))
+        assertThatThrownBy(() -> builder.build("default", "   ", "topic"))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("subscriberId required");
     }
@@ -68,7 +68,7 @@ class UnsubscribeUrlBuilderTest {
             tokenService, "https://ai.acik.com/api/v1/notify/unsubscribe"
         );
 
-        String url = prodBuilder.build("subscriber-1204", "billing.invoice");
+        String url = prodBuilder.build("default", "subscriber-1204", "billing.invoice");
         assertThat(url).startsWith("https://ai.acik.com/api/v1/notify/unsubscribe?token=");
     }
 }

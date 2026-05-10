@@ -28,12 +28,16 @@ import java.util.Optional;
  * <p>Payload JSON:
  * <pre>{@code
  * {
+ *   "org": "org_id",
  *   "sub": "subscriber_id",
  *   "top": "topic_key",
  *   "iat": 1715347200,
  *   "exp": 1722777600
  * }
  * }</pre>
+ *
+ * <p>**T1.1.8 PR-C absorb**: `org` claim added so revoke flow can scope
+ * preference lookups by tenant boundary (orgId).
  *
  * <p>**Why HMAC instead of full JWT**: notification-orchestrator does not yet
  * depend on jjwt/Nimbus libraries (Spring Security only); HMAC-SHA256 is
@@ -79,15 +83,23 @@ public class UnsubscribeTokenService {
     }
 
     /**
-     * Generate signed unsubscribe token.
+     * Generate signed unsubscribe token (T1.1.8 PR-C: org claim added).
      *
-     * @param subscriberId subscriber subject (sub claim)
+     * @param orgId        tenant scope (org claim) — required
+     * @param subscriberId subscriber subject (sub claim) — required
      * @param topicKey     topic key (top claim) or null for global unsubscribe
      * @return compact `base64url(payload).base64url(hmac)` token
      */
-    public String generate(String subscriberId, String topicKey) {
+    public String generate(String orgId, String subscriberId, String topicKey) {
+        if (orgId == null || orgId.isBlank()) {
+            throw new IllegalArgumentException("orgId required");
+        }
+        if (subscriberId == null || subscriberId.isBlank()) {
+            throw new IllegalArgumentException("subscriberId required");
+        }
         long now = clock.instant().getEpochSecond();
         Map<String, Object> claims = new LinkedHashMap<>();
+        claims.put("org", orgId);
         claims.put("sub", subscriberId);
         if (topicKey != null) {
             claims.put("top", topicKey);
@@ -104,6 +116,18 @@ public class UnsubscribeTokenService {
         } catch (Exception e) {
             throw new IllegalStateException("Token generation failed", e);
         }
+    }
+
+    /**
+     * Backward-compat overload (PR-A signature) — defaults orgId="default".
+     * Test fixtures pre-PR-C may rely on this. Production code MUST use
+     * {@link #generate(String, String, String)} with explicit orgId.
+     *
+     * @deprecated use {@link #generate(String, String, String)} with orgId
+     */
+    @Deprecated
+    public String generate(String subscriberId, String topicKey) {
+        return generate("default", subscriberId, topicKey);
     }
 
     /**
@@ -140,6 +164,7 @@ public class UnsubscribeTokenService {
                 return Optional.empty();
             }
             return Optional.of(new UnsubscribeClaims(
+                (String) claims.getOrDefault("org", "default"),
                 (String) claims.get("sub"),
                 (String) claims.get("top"),
                 ((Number) claims.get("iat")).longValue(),
@@ -178,8 +203,11 @@ public class UnsubscribeTokenService {
 
     /**
      * Decoded unsubscribe claims (immutable).
+     *
+     * <p>T1.1.8 PR-C: orgId added for tenant-scoped revoke.
      */
     public record UnsubscribeClaims(
+        String orgId,
         String subscriberId,
         String topicKey,
         long issuedAt,
