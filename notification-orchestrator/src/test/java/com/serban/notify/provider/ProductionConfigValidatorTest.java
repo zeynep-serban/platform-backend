@@ -24,6 +24,13 @@ class ProductionConfigValidatorTest {
     private static final String OK_UNSUB = "rotated-unsubscribe-secret-32-char-vault";
     /** P0.4 — production-host base URL (HTTPS, ai.acik.com prefix). */
     private static final String OK_BASE_URL = "https://ai.acik.com/api/v1/notify/unsubscribe";
+    /**
+     * A4 DKIM (Codex 019e1307 P0/P1 absorb) — fixture PEM PKCS#8 marker;
+     * not a real key (test-only PEM marker check; signature/parse exercise
+     * covered by DkimSignerTest with generated keypair).
+     */
+    private static final String OK_DKIM_PEM =
+        "-----" + "BEGIN " + "PRIVATE" + " KEY-----\nMIIE...\n" + "-----" + "END " + "PRIVATE" + " KEY-----\n";
 
     @Test
     void nonProdProfileSkipsValidation() {
@@ -37,6 +44,7 @@ class ProductionConfigValidatorTest {
             "dev-only-key-not-for-production",
             "dev-only-unsubscribe-secret-not-for-production",
             "https://testai.acik.com/api/v1/notify/unsubscribe",
+            false, "", "", "",  // DKIM disabled (test profile skip-path)
             false, false, false, false  // all production guards off
         );
 
@@ -203,8 +211,30 @@ class ProductionConfigValidatorTest {
     ) {
         Environment env = mock(Environment.class);
         when(env.getActiveProfiles()).thenReturn(new String[] { "prod" });
+        // Codex 019e1307 P0/P1 absorb: helper passes DKIM "OK" defaults so existing
+        // tests don't need rewrite. DKIM-specific tests use 5-arg overload below.
         return new ProductionConfigValidator(
             env, pepper, webhookSecret, authzKey, unsubSecret, baseUrl,
+            true, "s1", "ai.acik.com", OK_DKIM_PEM,  // DKIM enabled+populated for happy-path
+            tlsEnforce, tlsCheckIdentity, preferences, authz
+        );
+    }
+
+    /**
+     * 11-arg helper for DKIM-specific tests (A4 Codex 019e1307 P0/P1 absorb).
+     */
+    private ProductionConfigValidator prodValidatorWithDkim(
+        String pepper, String webhookSecret, String authzKey, String unsubSecret,
+        String baseUrl,
+        boolean dkimEnabled, String dkimSelector, String dkimDomain, String dkimPem,
+        boolean tlsEnforce, boolean tlsCheckIdentity,
+        boolean preferences, boolean authz
+    ) {
+        Environment env = mock(Environment.class);
+        when(env.getActiveProfiles()).thenReturn(new String[] { "prod" });
+        return new ProductionConfigValidator(
+            env, pepper, webhookSecret, authzKey, unsubSecret, baseUrl,
+            dkimEnabled, dkimSelector, dkimDomain, dkimPem,
             tlsEnforce, tlsCheckIdentity, preferences, authz
         );
     }
@@ -402,5 +432,81 @@ class ProductionConfigValidatorTest {
             true, true, true, true);
 
         v.validate();  // No throw — host is ai.acik.com, query/path doesn't matter
+    }
+
+    // ====================================================================
+    // A4 DKIM (Codex 019e1307 P0/P1 absorb) — DKIM mail security boundary
+    // ====================================================================
+
+    @Test
+    void prodProfileWithDkimDisabledFails() {
+        ProductionConfigValidator v = prodValidatorWithDkim(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            false, "s1", "ai.acik.com", OK_DKIM_PEM,
+            true, true, true, true);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.dkim.enabled=false")
+            .hasMessageContaining("R3 mitigation");
+    }
+
+    @Test
+    void prodProfileWithDkimSelectorBlankFails() {
+        ProductionConfigValidator v = prodValidatorWithDkim(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            true, "", "ai.acik.com", OK_DKIM_PEM,
+            true, true, true, true);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.dkim.selector=blank");
+    }
+
+    @Test
+    void prodProfileWithDkimDomainBlankFails() {
+        ProductionConfigValidator v = prodValidatorWithDkim(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            true, "s1", "", OK_DKIM_PEM,
+            true, true, true, true);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.dkim.domain=blank");
+    }
+
+    @Test
+    void prodProfileWithDkimPrivateKeyBlankFails() {
+        ProductionConfigValidator v = prodValidatorWithDkim(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            true, "s1", "ai.acik.com", "",
+            true, true, true, true);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.dkim.private-key-pem=blank");
+    }
+
+    @Test
+    void prodProfileWithDkimPrivateKeyMalformedFails() {
+        ProductionConfigValidator v = prodValidatorWithDkim(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            true, "s1", "ai.acik.com", "not a pem key garbage",
+            true, true, true, true);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.dkim.private-key-pem malformed")
+            .hasMessageContaining("BEGIN/END markers required");
+    }
+
+    @Test
+    void prodProfileWithFullDkimConfigPasses() {
+        ProductionConfigValidator v = prodValidatorWithDkim(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            true, "s1", "ai.acik.com", OK_DKIM_PEM,
+            true, true, true, true);
+
+        v.validate();  // No throw — DKIM enabled + selector + domain + PEM marker present
     }
 }

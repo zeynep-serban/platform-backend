@@ -44,7 +44,10 @@ class SmtpAdapterTest {
         Session session = Session.getInstance(new Properties());
         when(mailSender.createMimeMessage()).thenAnswer(inv -> new MimeMessage(session));
 
-        adapter = new SmtpAdapter(mailSender);
+        // Codex 019e1307 P0 absorb: SmtpAdapter constructor extended with
+        // Optional<DkimSigner>. DKIM disabled in this unit test (Optional.empty);
+        // DKIM signing path covered by SmtpAdapterDkimWiringTest + DkimSignerTest.
+        adapter = new SmtpAdapter(mailSender, java.util.Optional.empty());
         ReflectionTestUtils.setField(adapter, "fromAddress", "noreply@test.local");
         ReflectionTestUtils.setField(adapter, "fromName", "Test Sender");
     }
