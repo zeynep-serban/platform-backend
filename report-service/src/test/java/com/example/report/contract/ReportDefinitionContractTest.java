@@ -187,6 +187,8 @@ class ReportDefinitionContractTest {
 
         assertThat(amount2.headerName()).isEqualTo("Tutar 2");
         assertThat(amount2.type()).isEqualTo("number");
+        assertThat(amount2.aggregatable()).isTrue();
+        assertThat(amount2.defaultAggFunc()).isEqualTo("sum");
         assertThat(amountCurrency2.headerName()).isEqualTo("Para Birimi 2");
         assertThat(amountCurrency2.type()).isEqualTo("text");
         assertThat(amountCurrency2.groupable()).isTrue();

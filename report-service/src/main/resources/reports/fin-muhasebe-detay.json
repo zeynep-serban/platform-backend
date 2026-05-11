@@ -79,7 +79,9 @@
       "headerName": "Tutar 2",
       "type": "number",
       "width": 130,
-      "sensitive": false
+      "sensitive": false,
+      "aggregatable": true,
+      "defaultAggFunc": "sum"
     },
     {
       "field": "AMOUNT_CURRENCY_2",
