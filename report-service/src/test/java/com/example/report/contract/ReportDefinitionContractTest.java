@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.report.contract.report.ContractGateSummary;
 import com.example.report.contract.report.ContractViolation;
+import com.example.report.registry.ColumnDefinition;
 import com.example.report.registry.ReportDefinition;
 import com.example.report.registry.ReportRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -131,6 +132,27 @@ class ReportDefinitionContractTest {
         assertThat(registry.get("hr-personel-listesi")).isPresent();
         assertThat(registry.get("fin-fatura-satirlari")).isPresent();
         assertThat(registry.get("exceptions")).isEmpty();  // excluded
+    }
+
+    @Test
+    @DisplayName("fin-muhasebe-detay: BA column displays Borç/Alacak labels")
+    void finMuhasebeDetay_baColumnDisplaysDebitCreditLabels() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        ReportRegistry registry = new ReportRegistry(mapper, "classpath*:reports/");
+        registry.loadDefinitions();
+
+        ReportDefinition def = registry.get("fin-muhasebe-detay").orElseThrow();
+        ColumnDefinition baColumn = def.columns().stream()
+                .filter(c -> "BA".equals(c.field()))
+                .findFirst()
+                .orElseThrow();
+
+        assertThat(baColumn.headerName()).isEqualTo("Borç/Alacak");
+        assertThat(baColumn.type()).isEqualTo("text");
+        assertThat(def.sourceQuery())
+                .contains("CASE WHEN ACR.BA = 1 THEN N'Borç'")
+                .contains("WHEN ACR.BA = 0 THEN N'Alacak'")
+                .contains("END AS BA");
     }
 
     @ParameterizedTest(name = "{0}")
