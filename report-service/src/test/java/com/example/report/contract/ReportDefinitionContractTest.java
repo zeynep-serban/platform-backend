@@ -195,6 +195,33 @@ class ReportDefinitionContractTest {
                 .contains("ACR.AMOUNT_CURRENCY_2");
     }
 
+    @Test
+    @DisplayName("fin-muhasebe-detay: amount fields are Borç positive and Alacak negative")
+    void finMuhasebeDetay_amountFieldsAreDebitPositiveCreditNegative() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        ReportRegistry registry = new ReportRegistry(mapper, "classpath*:reports/");
+        registry.loadDefinitions();
+
+        ReportDefinition def = registry.get("fin-muhasebe-detay").orElseThrow();
+        ColumnDefinition amount = def.columns().stream()
+                .filter(c -> "AMOUNT".equals(c.field()))
+                .findFirst()
+                .orElseThrow();
+
+        assertThat(amount.aggregatable()).isTrue();
+        assertThat(amount.defaultAggFunc()).isEqualTo("sum");
+        assertThat(def.sourceQuery())
+                .contains("CASE WHEN ACR.BA = 1 THEN ABS(ACR.AMOUNT) "
+                        + "WHEN ACR.BA = 0 THEN -ABS(ACR.AMOUNT) "
+                        + "ELSE ACR.AMOUNT END AS AMOUNT")
+                .contains("CASE WHEN ACR.BA = 1 THEN ABS(ACR.AMOUNT_2) "
+                        + "WHEN ACR.BA = 0 THEN -ABS(ACR.AMOUNT_2) "
+                        + "ELSE ACR.AMOUNT_2 END AS AMOUNT_2")
+                .contains("CASE WHEN ACR.BA = 1 THEN ABS(ACR.OTHER_AMOUNT) "
+                        + "WHEN ACR.BA = 0 THEN -ABS(ACR.OTHER_AMOUNT) "
+                        + "ELSE ACR.OTHER_AMOUNT END AS OTHER_AMOUNT");
+    }
+
     @ParameterizedTest(name = "{0}")
     @MethodSource("knownReportKeys")
     @DisplayName("Per-report: zero unsuppressed failures")
