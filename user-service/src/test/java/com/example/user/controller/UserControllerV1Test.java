@@ -123,6 +123,29 @@ class UserControllerV1Test {
                 .andExpect(content().string(containsString("detail@example.com")));
     }
 
+    /**
+     * Codex 019e1bed REVISE-7 hotfix-3 regression: the V1 detail payload
+     * MUST carry {@code kcSubject} so auth-service backend-authoritative
+     * impersonation target resolution can read it. The previous REVISE-5
+     * hotfix only fixed the legacy {@code UserResponse} (mapped by the
+     * old {@code /api/users/{id}} controller); live testai smoke proved
+     * {@code GET /api/v1/users/{id}} returns {@code UserDetailDto}, which
+     * was missing the field — every impersonation start failed with
+     * {@code TARGET_SUBJECT_UNRESOLVABLE} (422) even with a valid backfill.
+     */
+    @Test
+    void getUser_v1_detailExposesKcSubject() throws Exception {
+        User saved = ensureUserExists("kcsubject-detail@example.com");
+        saved.setKcSubject("11111111-2222-3333-4444-555555555555");
+        userRepository.save(saved);
+        String token = issueToken(saved.getEmail());
+
+        mockMvc.perform(get("/api/v1/users/{id}", saved.getId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("\"kcSubject\":\"11111111-2222-3333-4444-555555555555\"")));
+    }
+
     @Test
     void getUser_notFound_returns404() throws Exception {
         User saved = ensureUserExists("missing-profile@example.com");
