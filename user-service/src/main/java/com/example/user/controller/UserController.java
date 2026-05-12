@@ -652,13 +652,10 @@ public class UserController {
     }
 
     private UserResponse mapToUserResponse(User user) {
-        // Codex 019e1bed REVISE-1: `kcSubject` REMOVED from the public
-        // {@code UserResponse}. The admin UI no longer needs the KC UUID
-        // — auth-service resolves it server-side via the internal
-        // service-token endpoint {@code /api/users/internal/{id}/
-        // impersonation-target}. Keeping the field out of the
-        // browser-facing payload keeps KC internals on the server side.
-        return new UserResponse(
+        // Codex 019e1bed REVISE-5 (hotfix): re-expose kcSubject after the
+        // service-token internal endpoint hit a pre-existing user-service
+        // KC issuer config drift. See UserResponse.kcSubject Javadoc.
+        UserResponse response = new UserResponse(
                 user.getId(),
                 user.getName(),
                 user.getEmail(),
@@ -670,6 +667,8 @@ public class UserController {
                         ? user.getSessionTimeoutMinutes()
                         : User.DEFAULT_SESSION_TIMEOUT_MINUTES
         );
+        response.setKcSubject(user.getKcSubject());
+        return response;
     }
 
     

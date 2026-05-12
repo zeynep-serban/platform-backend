@@ -16,6 +16,23 @@ public class UserResponse {
     private Integer sessionTimeoutMinutes;
     private String auditId;
 
+    /**
+     * Keycloak subject (UUID) mapped to this platform user. Codex thread
+     * {@code 019e1bed} REVISE-5 (hotfix): re-exposed after the
+     * service-token internal endpoint hit a pre-existing user-service KC
+     * issuer config drift (`http://localhost:8081/realms/serban/...`
+     * unreachable from inside the user-service pod). Going through the
+     * public {@code /api/v1/users/{id}} path lets the admin JWT (already
+     * authority-checked at the gateway + superAdmin-gated at
+     * impersonation start) act as the trust anchor. The field is not
+     * security-sensitive — the same KC subject ships in every admin's
+     * own JWT, and the admin grid already lists all users with admin
+     * scope. A follow-up PR will fix the user-service KC issuer drift
+     * and restore the service-token internal endpoint as the cleaner
+     * path.
+     */
+    private String kcSubject;
+
     public UserResponse() {
     }
 
@@ -101,5 +118,13 @@ public class UserResponse {
 
     public void setAuditId(String auditId) {
         this.auditId = auditId;
+    }
+
+    public String getKcSubject() {
+        return kcSubject;
+    }
+
+    public void setKcSubject(String kcSubject) {
+        this.kcSubject = kcSubject;
     }
 }
