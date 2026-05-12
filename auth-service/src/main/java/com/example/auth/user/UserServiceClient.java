@@ -71,20 +71,24 @@ public class UserServiceClient {
      * @return impersonation target details (id, email, kcSubject) or
      *         {@link Optional#empty()} when user-service returns 404
      */
-    public Optional<RemoteUserResponse> findUserById(Long userId) {
-        // Codex 019e1bed REVISE-5 (hotfix): use public /api/v1/users/{id}
-        // endpoint instead of the service-token protected internal path.
-        // Live deploy hit a pre-existing user-service KC issuer config
-        // drift (`http://localhost:8081/realms/serban/...` unreachable
-        // from inside the user-service pod) so the service-token decode
-        // returned 401. The public path returns kcSubject in
-        // UserResponse and is already authority-checked at the gateway
-        // for admin scope. Follow-up: fix user-service KC issuer drift
-        // and restore the service-token internal endpoint.
+    public Optional<RemoteUserResponse> findUserById(Long userId, String adminToken) {
+        // Codex 019e1bed REVISE-6 (hotfix-2): forward the admin JWT so the
+        // public /api/v1/users/{id} endpoint (which requires
+        // authenticated admin scope) accepts the call. Earlier hotfix
+        // tried this path without a bearer header and hit 401. The
+        // admin JWT is in scope inside ImpersonationController; we
+        // pass it through. user-service KC issuer drift fix is still
+        // a follow-up — for now the public path + admin token is the
+        // working contract.
         try {
             return Optional.ofNullable(
                     webClient.get()
                             .uri("/api/v1/users/{id}", userId)
+                            .headers(headers -> {
+                                if (adminToken != null && !adminToken.isBlank()) {
+                                    headers.setBearerAuth(adminToken);
+                                }
+                            })
                             .retrieve()
                             .bodyToMono(RemoteUserResponse.class)
                             .block()

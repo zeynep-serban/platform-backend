@@ -197,7 +197,7 @@ public class ImpersonationController {
         RemoteUserResponse targetRecord = null;
         if (resolvedTargetSubject == null || resolvedTargetSubject.isBlank()) {
             try {
-                targetRecord = userServiceClient.findUserById(request.targetUserId()).orElse(null);
+                targetRecord = userServiceClient.findUserById(request.targetUserId(), adminJwt.getTokenValue()).orElse(null);
                 if (targetRecord != null) {
                     String kc = targetRecord.getKcSubject();
                     if (kc != null && !kc.isBlank()) {
