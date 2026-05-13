@@ -110,6 +110,7 @@ class ImpersonationControllerSelfGuardTest {
         assertThat(captor.getValue().errorCode()).isEqualTo("SELF_IMPERSONATION_FORBIDDEN");
         assertThat(captor.getValue().impersonatorUserId()).isEqualTo(1L);
         assertThat(captor.getValue().targetUserId()).isEqualTo(1L);
+        assertThat(captor.getValue().targetEmail()).isEqualTo("admin@example.com");
     }
 
     @Test
@@ -150,6 +151,11 @@ class ImpersonationControllerSelfGuardTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
         assertThat(response.getBody().errorCode()).isEqualTo("TARGET_SUBJECT_UNRESOLVABLE");
         verify(brokerClient, never()).exchange(any(), any());
+        ArgumentCaptor<ImpersonationAuditClient.AuditPayload> captor =
+                ArgumentCaptor.forClass(ImpersonationAuditClient.AuditPayload.class);
+        verify(auditClient).writeBlocked(captor.capture());
+        assertThat(captor.getValue().errorCode()).isEqualTo("TARGET_SUBJECT_UNRESOLVABLE");
+        assertThat(captor.getValue().targetEmail()).isEqualTo("missing@example.com");
     }
 
     @Test

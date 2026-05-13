@@ -164,7 +164,7 @@ public class ImpersonationController {
                     .impersonatorEmail(impersonatorEmail)
                     .targetSubject(request.targetSubject())
                     .targetUserId(request.targetUserId())
-                    .targetEmail(request.targetEmail())
+                    .targetEmail(auditTargetEmail(request, null))
                     .reason(request.reason())
                     .correlationId(correlationId)
                     .errorCode("SELF_IMPERSONATION_FORBIDDEN")
@@ -216,7 +216,7 @@ public class ImpersonationController {
                     .impersonatorSubject(impersonatorSubject)
                     .impersonatorEmail(impersonatorEmail)
                     .targetUserId(request.targetUserId())
-                    .targetEmail(request.targetEmail())
+                    .targetEmail(auditTargetEmail(request, targetRecord))
                     .reason(request.reason())
                     .correlationId(correlationId)
                     .errorCode("TARGET_SUBJECT_UNRESOLVABLE")
@@ -595,6 +595,14 @@ public class ImpersonationController {
             return xff.split(",")[0].trim();
         }
         return request.getRemoteAddr();
+    }
+
+    private String auditTargetEmail(StartSessionRequest request, RemoteUserResponse targetRecord) {
+        String requestedTargetEmail = request.targetEmail();
+        if (requestedTargetEmail != null && !requestedTargetEmail.isBlank()) {
+            return requestedTargetEmail;
+        }
+        return targetRecord != null ? targetRecord.getEmail() : requestedTargetEmail;
     }
 
     @ExceptionHandler(TokenExchangeException.class)
