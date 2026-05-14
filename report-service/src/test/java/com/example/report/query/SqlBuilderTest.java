@@ -1372,6 +1372,33 @@ class SqlBuilderTest {
         }
 
         @Test
+        void aliasCollisionFromSanitizationRejected() {
+            // Codex 019e2695 iter-2 P1: two distinct registry values
+            // ("A-B" and "A/B") both sanitise into the `A_B` alias key.
+            // Without the collision check the SQL builder would emit
+            // two columns named `pvt__status__A_B__sum__amount`, which
+            // AG Grid cannot disambiguate and SQL Server treats as
+            // undefined-result-set duplication. The builder must fail
+            // closed so registry maintainers see the conflict instead
+            // of debugging missing pivot columns on the frontend.
+            ReportDefinition def = pivotDef();
+            IllegalArgumentException ex =
+                    org.junit.jupiter.api.Assertions.assertThrows(
+                            IllegalArgumentException.class,
+                            () -> builder.buildPivotedGroupedQuery(
+                                    def, null, PIVOT_COLS,
+                                    "category", "status",
+                                    List.of(new PivotValue("A-B"),
+                                            new PivotValue("A/B")),
+                                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                                    Collections.emptyMap(), Collections.emptyList(),
+                                    null, null, 1, 50));
+            assertThat(ex.getMessage())
+                    .contains("Pivot alias collision")
+                    .contains("A_B");
+        }
+
+        @Test
         void sortOnPivotResultFieldHonored() {
             ReportDefinition def = pivotDef();
             SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(

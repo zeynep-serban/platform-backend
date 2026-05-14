@@ -854,6 +854,17 @@ public class SqlBuilder {
         sql.append(", COUNT(*) AS [_rowCount]");
 
         List<String> pivotResultFields = new ArrayList<>();
+        // PR-0.4b post-spec hardening (Codex 019e2695 iter-2 P1 absorb):
+        // alias sanitisation maps non-identifier codepoints onto `_`, so
+        // two distinct registry values like `A-B` and `A/B` would collide
+        // onto the same `A_B` alias and produce duplicate response
+        // columns AG Grid cannot disambiguate. Collect generated aliases
+        // and trip a structured exception the moment a collision is
+        // detected — the controller layer surfaces it as
+        // `INVALID_PIVOT_REQUEST` so registry maintainers can rename
+        // the offending bucket rather than guess why a column went
+        // missing on the frontend.
+        Set<String> seenAliases = new java.util.HashSet<>();
         // Outer iteration: pivot value first, then aggregation. AG Grid's
         // pivotResultFields contract puts the value buckets adjacent so
         // column groups read naturally left-to-right.
@@ -864,6 +875,16 @@ public class SqlBuilder {
             for (GroupedAggregation a : sanitized) {
                 String alias = pivotAlias(pivotColumn, pv.value(),
                         a.func(), a.field());
+                if (!seenAliases.add(alias)) {
+                    throw new IllegalArgumentException(
+                            "Pivot alias collision detected: '" + alias
+                                    + "' — two registry pivotValues sanitise to "
+                                    + "the same identifier (raw value '"
+                                    + pv.value() + "'). Rename one entry so the "
+                                    + "alphanumeric+underscore reduction stays "
+                                    + "injective (`A-B` and `A/B` both collapse "
+                                    + "to `A_B`).");
+                }
                 pivotResultFields.add(alias);
                 sql.append(", ")
                         .append(renderPivotAggExpression(a, pivotColumn, paramName))
