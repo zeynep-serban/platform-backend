@@ -539,12 +539,18 @@ class ReportControllerQueryTest {
         }
 
         @Test
-        void groupKeysNullCollidesWithUserFilter_returns400() {
-            // Null ancestor key still collides with a user filterModel
-            // entry on the same column — the merge layer enforces the
-            // single-filter-per-column invariant regardless of whether
-            // the ancestor key value is null or scalar. Compound AND
-            // belongs to a follow-up PR (E4 ancestor filter compound AND).
+        void groupKeysNullWithUserContainsFilter_compoundAndMerge() {
+            // PR #5b (supersedes PR #4 collision behaviour): null
+            // ancestor key + a user contains filter on the same column
+            // is no longer a 400. The merge layer now produces a
+            // compound AND wrapping the blank ancestor and the user
+            // predicate so the SQL becomes
+            // `([col] IS NULL AND [col] LIKE :pX)` — which evaluates
+            // to an empty result set on its own, but composes
+            // correctly with the rest of the multi-level grouping
+            // path. (Empty result is the correct behaviour per Codex
+            // Q4 verdict — backend doesn't introspect logical
+            // satisfiability.)
             stubAuthz(true, List.of());
             when(registry.get("any")).thenReturn(Optional.of(report("any")));
             when(columnFilter.getVisibleColumnDefinitions(any(), any()))
@@ -553,6 +559,10 @@ class ReportControllerQueryTest {
                                     150, false, true, false, null),
                             new ColumnDefinition("region", "Region", "text",
                                     150, false, true, false, null)));
+            when(queryEngine.executeGroupedQuery(any(), any(), any(), any(),
+                    any(), any(), anyInt(), anyInt()))
+                    .thenReturn(new com.example.report.query.QueryEngine.PagedData(
+                            java.util.List.of(), 0, 1, 50, java.util.List.of()));
 
             var groupKeys = new java.util.ArrayList<String>();
             groupKeys.add(null);
@@ -570,17 +580,38 @@ class ReportControllerQueryTest {
 
             var response = controller.queryReport("any", dto, null, testJwt("admin"));
 
-            assertEquals(400, response.getStatusCode().value());
-            assertEquals("ANCESTOR_FILTER_COLLISION",
-                    assertInstanceOf(ReportQueryErrorDto.class, response.getBody()).code());
+            assertEquals(200, response.getStatusCode().value());
+
+            @SuppressWarnings("unchecked")
+            org.mockito.ArgumentCaptor<java.util.Map<String, Object>> filterCaptor =
+                    (org.mockito.ArgumentCaptor<java.util.Map<String, Object>>)
+                            (org.mockito.ArgumentCaptor<?>)
+                                    org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+            verify(queryEngine).executeGroupedQuery(any(), any(), any(), any(),
+                    filterCaptor.capture(), any(), anyInt(), anyInt());
+            var mergedFilter = filterCaptor.getValue();
+
+            @SuppressWarnings("unchecked")
+            var categoryEntry = (java.util.Map<String, Object>) mergedFilter.get("category");
+            assertEquals("AND", categoryEntry.get("operator"),
+                    "null ancestor + user contains → compound AND");
+            @SuppressWarnings("unchecked")
+            var c1 = (java.util.Map<String, Object>) categoryEntry.get("condition1");
+            assertEquals("blank", c1.get("type"),
+                    "null ancestor renders as blank (IS NULL) in condition1");
+            @SuppressWarnings("unchecked")
+            var c2 = (java.util.Map<String, Object>) categoryEntry.get("condition2");
+            assertEquals("contains", c2.get("type"));
+            assertEquals("FI", c2.get("filter"));
         }
 
         @Test
-        void ancestorFilterCollision_returns400() {
-            // PR-0.3 Codex iter-1 absorb: if the user's filterModel
-            // already constrains the ancestor column, the merge would
-            // silently overwrite the user's filter. Now fails closed
-            // until FilterTranslator gains compound AND support.
+        void ancestorEqualsUserContains_compoundAndQueryExecution() {
+            // PR #5b (Codex thread 019e2695, supersedes PR-0.3 collision):
+            // same-field ancestor + user filter is no longer fatal. The
+            // merge layer now emits a compound `{operator: "AND", ...}`
+            // entry that FilterTranslator (PR #5a) renders into a
+            // parenthesised SQL clause `([col] = :p1 AND [col] LIKE :p2)`.
             stubAuthz(true, List.of());
             when(registry.get("any")).thenReturn(Optional.of(report("any")));
             when(columnFilter.getVisibleColumnDefinitions(any(), any()))
@@ -589,6 +620,10 @@ class ReportControllerQueryTest {
                                     150, false, true, false, null),
                             new ColumnDefinition("region", "Region", "text",
                                     150, false, true, false, null)));
+            when(queryEngine.executeGroupedQuery(any(), any(), any(), any(),
+                    any(), any(), anyInt(), anyInt()))
+                    .thenReturn(new com.example.report.query.QueryEngine.PagedData(
+                            java.util.List.of(), 0, 1, 50, java.util.List.of()));
 
             // User's existing filterModel: category contains "FI"
             Map<String, Object> userFilter = new java.util.HashMap<>();
@@ -604,9 +639,319 @@ class ReportControllerQueryTest {
 
             var response = controller.queryReport("any", dto, null, testJwt("admin"));
 
-            assertEquals(400, response.getStatusCode().value());
-            assertEquals("ANCESTOR_FILTER_COLLISION",
-                    assertInstanceOf(ReportQueryErrorDto.class, response.getBody()).code());
+            // Query now succeeds; compound AND replaces the 400 collision.
+            assertEquals(200, response.getStatusCode().value());
+
+            @SuppressWarnings("unchecked")
+            org.mockito.ArgumentCaptor<java.util.Map<String, Object>> filterCaptor =
+                    (org.mockito.ArgumentCaptor<java.util.Map<String, Object>>)
+                            (org.mockito.ArgumentCaptor<?>)
+                                    org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+            verify(queryEngine).executeGroupedQuery(any(), any(), any(), any(),
+                    filterCaptor.capture(), any(), anyInt(), anyInt());
+            var mergedFilter = filterCaptor.getValue();
+
+            @SuppressWarnings("unchecked")
+            var categoryEntry = (java.util.Map<String, Object>) mergedFilter.get("category");
+            assertEquals("AND", categoryEntry.get("operator"),
+                    "same-field ancestor + user filter must merge as AND compound");
+            assertNotNull(categoryEntry.get("condition1"),
+                    "ancestor entry should land in condition1");
+            assertNotNull(categoryEntry.get("condition2"),
+                    "user filter should land in condition2");
+            @SuppressWarnings("unchecked")
+            var c1 = (java.util.Map<String, Object>) categoryEntry.get("condition1");
+            @SuppressWarnings("unchecked")
+            var c2 = (java.util.Map<String, Object>) categoryEntry.get("condition2");
+            assertEquals("equals", c1.get("type"),
+                    "ancestor groupKey FINANCE → equals predicate");
+            assertEquals("FINANCE", c1.get("filter"));
+            assertEquals("contains", c2.get("type"),
+                    "existing user filter shape preserved in condition2");
+            assertEquals("FI", c2.get("filter"));
+        }
+
+        @Test
+        void ancestorEqualsUserEqualsSameValue_idempotentSkip() {
+            // PR #5b idempotent skip: ancestor `equals X` + user `equals X`
+            // produces no compound (both predicates are semantically the
+            // same). The merged filter keeps the user's entry intact —
+            // ancestor is the redundant one, so the SQL stays clean
+            // (`[col] = X` instead of `[col] = X AND [col] = X`).
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("region", "Region", "text",
+                                    150, false, true, false, null)));
+            when(queryEngine.executeGroupedQuery(any(), any(), any(), any(),
+                    any(), any(), anyInt(), anyInt()))
+                    .thenReturn(new com.example.report.query.QueryEngine.PagedData(
+                            java.util.List.of(), 0, 1, 50, java.util.List.of()));
+
+            Map<String, Object> userFilter = new java.util.HashMap<>();
+            userFilter.put("category", Map.of("type", "equals", "filter", "FINANCE"));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(
+                            new ColumnVO("category", "Category", "category", null),
+                            new ColumnVO("region", "Region", "region", null)),
+                    null, null, false,
+                    List.of("FINANCE"), userFilter, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+
+            @SuppressWarnings("unchecked")
+            org.mockito.ArgumentCaptor<java.util.Map<String, Object>> filterCaptor =
+                    (org.mockito.ArgumentCaptor<java.util.Map<String, Object>>)
+                            (org.mockito.ArgumentCaptor<?>)
+                                    org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+            verify(queryEngine).executeGroupedQuery(any(), any(), any(), any(),
+                    filterCaptor.capture(), any(), anyInt(), anyInt());
+            var mergedFilter = filterCaptor.getValue();
+
+            @SuppressWarnings("unchecked")
+            var categoryEntry = (java.util.Map<String, Object>) mergedFilter.get("category");
+            assertEquals("equals", categoryEntry.get("type"),
+                    "idempotent skip keeps the simple equals shape — no compound wrapper");
+            assertFalse(categoryEntry.containsKey("operator"),
+                    "no compound AND emitted for redundant predicates");
+            assertEquals("FINANCE", categoryEntry.get("filter"));
+        }
+
+        @Test
+        void ancestorBlankUserBlank_idempotentSkip() {
+            // Both predicates collapse to IS NULL — idempotent skip
+            // keeps the user's `blank` entry intact.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("region", "Region", "text",
+                                    150, false, true, false, null)));
+            when(queryEngine.executeGroupedQuery(any(), any(), any(), any(),
+                    any(), any(), anyInt(), anyInt()))
+                    .thenReturn(new com.example.report.query.QueryEngine.PagedData(
+                            java.util.List.of(), 0, 1, 50, java.util.List.of()));
+
+            Map<String, Object> userFilter = new java.util.HashMap<>();
+            userFilter.put("category", Map.of("type", "blank"));
+            var groupKeys = new java.util.ArrayList<String>();
+            groupKeys.add(null); // ancestor null → blank entry
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(
+                            new ColumnVO("category", "Category", "category", null),
+                            new ColumnVO("region", "Region", "region", null)),
+                    null, null, false,
+                    groupKeys, userFilter, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+
+            @SuppressWarnings("unchecked")
+            org.mockito.ArgumentCaptor<java.util.Map<String, Object>> filterCaptor =
+                    (org.mockito.ArgumentCaptor<java.util.Map<String, Object>>)
+                            (org.mockito.ArgumentCaptor<?>)
+                                    org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+            verify(queryEngine).executeGroupedQuery(any(), any(), any(), any(),
+                    filterCaptor.capture(), any(), anyInt(), anyInt());
+            var mergedFilter = filterCaptor.getValue();
+
+            @SuppressWarnings("unchecked")
+            var categoryEntry = (java.util.Map<String, Object>) mergedFilter.get("category");
+            assertEquals("blank", categoryEntry.get("type"));
+            assertFalse(categoryEntry.containsKey("operator"));
+        }
+
+        @Test
+        void ancestorEquals_existingUserCompoundOr_outerAndNest() {
+            // Codex iter-2 §5: when the user's filterModel already
+            // carries an OR compound on the same column, the merge
+            // must wrap the existing OR intact under a fresh outer
+            // AND so the semantic stays `ancestor AND (user OR user)`
+            // rather than flattening into `ancestor OR user OR user`.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("region", "Region", "text",
+                                    150, false, true, false, null)));
+            when(queryEngine.executeGroupedQuery(any(), any(), any(), any(),
+                    any(), any(), anyInt(), anyInt()))
+                    .thenReturn(new com.example.report.query.QueryEngine.PagedData(
+                            java.util.List.of(), 0, 1, 50, java.util.List.of()));
+
+            Map<String, Object> userOr = Map.of(
+                    "operator", "OR",
+                    "condition1", Map.of("type", "contains", "filter", "FI"),
+                    "condition2", Map.of("type", "contains", "filter", "HR"));
+            Map<String, Object> userFilter = new java.util.HashMap<>();
+            userFilter.put("category", userOr);
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(
+                            new ColumnVO("category", "Category", "category", null),
+                            new ColumnVO("region", "Region", "region", null)),
+                    null, null, false,
+                    List.of("FINANCE"), userFilter, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+
+            @SuppressWarnings("unchecked")
+            org.mockito.ArgumentCaptor<java.util.Map<String, Object>> filterCaptor =
+                    (org.mockito.ArgumentCaptor<java.util.Map<String, Object>>)
+                            (org.mockito.ArgumentCaptor<?>)
+                                    org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+            verify(queryEngine).executeGroupedQuery(any(), any(), any(), any(),
+                    filterCaptor.capture(), any(), anyInt(), anyInt());
+            var mergedFilter = filterCaptor.getValue();
+
+            @SuppressWarnings("unchecked")
+            var categoryEntry = (java.util.Map<String, Object>) mergedFilter.get("category");
+            assertEquals("AND", categoryEntry.get("operator"),
+                    "outer wrapper must be AND so ancestor binds to (user OR ...)");
+            @SuppressWarnings("unchecked")
+            var nestedOr = (java.util.Map<String, Object>) categoryEntry.get("condition2");
+            assertEquals("OR", nestedOr.get("operator"),
+                    "inner OR compound must stay intact under the outer AND");
+        }
+
+        @Test
+        void ancestorNumericEqualsUserIntegerEquals_compoundDespiteValueParity() {
+            // Codex 019e2695 iter-5 absorb: numeric ancestor groupKeys
+            // are coerced to Double by coerceGroupKey, but a user
+            // filterModel value can arrive as Integer from JSON.
+            // Objects.equals(2024.0, 2024) is false, so the merge layer
+            // must NOT idempotent-skip here — type-coercion ambiguity
+            // falls through to compound AND emit, and the SQL surfaces
+            // both predicates so the user sees the actual semantic
+            // (the predicate evaluates true via numeric comparison
+            // anyway, but the audit trail keeps both shapes).
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("year", "Year", "number",
+                                    100, false, true, false, null),
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null)));
+            when(queryEngine.executeGroupedQuery(any(), any(), any(), any(),
+                    any(), any(), anyInt(), anyInt()))
+                    .thenReturn(new com.example.report.query.QueryEngine.PagedData(
+                            java.util.List.of(), 0, 1, 50, java.util.List.of()));
+
+            // User filter carries Integer 2024 (JSON-native); ancestor
+            // groupKey "2024" coerces to Double 2024.0.
+            Map<String, Object> userFilter = new java.util.HashMap<>();
+            userFilter.put("year", Map.of("type", "equals", "filter", 2024));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(
+                            new ColumnVO("year", "Year", "year", null),
+                            new ColumnVO("category", "Category", "category", null)),
+                    null, null, false,
+                    List.of("2024"), userFilter, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+
+            @SuppressWarnings("unchecked")
+            org.mockito.ArgumentCaptor<java.util.Map<String, Object>> filterCaptor =
+                    (org.mockito.ArgumentCaptor<java.util.Map<String, Object>>)
+                            (org.mockito.ArgumentCaptor<?>)
+                                    org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+            verify(queryEngine).executeGroupedQuery(any(), any(), any(), any(),
+                    filterCaptor.capture(), any(), anyInt(), anyInt());
+            var mergedFilter = filterCaptor.getValue();
+
+            @SuppressWarnings("unchecked")
+            var yearEntry = (java.util.Map<String, Object>) mergedFilter.get("year");
+            assertEquals("AND", yearEntry.get("operator"),
+                    "Double 2024.0 ancestor + Integer 2024 user must not "
+                            + "idempotent-skip — compound AND emit instead");
+            @SuppressWarnings("unchecked")
+            var c1 = (java.util.Map<String, Object>) yearEntry.get("condition1");
+            @SuppressWarnings("unchecked")
+            var c2 = (java.util.Map<String, Object>) yearEntry.get("condition2");
+            assertEquals(2024.0, c1.get("filter"),
+                    "ancestor side carries Double 2024.0 from coerceGroupKey");
+            assertEquals(2024, c2.get("filter"),
+                    "user side preserves the original Integer 2024");
+        }
+
+        @Test
+        void ancestorEquals_existingUserCompoundAnd_flattenedConditions() {
+            // Codex iter-2 §5: an existing AND compound on the same
+            // column should be flattened — ancestor lands in the
+            // `conditions[]` list so the result is
+            // (ancestor AND a AND b) rather than (ancestor AND (a AND b)).
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("region", "Region", "text",
+                                    150, false, true, false, null)));
+            when(queryEngine.executeGroupedQuery(any(), any(), any(), any(),
+                    any(), any(), anyInt(), anyInt()))
+                    .thenReturn(new com.example.report.query.QueryEngine.PagedData(
+                            java.util.List.of(), 0, 1, 50, java.util.List.of()));
+
+            Map<String, Object> userAnd = Map.of(
+                    "operator", "AND",
+                    "condition1", Map.of("type", "contains", "filter", "FI"),
+                    "condition2", Map.of("type", "notBlank"));
+            Map<String, Object> userFilter = new java.util.HashMap<>();
+            userFilter.put("category", userAnd);
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(
+                            new ColumnVO("category", "Category", "category", null),
+                            new ColumnVO("region", "Region", "region", null)),
+                    null, null, false,
+                    List.of("FINANCE"), userFilter, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+
+            @SuppressWarnings("unchecked")
+            org.mockito.ArgumentCaptor<java.util.Map<String, Object>> filterCaptor =
+                    (org.mockito.ArgumentCaptor<java.util.Map<String, Object>>)
+                            (org.mockito.ArgumentCaptor<?>)
+                                    org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+            verify(queryEngine).executeGroupedQuery(any(), any(), any(), any(),
+                    filterCaptor.capture(), any(), anyInt(), anyInt());
+            var mergedFilter = filterCaptor.getValue();
+
+            @SuppressWarnings("unchecked")
+            var categoryEntry = (java.util.Map<String, Object>) mergedFilter.get("category");
+            assertEquals("AND", categoryEntry.get("operator"));
+            @SuppressWarnings("unchecked")
+            var conditions = (java.util.List<java.util.Map<String, Object>>)
+                    categoryEntry.get("conditions");
+            assertNotNull(conditions, "flattened AND must use conditions[] shape");
+            assertEquals(3, conditions.size(),
+                    "ancestor + existing c1 + existing c2 = 3 flattened siblings");
         }
 
         @Test

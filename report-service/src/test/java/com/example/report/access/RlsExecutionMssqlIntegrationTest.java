@@ -307,6 +307,59 @@ class RlsExecutionMssqlIntegrationTest {
                 "DELETE FROM [" + TEST_SCHEMA + "].[tx_rls] WHERE id = 7");
     }
 
+    /**
+     * PR #5b (Codex 019e2695) cross-feature proof: RLS + the PR #5a
+     * compound parser, executed end-to-end. We hand FilterTranslator
+     * the exact shape that PR #5b's mergeAncestorFilters now emits
+     * when an ancestor + user filter collide — an AND compound with
+     * {@code condition1} = ancestor equals, {@code condition2} = user
+     * contains — and verify the SQL contains both predicates joined
+     * with AND inside parentheses, plus the row count is 2 (both
+     * FIN-category rows owned by owner 100 satisfy both predicates).
+     *
+     * <p>Composes with the RLS scope: owner 100 + 200 are visible,
+     * so the two FIN rows from owner 100 (ids 1, 2) survive the
+     * RLS clause; owner 200 (HR) is filtered out by the category
+     * predicate, owner 300 (OPS) is filtered out by RLS.
+     */
+    @Test
+    void rlsCombinesWithCompoundAncestorAndUserFilter() {
+        ReportDefinition def = rlsDef();
+        AuthzMeResponse authz = companyScopedUser("100", "200");
+
+        RowFilterInjector.RlsResult rls = injector.buildRlsClause(def, authz);
+
+        java.util.Map<String, Object> compound = java.util.Map.of(
+                "operator", "AND",
+                "condition1", java.util.Map.of("type", "equals", "filter", "FIN"),
+                "condition2", java.util.Map.of("type", "contains", "filter", "FI"));
+        java.util.Map<String, Object> filterModel = java.util.Map.of("category", compound);
+
+        SqlBuilder.BuiltQuery q = builder.buildDataQuery(
+                def, null, List.of("id", "owner_id", "category", "amount"),
+                filterModel,
+                List.of(Map.of("colId", "id", "sort", "asc")),
+                rls.whereClause(), rls.params(), 1, 100);
+
+        // SQL composition: RLS + compound AND on category (parens
+        // around both equals + LIKE) + tie-breaker semantics not
+        // applicable to buildDataQuery (no GROUP BY).
+        assertThat(q.sql())
+                .contains("[owner_id] IN (:_rlsIds)")
+                .contains("[category] = :")
+                .contains("[category] LIKE :");
+
+        List<Map<String, Object>> rows = jdbc.queryForList(q.sql(), q.params());
+
+        // Owner 100 has 2 FIN rows (ids 1, 2). Owner 200 has HR rows
+        // (excluded by category=FIN). Owner 300 excluded by RLS.
+        assertThat(rows).hasSize(2);
+        assertThat(rows).extracting(r -> r.get("category"))
+                .containsOnly("FIN");
+        assertThat(rows).extracting(r -> r.get("owner_id"))
+                .containsOnly(100);
+    }
+
     @Test
     void rlsCombinesWithGroupedQueryAndTieBreaker() {
         // Cross-PR proof: RLS + grouped aggregation + the PR #2
