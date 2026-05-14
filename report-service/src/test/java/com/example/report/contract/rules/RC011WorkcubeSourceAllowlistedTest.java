@@ -90,7 +90,7 @@ class RC011WorkcubeSourceAllowlistedTest {
         // Doc-style assertion: ReportingAllowlist.V1 size is the V1 pre-SEAL count.
         // Codex iter-17 S2: SEAL sonrası V2 ile değişecek; bu test V1 baseline'ı
         // kayıt altına alır (drift'i regression olarak yakalar).
-        assertThat(ReportingAllowlist.V1).hasSize(30);
+        assertThat(ReportingAllowlist.V1).hasSize(40);
     }
 
     @Test
