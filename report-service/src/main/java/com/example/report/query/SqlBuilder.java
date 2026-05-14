@@ -8,7 +8,20 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.stereotype.Component;
 
+/**
+ * Hot fix 2026-05-14: {@code @Component} added so
+ * {@link com.example.report.workcube.WorkcubeQueryAdapter} (PR #184
+ * Adım 11.2b-1) can constructor-inject a SqlBuilder bean. Production
+ * report-service context initialization was failing with
+ * UnsatisfiedDependencyException because SqlBuilder had no Spring
+ * stereotype. Existing {@link QueryEngine#sqlBuilder} field
+ * ({@code new SqlBuilder()} direct instantiation) is unaffected — it
+ * keeps its private instance; Spring just additionally creates a bean
+ * for adapters that want one injected.
+ */
+@Component
 public class SqlBuilder {
 
     /**
