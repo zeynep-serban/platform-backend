@@ -39,7 +39,7 @@ class WorkcubeQueryAdapterTest {
     void setUp() {
         sqlBuilder = mock(SqlBuilder.class);
         jdbc = mock(NamedParameterJdbcTemplate.class);
-        adapter = new WorkcubeQueryAdapter(sqlBuilder, jdbc);
+        adapter = new WorkcubeQueryAdapter(sqlBuilder, jdbc, new CompositeTenantBoundaryEnforcer());
     }
 
     private ReportDefinition def(String key) {

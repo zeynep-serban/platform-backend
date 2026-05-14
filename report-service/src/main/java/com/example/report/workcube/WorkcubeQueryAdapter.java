@@ -65,11 +65,14 @@ public class WorkcubeQueryAdapter {
 
     private final SqlBuilder sqlBuilder;
     private final NamedParameterJdbcTemplate jdbc;
+    private final CompositeTenantBoundaryEnforcer compositeEnforcer;
 
     public WorkcubeQueryAdapter(SqlBuilder sqlBuilder,
-                                @Qualifier("workcubeMssqlJdbc") NamedParameterJdbcTemplate jdbc) {
+                                @Qualifier("workcubeMssqlJdbc") NamedParameterJdbcTemplate jdbc,
+                                CompositeTenantBoundaryEnforcer compositeEnforcer) {
         this.sqlBuilder = sqlBuilder;
         this.jdbc = jdbc;
+        this.compositeEnforcer = compositeEnforcer;
     }
 
     /**
@@ -153,5 +156,10 @@ public class WorkcubeQueryAdapter {
                                 + " tables) does not include this table.");
             }
         }
+        // Codex iter-27: composite tenant boundary check runs LAST so it
+        // sees only classified + allowlisted refs (V1 + non-UNKNOWN +
+        // non-UNQUALIFIED). Earlier failures surface root-cause errors;
+        // composite is the cross-tenant invariant.
+        compositeEnforcer.validateComposite(refs, def);
     }
 }

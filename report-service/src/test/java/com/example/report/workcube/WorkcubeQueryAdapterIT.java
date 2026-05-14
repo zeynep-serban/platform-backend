@@ -61,6 +61,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 class WorkcubeQueryAdapterIT {
 
     private static final String CANONICAL_SCHEMA = "workcube_mikrolink";
+    private static final String YEARLY_SCHEMA = "workcube_mikrolink_2026_35";
+    private static final String CURRENT_TENANT_SCHEMA = "workcube_mikrolink_35";
 
     @Container
     @SuppressWarnings("resource")
@@ -80,7 +82,7 @@ class WorkcubeQueryAdapterIT {
         ds.setPassword(MSSQL.getPassword());
         jdbc = new NamedParameterJdbcTemplate(ds);
 
-        adapter = new WorkcubeQueryAdapter(new SqlBuilder(), jdbc);
+        adapter = new WorkcubeQueryAdapter(new SqlBuilder(), jdbc, new CompositeTenantBoundaryEnforcer());
 
         // Canonical schema + table — keeps the fixture minimal: a single
         // V1-allowlisted table that exercises both the bracketed
@@ -99,6 +101,39 @@ class WorkcubeQueryAdapterIT {
         jdbc.getJdbcTemplate().execute(
                 "INSERT INTO [" + CANONICAL_SCHEMA + "].[COMPANY] VALUES "
                         + "(1, 'Alpha Co'), (2, 'Beta Co'), (3, 'Gamma Co')");
+
+        // Adım 11.2c: yearly partition schema (workcube_mikrolink_2026_35)
+        // + INVOICE table. Tenant 35; year 2026.
+        jdbc.getJdbcTemplate().execute(
+                "IF SCHEMA_ID('" + YEARLY_SCHEMA + "') IS NULL "
+                        + "EXEC('CREATE SCHEMA [" + YEARLY_SCHEMA + "]')");
+        jdbc.getJdbcTemplate().execute(
+                "IF OBJECT_ID('" + YEARLY_SCHEMA + ".INVOICE', 'U') IS NOT NULL "
+                        + "DROP TABLE [" + YEARLY_SCHEMA + "].[INVOICE]");
+        jdbc.getJdbcTemplate().execute(
+                "CREATE TABLE [" + YEARLY_SCHEMA + "].[INVOICE] ("
+                        + "INVOICE_ID INT NOT NULL PRIMARY KEY, "
+                        + "COMPANY_ID INT NOT NULL, "
+                        + "INVOICE_NUMBER NVARCHAR(50) NOT NULL)");
+        jdbc.getJdbcTemplate().execute(
+                "INSERT INTO [" + YEARLY_SCHEMA + "].[INVOICE] VALUES "
+                        + "(101, 1, 'INV-2026-001'), (102, 2, 'INV-2026-002')");
+
+        // Adım 11.2c: current-tenant schema (workcube_mikrolink_35)
+        // SETUP_PROCESS_CAT — {tenantSetupProcessCatRelation} expansion target.
+        jdbc.getJdbcTemplate().execute(
+                "IF SCHEMA_ID('" + CURRENT_TENANT_SCHEMA + "') IS NULL "
+                        + "EXEC('CREATE SCHEMA [" + CURRENT_TENANT_SCHEMA + "]')");
+        jdbc.getJdbcTemplate().execute(
+                "IF OBJECT_ID('" + CURRENT_TENANT_SCHEMA + ".SETUP_PROCESS_CAT', 'U') IS NOT NULL "
+                        + "DROP TABLE [" + CURRENT_TENANT_SCHEMA + "].[SETUP_PROCESS_CAT]");
+        jdbc.getJdbcTemplate().execute(
+                "CREATE TABLE [" + CURRENT_TENANT_SCHEMA + "].[SETUP_PROCESS_CAT] ("
+                        + "PROCESS_CAT_ID INT NOT NULL PRIMARY KEY, "
+                        + "PROCESS_CAT NVARCHAR(50) NOT NULL)");
+        jdbc.getJdbcTemplate().execute(
+                "INSERT INTO [" + CURRENT_TENANT_SCHEMA + "].[SETUP_PROCESS_CAT] VALUES "
+                        + "(1, 'Satış'), (2, 'Alış')");
     }
 
     private static ReportDefinition companyDef() {
@@ -170,6 +205,64 @@ class WorkcubeQueryAdapterIT {
     }
 
     // ---- Acceptance 6: visible column guard (upstream SqlBuilder) ---------
+
+    // ---- Adım 11.2c: composite tenant boundary IT cases ------------------
+
+    @Test
+    void allowed_composite_join_yearly_plus_canonical_returns_rows() {
+        // End-to-end composite query: yearly INVOICE + canonical COMPANY JOIN.
+        // Adapter renders + scans + V1 enforce + composite check; all pass.
+        String sql = "SELECT INV.INVOICE_ID, INV.INVOICE_NUMBER, C.FULLNAME "
+                + "FROM [" + YEARLY_SCHEMA + "].[INVOICE] INV "
+                + "LEFT JOIN [" + CANONICAL_SCHEMA + "].[COMPANY] C "
+                + "ON C.COMPANY_ID = INV.COMPANY_ID";
+        // Use enforceRendered direct + jdbc query to bypass SqlBuilder.
+        adapter.enforceRendered(companyDef(), sql);
+        List<Map<String, Object>> rows = jdbc.queryForList(sql, new MapSqlParameterSource());
+        assertThat(rows).hasSize(2);
+        assertThat(rows).extracting(r -> r.get("FULLNAME"))
+                .containsExactlyInAnyOrder("Alpha Co", "Beta Co");
+    }
+
+    @Test
+    void cross_tenant_rendered_sql_defensive_fail() {
+        // Synthesized cross-tenant rendered SQL — tenant 35 + tenant 99.
+        // Adapter should fail-closed BEFORE JDBC execution (composite check).
+        String crossTenantSql = "SELECT * FROM [workcube_mikrolink_2026_35].[INVOICE] A "
+                + "JOIN [workcube_mikrolink_2026_99].[INVOICE_ROW] B ON A.INVOICE_ID = B.INVOICE_ID";
+        assertThatThrownBy(() -> adapter.enforceRendered(companyDef(), crossTenantSql))
+                .isInstanceOf(WorkcubeQuerySecurityException.class)
+                .hasMessageContaining("multiple tenant ids");
+    }
+
+    @Test
+    void tenantSetupProcessCatRelation_expansion_visible_to_scanner() {
+        // Codex iter-27 absorb: {tenantSetupProcessCatRelation} expands to
+        // CURRENT_TENANT [workcube_mikrolink_<tenantId>].[SETUP_PROCESS_CAT].
+        // Scanner sees it; SETUP_PROCESS_CAT is in V1; composite check passes
+        // because it shares tenant 35 with the yearly INVOICE ref.
+        String expanded = "SELECT INV.INVOICE_ID, SPC.PROCESS_CAT "
+                + "FROM [" + YEARLY_SCHEMA + "].[INVOICE] INV "
+                + "LEFT JOIN [" + CURRENT_TENANT_SCHEMA + "].[SETUP_PROCESS_CAT] SPC "
+                + "ON SPC.PROCESS_CAT_ID = INV.INVOICE_ID";
+        adapter.enforceRendered(companyDef(), expanded);
+        List<Map<String, Object>> rows = jdbc.queryForList(expanded, new MapSqlParameterSource());
+        assertThat(rows).hasSize(2);
+    }
+
+    @Test
+    void tenantSetupProcessCatRelation_differentTenant_failsClosed() {
+        // SETUP_PROCESS_CAT expansion happens to render with WRONG tenant id
+        // (e.g. placeholder substitution drift): tenant 99 SETUP_PROCESS_CAT
+        // + tenant 35 yearly INVOICE → cross-tenant composite violation.
+        String drift = "SELECT INV.INVOICE_ID, SPC.PROCESS_CAT "
+                + "FROM [workcube_mikrolink_2026_35].[INVOICE] INV "
+                + "LEFT JOIN [workcube_mikrolink_99].[SETUP_PROCESS_CAT] SPC "
+                + "ON SPC.PROCESS_CAT_ID = INV.INVOICE_ID";
+        assertThatThrownBy(() -> adapter.enforceRendered(companyDef(), drift))
+                .isInstanceOf(WorkcubeQuerySecurityException.class)
+                .hasMessageContaining("multiple tenant ids");
+    }
 
     @Test
     void rogue_filter_column_does_not_reach_rendered_sql() {

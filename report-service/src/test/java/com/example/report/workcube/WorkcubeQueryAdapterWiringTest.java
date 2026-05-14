@@ -54,9 +54,15 @@ class WorkcubeQueryAdapterWiringTest {
         }
 
         @Bean
+        CompositeTenantBoundaryEnforcer compositeTenantBoundaryEnforcer() {
+            return new CompositeTenantBoundaryEnforcer();
+        }
+
+        @Bean
         WorkcubeQueryAdapter workcubeQueryAdapter(SqlBuilder sqlBuilder,
-                                                  NamedParameterJdbcTemplate workcubeMssqlJdbc) {
-            return new WorkcubeQueryAdapter(sqlBuilder, workcubeMssqlJdbc);
+                                                  NamedParameterJdbcTemplate workcubeMssqlJdbc,
+                                                  CompositeTenantBoundaryEnforcer compositeEnforcer) {
+            return new WorkcubeQueryAdapter(sqlBuilder, workcubeMssqlJdbc, compositeEnforcer);
         }
     }
 
