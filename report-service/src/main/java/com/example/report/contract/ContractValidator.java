@@ -14,6 +14,7 @@ import com.example.report.contract.rules.RC007ColumnFieldExistsInSourceQuery;
 import com.example.report.contract.rules.RC008SchemaResolverRegistered;
 import com.example.report.contract.rules.RC009ActionScopeValid;
 import com.example.report.contract.rules.RC010DestructiveActionRequiresPermissionAndConfirm;
+import com.example.report.contract.rules.RC011WorkcubeSourceAllowlisted;
 import com.example.report.contract.schema.TenantColumnAllowlist;
 import com.example.report.registry.ReportDefinition;
 import java.util.ArrayList;
@@ -27,7 +28,8 @@ import java.util.List;
  *   <li><strong>NOT</strong> {@code @Component} / {@code @Configuration} —
  *       production runtime'da component scan'de aktive olmaz; CI'da
  *       {@code mvn test} {@code @ParameterizedTest} registry sweep'inde çağrılır.</li>
- *   <li>11 RC rules (RC-000..RC-010) wired in fixed order.</li>
+ *   <li>12 RC rules (RC-000..RC-011) wired in fixed order — RC-011 added
+ *       2026-05-14 (Adım 11.1) for Workcube source-table allowlist gating.</li>
  *   <li>{@link ContractRule#validate(ReportDefinition)} sequencing: each rule
  *       independent; rules don't see each other's output.</li>
  * </ul>
@@ -108,7 +110,8 @@ public final class ContractValidator {
                 new RC007ColumnFieldExistsInSourceQuery(),
                 new RC008SchemaResolverRegistered(),
                 new RC009ActionScopeValid(),
-                new RC010DestructiveActionRequiresPermissionAndConfirm()
+                new RC010DestructiveActionRequiresPermissionAndConfirm(),
+                new RC011WorkcubeSourceAllowlisted()
         ));
     }
 

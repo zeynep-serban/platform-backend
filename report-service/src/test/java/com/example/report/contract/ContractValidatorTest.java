@@ -21,8 +21,9 @@ class ContractValidatorTest {
     private final ContractValidator validator = ContractValidator.withDefaultRules();
 
     @Test
-    void ruleCount_isExactly11() {
-        assertThat(validator.ruleCount()).isEqualTo(11);
+    void ruleCount_isExactly12() {
+        // Adım 11.1 (Codex iter-17 PARTIAL): RC-011 WorkcubeSourceAllowlisted added
+        assertThat(validator.ruleCount()).isEqualTo(12);
     }
 
     @Test
