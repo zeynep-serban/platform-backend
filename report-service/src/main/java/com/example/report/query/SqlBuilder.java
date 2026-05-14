@@ -408,6 +408,15 @@ public class SqlBuilder {
      * alias. Unknown / disallowed entries are skipped silently. If the
      * resulting list is empty, returns an ascending sort on the group
      * column so paging is deterministic.
+     *
+     * <p>PR #2 hardening (Codex thread 019e2695): when the caller sorts
+     * on aggregate aliases only, two buckets sharing the same aggregated
+     * value would otherwise sit in arbitrary MSSQL order. With
+     * {@code OFFSET / FETCH NEXT} pagination that means an SSRM page
+     * window can skip or duplicate a row across navigations. The
+     * translator therefore appends {@code [groupColumn] ASC} as a
+     * stable tie-breaker whenever the caller did not already include
+     * the group column anywhere in {@code sortModel}.
      */
     private String translateGroupedSort(List<Map<String, String>> sortModel,
                                          String groupColumn,
@@ -421,6 +430,7 @@ public class SqlBuilder {
             allowedSortCols.add(a.field());
         }
         StringBuilder sb = new StringBuilder();
+        boolean groupColumnIncluded = false;
         for (Map<String, String> entry : sortModel) {
             String colId = entry.get("colId");
             String dir = entry.get("sort");
@@ -428,8 +438,23 @@ public class SqlBuilder {
             String direction = "desc".equalsIgnoreCase(dir) ? "DESC" : "ASC";
             if (sb.length() > 0) sb.append(", ");
             sb.append("[").append(colId).append("] ").append(direction);
+            if (groupColumn.equals(colId)) {
+                groupColumnIncluded = true;
+            }
         }
-        return sb.length() == 0 ? "[" + groupColumn + "] ASC" : sb.toString();
+        if (sb.length() == 0) {
+            // No valid entries — fall back to the deterministic default
+            // so paging remains reproducible even when AG Grid sends a
+            // sort list referencing only invalid / non-allowed columns.
+            return "[" + groupColumn + "] ASC";
+        }
+        if (!groupColumnIncluded) {
+            // Aggregate-only (or non-group-column) sort path. Inject the
+            // stable tie-breaker so OFFSET/FETCH pagination across
+            // same-aggregate buckets stays deterministic on MSSQL.
+            sb.append(", [").append(groupColumn).append("] ASC");
+        }
+        return sb.toString();
     }
 
     // ── Internal helpers ───────────────────────────────────────────────

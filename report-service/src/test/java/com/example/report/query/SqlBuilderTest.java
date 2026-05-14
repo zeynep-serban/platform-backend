@@ -404,6 +404,124 @@ class SqlBuilderTest {
             assertThat(q.sql()).contains("ORDER BY [amount] DESC");
         }
 
+        // ── PR #2: Grouped sort tie-breaker hardening (Codex 019e2695) ───
+        // When the SSRM request sorts on an aggregate alias only, two
+        // buckets with the same aggregated value were previously left in
+        // arbitrary MSSQL order. With OFFSET/FETCH pagination that means
+        // a row can be skipped or duplicated across page windows. The
+        // translator must append the group column as the final ASC
+        // tie-breaker whenever the caller did not already include it.
+
+        @Test
+        void groupedSortInjectsGroupColumnTieBreakerWhenAggOnlySort() {
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(),
+                    List.of(Map.of("colId", "amount", "sort", "desc")),
+                    null, null, 1, 50);
+
+            // Hardened contract: aggregate alias DESC + group column ASC
+            // tie-breaker. Without the tie-breaker, OFFSET/FETCH pagination
+            // across same-sum buckets is non-deterministic on MSSQL.
+            assertThat(q.sql())
+                    .contains("ORDER BY [amount] DESC, [category] ASC OFFSET");
+        }
+
+        @Test
+        void groupedSortDoesNotDuplicateGroupColumnWhenAlreadyPresent() {
+            // If the request already sorts on the group column (last
+            // entry or anywhere in the chain), the translator must NOT
+            // append a duplicate tie-breaker. A "[category] ASC,
+            // [category] ASC" tail would be a regression.
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(),
+                    List.of(Map.of("colId", "amount", "sort", "desc"),
+                            Map.of("colId", "category", "sort", "asc")),
+                    null, null, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("ORDER BY [amount] DESC, [category] ASC OFFSET")
+                    .doesNotContain("[category] ASC, [category] ASC");
+        }
+
+        @Test
+        void groupedSortHonorsExplicitDescTieBreakerOnGroupColumn() {
+            // Defensive: when the caller explicitly chose DESC on the
+            // group column, the translator must respect that direction
+            // and still produce a deterministic order — no implicit ASC
+            // override.
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(),
+                    List.of(Map.of("colId", "amount", "sort", "desc"),
+                            Map.of("colId", "category", "sort", "desc")),
+                    null, null, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("ORDER BY [amount] DESC, [category] DESC OFFSET");
+        }
+
+        @Test
+        void groupedSortTieBreakerSurvivesRlsAndFilters() {
+            // RLS parity discipline (Codex 019e2695): the tie-breaker
+            // must survive the RLS / filter injection paths. Verify that
+            // a sort + filter + RLS combination still ends in the
+            // [groupColumn] ASC tail.
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            MapSqlParameterSource rlsParams = new MapSqlParameterSource()
+                    .addValue("_rlsIds", List.of(1L, 2L));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(),
+                    List.of(Map.of("colId", "amount", "sort", "desc")),
+                    "[OWNER_ID] IN (:_rlsIds)", rlsParams, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("WHERE 1=1 AND [OWNER_ID] IN (:_rlsIds)")
+                    .contains("ORDER BY [amount] DESC, [category] ASC OFFSET");
+        }
+
         @Test
         void sortModelOnUnknownColumnDropped() {
             // Defensive: a sort entry referencing a non-group, non-agg
