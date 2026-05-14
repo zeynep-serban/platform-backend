@@ -93,7 +93,15 @@ class ContractValidatorTest {
     }
 
     @Test
-    void RC003_warnsForLegacyHardcodedSchema() {
+    void RC003_failsForLegacyHardcodedSchemaInSourceQuery() {
+        // Codex 019e0c99 iter-3 §4 absorb (intentional rule change):
+        // sourceQuery is the runtime SQL surface — any numeric hardcode
+        // (current OR legacy year) → FAIL, because tenant isolation is at
+        // risk if a scope ever differs from the hardcoded tenant. The
+        // previous test name "warns" reflected pre-iter-3 sourceSchema-only
+        // semantics; the rule now applies FAIL to sourceQuery year-agnostic.
+        // sourceSchema scan still tier-aware (current=FAIL, legacy=WARN) for
+        // static-mode reports, exercised by RC003_warnsForLegacyHardcodedSourceSchema.
         ReportDefinition def = new ReportDefinition(
                 "test", "1", "Test", "test", "test",
                 null, "workcube_mikrolink", "static", null,
@@ -105,7 +113,7 @@ class ContractValidatorTest {
         List<ContractViolation> violations = validator.validate(def);
 
         assertThat(violations).anyMatch(v -> "RC-003".equals(v.ruleId())
-                && v.severity() == ContractViolation.Severity.WARN);
+                && v.severity() == ContractViolation.Severity.FAIL);
     }
 
     @Test
