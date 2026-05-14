@@ -173,8 +173,8 @@ class ColumnDefinitionJacksonTest {
     // ── Extended aggregate funcs (Codex thread 019e2695) ───────────────
     // PR-0.4z: registry-side opt-in for distinctcount / stddev / stddevp.
     // PR #6a: median accepted (numeric-only enforcement at controller layer).
-    // percentile (PR #6b, aggParams contract) and weightedAvg (PR-0.4)
-    // remain on the roadmap.
+    // PR #6b: percentilecont accepted with defaultAggParams.percentile
+    // contract; weightedAvg (PR-0.4) remains on the roadmap.
 
     @Test
     void defaultAggFuncDistinctCountAccepted() throws Exception {

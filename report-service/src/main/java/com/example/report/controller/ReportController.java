@@ -716,6 +716,7 @@ public class ReportController {
      *   <li>Otherwise {@code count}.</li>
      * </ul>
      */
+    @SuppressWarnings("unchecked")
     private static List<SqlBuilder.GroupedAggregation> sanitizeAggregations(
             List<ColumnVO> valueCols,
             Set<String> aggregatableFields,
@@ -725,6 +726,13 @@ public class ReportController {
                 .collect(java.util.stream.Collectors.toMap(
                         ColumnDefinition::field, c -> c, (a, b) -> a));
         List<SqlBuilder.GroupedAggregation> out = new java.util.ArrayList<>();
+        // PR #6b (Codex 019e2695): track field-level duplicates so two
+        // value-cols on the same field (e.g. sum+median on AMOUNT) are
+        // rejected up front. The external alias contract reserves one
+        // response column per field; supporting multi-agg per field
+        // would require an alias-suffix scheme that PR #6b intentionally
+        // does not introduce.
+        java.util.Set<String> seenFields = new java.util.HashSet<>();
         for (ColumnVO vc : valueCols) {
             if (vc == null || vc.field() == null) {
                 throw new IllegalArgumentException(
@@ -734,9 +742,14 @@ public class ReportController {
                 throw new IllegalArgumentException(
                         "valueCols field is not aggregatable: " + vc.field());
             }
+            if (!seenFields.add(vc.field())) {
+                throw new IllegalArgumentException(
+                        "valueCols field is duplicated: " + vc.field()
+                                + " — only one aggregation per field is supported");
+            }
+            ColumnDefinition cd = byField.get(vc.field());
             String func = vc.aggFunc();
             if (func == null || func.isBlank()) {
-                ColumnDefinition cd = byField.get(vc.field());
                 if (cd != null && cd.defaultAggFunc() != null) {
                     func = cd.defaultAggFunc();
                 } else if (cd != null && "number".equalsIgnoreCase(cd.type())) {
@@ -748,22 +761,23 @@ public class ReportController {
             // GroupedAggregation constructor validates against
             // ALLOWED_AGG_FUNCS and throws IllegalArgumentException
             // — propagated unchanged so the caller turns it into a 400.
+            Map<String, Object> params = sanitizeAggParams(vc, cd, func);
             SqlBuilder.GroupedAggregation agg =
-                    new SqlBuilder.GroupedAggregation(vc.field(), func);
+                    new SqlBuilder.GroupedAggregation(vc.field(), func, params);
 
-            // PR #6a (Codex thread 019e2695): median is only valid on
-            // numeric columns. SQL Server PERCENTILE_CONT requires a
-            // numeric ordering column; running it on a text/date field
-            // would either fail at execution or coerce silently. We
-            // catch the mismatch here so the client sees a structured
-            // 400 INVALID_AGGREGATION_REQUEST rather than a database
-            // error or a misleading empty result.
-            if ("median".equals(agg.func())) {
-                ColumnDefinition cd = byField.get(vc.field());
+            // PR #6a + PR #6b (Codex thread 019e2695): median and
+            // percentilecont are only valid on numeric columns. SQL
+            // Server PERCENTILE_CONT requires a numeric ordering
+            // column; running it on a text/date field would either
+            // fail at execution or coerce silently. Catch the
+            // mismatch here so the client sees a structured 400
+            // INVALID_AGGREGATION_REQUEST rather than a database
+            // error.
+            if ("median".equals(agg.func()) || "percentilecont".equals(agg.func())) {
                 if (cd == null || cd.type() == null
                         || !"number".equalsIgnoreCase(cd.type())) {
                     throw new IllegalArgumentException(
-                            "median aggregation is only valid on numeric "
+                            agg.func() + " aggregation is only valid on numeric "
                                     + "columns; got field '" + vc.field()
                                     + "' with type '"
                                     + (cd != null ? cd.type() : "?") + "'");
@@ -773,6 +787,73 @@ public class ReportController {
             out.add(agg);
         }
         return out;
+    }
+
+    /**
+     * PR #6b: extract and validate the {@code aggParams} payload for a
+     * single value column. The fallback order is request → registry
+     * default, mirroring {@code aggFunc} resolution; the validation
+     * itself depends on the resolved {@code func} so it lives here
+     * rather than on {@code GroupedAggregation}.
+     *
+     * <ul>
+     *   <li>{@code percentilecont}: {@code params.percentile} required;
+     *       must be a {@code Number} in {@code [0, 1]} inclusive.</li>
+     *   <li>Other parametric funcs land here in future PRs (weightedAvg)
+     *       — for now the helper falls through to {@code null}.</li>
+     *   <li>Non-parametric funcs (sum/avg/min/.../median) with a
+     *       populated {@code params} map are rejected rather than
+     *       silently ignored, per Codex iter-7 guidance ("non-percentile
+     *       funcs + non-empty params → reject").</li>
+     * </ul>
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> sanitizeAggParams(
+            ColumnVO vc, ColumnDefinition cd, String func) {
+        Map<String, Object> params = vc.aggParams();
+        // Codex 019e2695 iter-8 absorb: registry defaultAggParams
+        // fallback applies ONLY when (a) the request did not supply
+        // its own aggParams, (b) the resolved func is `percentilecont`,
+        // AND (c) the registry's defaultAggFunc is also `percentilecont`
+        // — otherwise an explicit request `aggFunc=sum` would pick up
+        // a stray percentile default from the registry and fail the
+        // "non-parametric + populated params" guard further down.
+        if ((params == null || params.isEmpty())
+                && "percentilecont".equals(func)
+                && cd != null
+                && "percentilecont".equals(cd.defaultAggFunc())
+                && cd.defaultAggParams() != null) {
+            params = cd.defaultAggParams();
+        }
+        if (params == null || params.isEmpty()) {
+            params = null;
+        }
+        if ("percentilecont".equals(func)) {
+            if (params == null || !params.containsKey("percentile")) {
+                throw new IllegalArgumentException(
+                        "percentilecont aggregation requires aggParams.percentile "
+                                + "(double in [0,1]) on field '" + vc.field() + "'");
+            }
+            Object raw = params.get("percentile");
+            if (!(raw instanceof Number n)) {
+                throw new IllegalArgumentException(
+                        "percentilecont aggParams.percentile must be a number, got: " + raw);
+            }
+            double p = n.doubleValue();
+            if (!Double.isFinite(p) || p < 0.0 || p > 1.0) {
+                throw new IllegalArgumentException(
+                        "percentilecont aggParams.percentile must be in [0, 1], got: " + p);
+            }
+            return Map.of("percentile", p);
+        }
+        // Non-parametric agg + populated params → reject so config
+        // mistakes surface loudly rather than being silently dropped.
+        if (params != null) {
+            throw new IllegalArgumentException(
+                    "aggParams is only supported for percentilecont; "
+                            + "got '" + func + "' on field '" + vc.field() + "'");
+        }
+        return null;
     }
 
     /**

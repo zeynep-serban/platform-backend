@@ -191,22 +191,21 @@ public class SqlBuilder {
      * {@code COUNT(DISTINCT ...)}. Reports opt in per column via
      * {@code defaultAggFunc} or per request via {@code valueCols.aggFunc}.
      *
-     * <p>PR #6a (Codex thread 019e2695): {@code median} joins the
-     * whitelist with a different SQL shape — PERCENTILE_CONT is a
-     * window function in MSSQL, so {@link #buildGroupedQuery} routes
-     * median through an inner-subquery + outer-MAX-collapse path
+     * <p>PR #6a + PR #6b (Codex thread 019e2695): {@code median} and
+     * {@code percentilecont} both depend on MSSQL's
+     * {@code PERCENTILE_CONT} window function, so {@link #buildGroupedQuery}
+     * routes them through an inner-subquery + outer-MAX-collapse path
      * instead of the simple {@code FUNC([field])} render. The simple
-     * {@link #renderAggExpression} helper rejects median to make the
-     * routing invariant explicit.
+     * {@link #renderAggExpression} helper rejects both tokens to make
+     * the routing invariant explicit.
      *
-     * <p>Remaining roadmap functions: {@code percentile} (PR #6b
-     * with registry {@code aggParams} contract) and
-     * {@code weightedAvg} (PR-0.4 with value+weight pair semantics).
+     * <p>Remaining roadmap function: {@code weightedAvg} (PR-0.4 with
+     * value+weight pair semantics).
      */
     private static final Set<String> ALLOWED_AGG_FUNCS = Set.of(
             "sum", "avg", "min", "max", "count",
             "stddev", "stddevp", "distinctcount",
-            "median");
+            "median", "percentilecont");
 
     /**
      * Specifies a single value-column aggregation for
@@ -219,10 +218,17 @@ public class SqlBuilder {
      *
      * @param field SQL column name (must be in the visible-columns
      *              allow-list).
-     * @param func  Aggregation function (sum / avg / min / max / count /
-     *              stddev / stddevp / distinctcount).
+     * @param func    Aggregation function token (sum / avg / min / max /
+     *                count / stddev / stddevp / distinctcount / median /
+     *                percentilecont). {@code median} and {@code percentilecont}
+     *                are routed through the inner-subquery PERCENTILE_CONT
+     *                window path by {@link #buildGroupedQuery}; the rest
+     *                use {@link #renderAggExpression}.
+     * @param params  PR #6b: parametric aggregation arguments. Only
+     *                {@code percentilecont} consumes them today, with a
+     *                required {@code percentile} entry in {@code [0, 1]}.
      */
-    public record GroupedAggregation(String field, String func) {
+    public record GroupedAggregation(String field, String func, Map<String, Object> params) {
         public GroupedAggregation {
             if (field == null || field.isBlank()) {
                 throw new IllegalArgumentException(
@@ -243,6 +249,24 @@ public class SqlBuilder {
                                 + ALLOWED_AGG_FUNCS + ", got: " + func);
             }
             func = normalized;
+            // PR #6b (Codex 019e2695): params normalization. Empty maps
+            // collapse to null so the rest of the pipeline can use a
+            // single null-check rather than two. Non-empty maps are
+            // copied to an immutable view so a future mutation on the
+            // caller side cannot leak into the canonical record.
+            if (params != null) {
+                params = params.isEmpty() ? null : Map.copyOf(params);
+            }
+        }
+
+        /**
+         * Backward-compatible 2-arg constructor for call sites that
+         * predate PR #6b. Defaults {@code params} to {@code null} so
+         * existing PR-0.2 / PR #6a code keeps compiling and running
+         * without recompilation surprises.
+         */
+        public GroupedAggregation(String field, String func) {
+            this(field, func, null);
         }
     }
 
@@ -274,19 +298,85 @@ public class SqlBuilder {
             case "distinctcount" -> "COUNT(DISTINCT [" + a.field() + "])";
             case "stddev" -> "STDEV([" + a.field() + "])";
             case "stddevp" -> "STDEVP([" + a.field() + "])";
-            // PR #6a (Codex 019e2695 iter-6): median must never travel
-            // through the simple-render path. PERCENTILE_CONT is a
-            // window function in MSSQL, so calling FUNC([field]) here
-            // would emit invalid T-SQL. The buildGroupedQuery median
-            // branch handles this case; if a future refactor routes a
-            // median aggregation here by accident, fail loudly rather
-            // than silently producing "MEDIAN([col])".
-            case "median" -> throw new IllegalStateException(
-                    "median aggregation must use the buildGroupedQuery "
+            // PR #6a (Codex 019e2695 iter-6): median and percentilecont
+            // must never travel through the simple-render path.
+            // PERCENTILE_CONT is a window function in MSSQL, so calling
+            // FUNC([field]) here would emit invalid T-SQL. The
+            // buildGroupedQuery percentile branch handles these cases;
+            // if a future refactor routes one of these aggregations
+            // here by accident, fail loudly rather than silently
+            // producing "MEDIAN([col])" or "PERCENTILECONT([col])".
+            case "median", "percentilecont" -> throw new IllegalStateException(
+                    a.func() + " aggregation must use the buildGroupedQuery "
                             + "PERCENTILE_CONT window path, not renderAggExpression");
             default -> a.func().toUpperCase(java.util.Locale.ROOT)
                     + "([" + a.field() + "])";
         };
+    }
+
+    /**
+     * PR #6a + PR #6b: identify aggregations that must travel through
+     * the PERCENTILE_CONT window subquery path. Used by
+     * {@link #buildGroupedQuery} to pick the median/percentile-aware
+     * SQL shape; standard aggregates keep the legacy single-pass path.
+     */
+    private static boolean isPercentileWindowAgg(GroupedAggregation a) {
+        return "median".equals(a.func()) || "percentilecont".equals(a.func());
+    }
+
+    /**
+     * PR #6a + PR #6b: stable internal alias for the
+     * {@code PERCENTILE_CONT} window result so the outer
+     * {@code MAX(__alias)} collapse stays deterministic. {@code median}
+     * keeps its historical {@code __median_<field>} shape for
+     * byte-for-byte parity with PR #6a; {@code percentilecont} uses
+     * {@code __pctcont_<field>} so a request mixing both aggregates on
+     * different fields stays unambiguous.
+     */
+    private static String internalPctAlias(GroupedAggregation a) {
+        if ("median".equals(a.func())) {
+            return "__median_" + a.field();
+        }
+        return "__pctcont_" + a.field();
+    }
+
+    /**
+     * PR #6b: render the {@code PERCENTILE_CONT} percentile rank as a
+     * validated numeric literal (e.g. {@code 0.9}) rather than a SQL
+     * bind parameter.
+     *
+     * <p>MSSQL's {@code PERCENTILE_CONT} signature accepts a numeric
+     * literal in the parentheses; named parameters are syntactically
+     * accepted by JDBC but the risk surface is unnecessary when the
+     * value is already type-validated and range-checked upstream. The
+     * controller layer ({@code sanitizeAggregations}) enforces
+     * {@code value instanceof Number} and {@code 0 <= p <= 1} before
+     * the aggregation reaches the SQL builder, so the cast here is
+     * safe by contract.
+     *
+     * <p>{@code BigDecimal.valueOf(...).stripTrailingZeros().toPlainString()}
+     * keeps the rendered literal stable across {@code Double.toString}
+     * locale or scientific-notation surprises (e.g. {@code 1.0E-1}).
+     * Median's fixed {@code 0.5} short-circuits through the same path.
+     */
+    private static String percentileLiteral(GroupedAggregation a) {
+        if ("median".equals(a.func())) {
+            return "0.5";
+        }
+        Object raw = a.params() != null ? a.params().get("percentile") : null;
+        if (!(raw instanceof Number n)) {
+            throw new IllegalStateException(
+                    "percentilecont aggregation requires params.percentile "
+                            + "to be a Number, got: " + raw);
+        }
+        double p = n.doubleValue();
+        if (!Double.isFinite(p) || p < 0.0 || p > 1.0) {
+            throw new IllegalStateException(
+                    "percentilecont aggregation requires 0 <= percentile <= 1, got: " + p);
+        }
+        return java.math.BigDecimal.valueOf(p)
+                .stripTrailingZeros()
+                .toPlainString();
     }
 
     /**
@@ -362,24 +452,25 @@ public class SqlBuilder {
         FromClauseResult fromResult = buildFromClause(def, resolvedSchemas, selectCols,
                 rlsWhereClause, rlsParams, filterResult, params);
 
-        // PR #6a (Codex thread 019e2695): median requires a different
-        // SQL shape — MSSQL exposes PERCENTILE_CONT only as a window
-        // function, so we wrap the filtered source in an inner SELECT
-        // that emits the window result alongside the raw row, then
-        // collapse to one row per group with MAX(__median_<field>) in
-        // the outer SELECT. Non-median aggregations stay on the
-        // existing single-pass path so byte-for-byte parity is
-        // preserved for the simple SUM/AVG/MIN/MAX/COUNT/STDEV cases.
-        boolean hasMedian = false;
+        // PR #6a + PR #6b (Codex thread 019e2695): median and
+        // percentilecont both depend on MSSQL's PERCENTILE_CONT, which
+        // is a window function. Either aggregation in the request
+        // diverts the query to a wrapper shape — inner SELECT emits
+        // the window result with an internal alias, outer SELECT
+        // collapses one row per group via MAX(__alias). Standard
+        // aggregations (sum/avg/min/max/count/stddev/...) stay on the
+        // existing single-pass path so the byte-for-byte parity is
+        // preserved for the legacy SUM/AVG/MIN/MAX/COUNT cases.
+        boolean hasPercentileWindow = false;
         for (GroupedAggregation a : sanitized) {
-            if ("median".equals(a.func())) {
-                hasMedian = true;
+            if (isPercentileWindowAgg(a)) {
+                hasPercentileWindow = true;
                 break;
             }
         }
 
         StringBuilder sql = new StringBuilder();
-        if (!hasMedian) {
+        if (!hasPercentileWindow) {
             sql.append("SELECT [").append(groupColumn).append("]");
             sql.append(", COUNT(*) AS [_rowCount]");
             for (GroupedAggregation a : sanitized) {
@@ -389,12 +480,13 @@ public class SqlBuilder {
             sql.append(" FROM ").append(fromResult.sql());
             sql.append(" GROUP BY [").append(groupColumn).append("]");
         } else {
-            // Outer projection: groupCol + COUNT(*) + (standard agg | MAX-collapse for median)
+            // Outer projection: groupCol + COUNT(*) + (standard agg |
+            // MAX-collapse for median/percentilecont).
             sql.append("SELECT [").append(groupColumn).append("]");
             sql.append(", COUNT(*) AS [_rowCount]");
             for (GroupedAggregation a : sanitized) {
-                if ("median".equals(a.func())) {
-                    sql.append(", MAX([__median_").append(a.field()).append("])")
+                if (isPercentileWindowAgg(a)) {
+                    sql.append(", MAX([").append(internalPctAlias(a)).append("])")
                        .append(" AS [").append(a.field()).append("]");
                 } else {
                     sql.append(", ").append(renderAggExpression(a))
@@ -404,11 +496,13 @@ public class SqlBuilder {
             sql.append(" FROM (");
             sql.append("SELECT ").append(selectCols);
             for (GroupedAggregation a : sanitized) {
-                if ("median".equals(a.func())) {
-                    sql.append(", PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY [")
+                if (isPercentileWindowAgg(a)) {
+                    sql.append(", PERCENTILE_CONT(")
+                       .append(percentileLiteral(a))
+                       .append(") WITHIN GROUP (ORDER BY [")
                        .append(a.field()).append("])")
                        .append(" OVER (PARTITION BY [").append(groupColumn).append("])")
-                       .append(" AS [__median_").append(a.field()).append("]");
+                       .append(" AS [").append(internalPctAlias(a)).append("]");
                 }
             }
             sql.append(" FROM ").append(fromResult.sql());

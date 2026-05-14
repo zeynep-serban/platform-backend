@@ -418,6 +418,79 @@ class SqlBuilderMssqlIntegrationTest {
                 .isEqualTo(3);
     }
 
+    /**
+     * PR #6b (Codex 019e2695) percentilecont execution proof against
+     * a real MSSQL 2022 instance. Three percentile ranks share a
+     * single 5-row fixture: values 10/20/30/40/50, group=ALL.
+     *
+     * <ul>
+     *   <li>{@code p=0.0} → 10.0 (min)</li>
+     *   <li>{@code p=0.9} → 46.0 (continuous interpolation:
+     *       {@code 1 + 0.9 * (5 - 1) = 4.6}, between values at
+     *       ranks 4 and 5 → {@code 40 + 0.6 * (50 - 40) = 46})</li>
+     *   <li>{@code p=1.0} → 50.0 (max)</li>
+     * </ul>
+     *
+     * <p>{@code within(0.0001)} absorbs the {@code float(53)} round-trip
+     * without losing the percentile's semantic precision.
+     */
+    @Test
+    void buildGroupedQuery_percentileContAggregation_overRealMssql() {
+        ReportDefinition def = scratch(
+                "tx_pctcont",
+                List.of(
+                        new ColumnDefinition("category", "Cat", "text", 100, false),
+                        new ColumnDefinition("amount", "Amount", "number", 100, false)),
+                "CREATE TABLE [{schema}].[tx_pctcont] "
+                        + "(category NVARCHAR(20) NOT NULL, amount DECIMAL(18,2) NOT NULL)",
+                List.of(
+                        "INSERT INTO [{schema}].[tx_pctcont] VALUES ('ALL', 10.00)",
+                        "INSERT INTO [{schema}].[tx_pctcont] VALUES ('ALL', 20.00)",
+                        "INSERT INTO [{schema}].[tx_pctcont] VALUES ('ALL', 30.00)",
+                        "INSERT INTO [{schema}].[tx_pctcont] VALUES ('ALL', 40.00)",
+                        "INSERT INTO [{schema}].[tx_pctcont] VALUES ('ALL', 50.00)"));
+
+        // p=0.9 → 46.0 (Codex spec exact value)
+        SqlBuilder.BuiltQuery q90 = builder.buildGroupedQuery(
+                def, null, List.of("category", "amount"),
+                "category",
+                List.of(new SqlBuilder.GroupedAggregation(
+                        "amount", "percentilecont",
+                        Map.of("percentile", 0.9))),
+                Collections.emptyMap(), Collections.emptyList(),
+                null, null, 1, 50);
+        List<Map<String, Object>> r90 = jdbc.queryForList(q90.sql(), q90.params());
+        assertThat(r90).hasSize(1);
+        assertThat(((Number) r90.get(0).get("amount")).doubleValue())
+                .isCloseTo(46.0, within(0.0001));
+
+        // p=0.0 → 10.0 (min)
+        SqlBuilder.BuiltQuery q0 = builder.buildGroupedQuery(
+                def, null, List.of("category", "amount"),
+                "category",
+                List.of(new SqlBuilder.GroupedAggregation(
+                        "amount", "percentilecont",
+                        Map.of("percentile", 0.0))),
+                Collections.emptyMap(), Collections.emptyList(),
+                null, null, 1, 50);
+        List<Map<String, Object>> r0 = jdbc.queryForList(q0.sql(), q0.params());
+        assertThat(((Number) r0.get(0).get("amount")).doubleValue())
+                .isCloseTo(10.0, within(0.0001));
+
+        // p=1.0 → 50.0 (max)
+        SqlBuilder.BuiltQuery q1 = builder.buildGroupedQuery(
+                def, null, List.of("category", "amount"),
+                "category",
+                List.of(new SqlBuilder.GroupedAggregation(
+                        "amount", "percentilecont",
+                        Map.of("percentile", 1.0))),
+                Collections.emptyMap(), Collections.emptyList(),
+                null, null, 1, 50);
+        List<Map<String, Object>> r1 = jdbc.queryForList(q1.sql(), q1.params());
+        assertThat(((Number) r1.get(0).get("amount")).doubleValue())
+                .isCloseTo(50.0, within(0.0001));
+    }
+
     @Test
     void buildGroupedCountQuery_returnsBucketCount_overRealMssql() {
         ReportDefinition def = scratch(

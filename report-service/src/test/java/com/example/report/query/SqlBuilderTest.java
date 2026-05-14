@@ -826,6 +826,154 @@ class SqlBuilderTest {
                     .isEqualTo(List.of(1L, 2L));
         }
 
+        // ── PR #6b: percentilecont (PERCENTILE_CONT(<literal>) window) ───
+        // Codex 019e2695 absorb: percentile rank is rendered as a
+        // validated numeric literal (BigDecimal.stripTrailingZeros)
+        // rather than a bind param so MSSQL's syntactic requirement
+        // stays satisfied. The validation lives at the controller
+        // layer; SqlBuilder trusts the upstream contract.
+
+        @Test
+        void percentileContAggregation_emitsLiteralPercentile() {
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation(
+                            "amount", "percentilecont",
+                            Map.of("percentile", 0.9))),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            // Literal render, not bind param.
+            assertThat(q.sql())
+                    .contains("PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY [amount])")
+                    .contains("OVER (PARTITION BY [category])")
+                    .contains("AS [__pctcont_amount]")
+                    .contains("MAX([__pctcont_amount]) AS [amount]");
+            // Defensive: no bind-param shape leaked into the SQL.
+            assertThat(q.sql()).doesNotContain("PERCENTILE_CONT(:");
+            // External alias contract: [amount], not [amount_p90] or similar.
+            assertThat(q.sql()).doesNotContain("[amount_p");
+        }
+
+        @Test
+        void percentileContAggregation_p25LiteralStripTrailingZeros() {
+            // BigDecimal.valueOf(0.25).stripTrailingZeros().toPlainString()
+            // → "0.25" — guard against locale-dependent Double.toString
+            // surprises (e.g. "0,25" or "2.5E-1").
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation(
+                            "amount", "percentilecont",
+                            Map.of("percentile", 0.25))),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("PERCENTILE_CONT(0.25)");
+        }
+
+        @Test
+        void percentileContAggregation_p1RendersAsInteger() {
+            // p=1.0 should render as "1" (stripTrailingZeros), not "1.0",
+            // so the literal is consistent across decimal/integer rank
+            // requests.
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation(
+                            "amount", "percentilecont",
+                            Map.of("percentile", 1.0))),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("PERCENTILE_CONT(1)");
+        }
+
+        @Test
+        void percentileContAggregationMissingParam_rejected() {
+            // SqlBuilder.percentileLiteral throws IllegalStateException
+            // when params is null/missing. Controller validation is the
+            // primary line of defense, but the builder must not silently
+            // emit invalid SQL if it ever gets here.
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalStateException.class,
+                    () -> {
+                        ReportDefinition def = new ReportDefinition(
+                                "test", "v1", "T", "d", "c",
+                                "ORDERS", "dbo", "static", null, null,
+                                List.of(new ColumnDefinition("category", "Cat", "text", 100, false),
+                                        new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                                "category", "ASC",
+                                new AccessConfig(null, null, null, null));
+                        builder.buildGroupedQuery(
+                                def, null, List.of("category", "amount"),
+                                "category",
+                                List.of(new SqlBuilder.GroupedAggregation(
+                                        "amount", "percentilecont")),  // null params
+                                Collections.emptyMap(), Collections.emptyList(),
+                                null, null, 1, 50);
+                    });
+        }
+
+        @Test
+        void medianAndPercentileCont_coexistInSameInnerSubquery() {
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false),
+                            new ColumnDefinition("cost", "Cost", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount", "cost"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "median"),
+                            new SqlBuilder.GroupedAggregation(
+                                    "cost", "percentilecont",
+                                    Map.of("percentile", 0.9))),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            // Both window expressions land in the same inner subquery,
+            // each under its own internal alias.
+            assertThat(q.sql())
+                    .contains("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY [amount])")
+                    .contains("PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY [cost])")
+                    .contains("AS [__median_amount]")
+                    .contains("AS [__pctcont_cost]")
+                    .contains("MAX([__median_amount]) AS [amount]")
+                    .contains("MAX([__pctcont_cost]) AS [cost]");
+        }
+
         @Test
         void medianAggregation_sortOnMedianFieldGetsTieBreaker() {
             // PR #2 tie-breaker discipline composes with PR #6a median:

@@ -1159,6 +1159,218 @@ class ReportControllerQueryTest {
             assertEquals("INVALID_AGGREGATION_REQUEST", error.code());
         }
 
+        // ── PR #6b: percentilecont parametric agg + duplicate field reject ─
+
+        @Test
+        void percentileContAggMissingParams_returns400() {
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, null)));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "percentilecont")),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            var error = assertInstanceOf(ReportQueryErrorDto.class, response.getBody());
+            assertEquals("INVALID_AGGREGATION_REQUEST", error.code());
+            assertTrue(error.message().contains("percentile"),
+                    "error must mention 'percentile' so the client can fix the request");
+        }
+
+        @Test
+        void percentileContAggRangeOutOfBounds_returns400() {
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, null)));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "percentilecont",
+                            Map.of("percentile", 1.5))),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            var error = assertInstanceOf(ReportQueryErrorDto.class, response.getBody());
+            assertEquals("INVALID_AGGREGATION_REQUEST", error.code());
+        }
+
+        @Test
+        void duplicateValueColField_returns400() {
+            // PR #6b: external alias contract reserves one response
+            // column per field. sum+median on the same AMOUNT would
+            // either silently overwrite or require an alias suffix
+            // scheme this PR does not introduce — reject up front.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, null)));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum"),
+                            new ColumnVO("amount", "Amount", "amount", "median")),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            var error = assertInstanceOf(ReportQueryErrorDto.class, response.getBody());
+            assertEquals("INVALID_AGGREGATION_REQUEST", error.code());
+            assertTrue(error.message().contains("duplicate") || error.message().contains("duplicated"),
+                    "error must explain the field-duplication rejection");
+        }
+
+        @Test
+        void registryDefaultAggParams_fallbackWhenRequestPercentileContIsEmpty() {
+            // PR #6b iter-8 (Codex 019e2695): registry defaultAggParams
+            // back-fills request aggParams only when the resolved func
+            // is `percentilecont` AND the registry's defaultAggFunc is
+            // also `percentilecont`. Here both line up: request omits
+            // aggFunc and aggParams → resolution falls back to the
+            // registry's percentilecont/0.9 default and the merged
+            // filterModel carries that percentile through to SqlBuilder.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "percentilecont",
+                                    Map.of("percentile", 0.9))));
+            when(queryEngine.executeGroupedQuery(any(), any(), any(), any(),
+                    any(), any(), anyInt(), anyInt()))
+                    .thenReturn(new com.example.report.query.QueryEngine.PagedData(
+                            java.util.List.of(), 0, 1, 50, java.util.List.of()));
+
+            // Request omits aggFunc AND aggParams; both fall back to
+            // registry defaults.
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", null)),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+            assertEquals(200, response.getStatusCode().value(),
+                    "registry fallback must drive a valid percentilecont request");
+        }
+
+        @Test
+        void registryDefaultAggParams_doesNotLeakIntoExplicitNonParametricRequest() {
+            // Codex 019e2695 iter-8 absorb: registry default percentile
+            // params must NOT bleed into an explicit `aggFunc=sum`
+            // request on the same column. Otherwise the
+            // non-parametric-plus-populated-params guard would falsely
+            // 400 a perfectly legal `sum` aggregation.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "percentilecont",
+                                    Map.of("percentile", 0.9))));
+            when(queryEngine.executeGroupedQuery(any(), any(), any(), any(),
+                    any(), any(), anyInt(), anyInt()))
+                    .thenReturn(new com.example.report.query.QueryEngine.PagedData(
+                            java.util.List.of(), 0, 1, 50, java.util.List.of()));
+
+            // Explicit sum override; registry default is percentilecont/0.9.
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum")),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+            assertEquals(200, response.getStatusCode().value(),
+                    "explicit sum override must not pick up the registry's "
+                            + "percentilecont default params");
+        }
+
+        @Test
+        void requestAggParams_overridesRegistryDefaultAggParams() {
+            // Same registry default (percentilecont/0.9) but the request
+            // explicitly asks for percentilecont/0.25 — the explicit
+            // value wins. We don't have direct access to the merged
+            // GroupedAggregation here; the 200 plus mock invocation is
+            // proof that the request flowed through validation cleanly.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "percentilecont",
+                                    Map.of("percentile", 0.9))));
+            when(queryEngine.executeGroupedQuery(any(), any(), any(), any(),
+                    any(), any(), anyInt(), anyInt()))
+                    .thenReturn(new com.example.report.query.QueryEngine.PagedData(
+                            java.util.List.of(), 0, 1, 50, java.util.List.of()));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "percentilecont",
+                            Map.of("percentile", 0.25))),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+            assertEquals(200, response.getStatusCode().value());
+        }
+
+        @Test
+        void aggParamsOnNonParametricFunc_returns400() {
+            // sum + populated aggParams → reject (Codex iter-7 absorb).
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, null)));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum",
+                            Map.of("percentile", 0.9))),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            var error = assertInstanceOf(ReportQueryErrorDto.class, response.getBody());
+            assertEquals("INVALID_AGGREGATION_REQUEST", error.code());
+        }
+
         @Test
         void medianAggOnNonNumericColumn_returns400Structured() {
             // PR #6a contract: median is only valid on `type=number`

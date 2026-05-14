@@ -262,6 +262,75 @@ class ReportDefinitionSchemaValidatorTest {
     }
 
     @Test
+    void validate_percentileContWithDefaultAggParams_passesSchemaGate() {
+        // PR #6b: percentilecont + defaultAggParams.percentile in [0,1]
+        // is a valid schema configuration.
+        String json = "{\"contractVersion\":1,\"key\":\"r-pct\",\"version\":\"1.0\","
+                + "\"title\":\"Pct\",\"category\":\"Finans\","
+                + "\"source\":\"TBL\",\"sourceSchema\":\"workcube_mikrolink_1\","
+                + "\"schemaMode\":\"static\","
+                + "\"tenantBoundary\":{\"mode\":\"schema\",\"scopeType\":\"tenant\","
+                + "\"schemaResolver\":\"sourceSchemaLiteral\","
+                + "\"schemaPattern\":\"workcube_mikrolink_{tenantId}\","
+                + "\"reason\":\"Tenant-scoped via literal schema name suffix\"},"
+                + "\"columns\":[{\"field\":\"AMOUNT\",\"headerName\":\"Amount\","
+                + "\"type\":\"number\",\"aggregatable\":true,"
+                + "\"defaultAggFunc\":\"percentilecont\","
+                + "\"defaultAggParams\":{\"percentile\":0.9}}]}";
+
+        List<ContractViolation> violations = validator.validate(json, "r-pct.json");
+
+        assertThat(violations).isEmpty();
+    }
+
+    @Test
+    void validate_percentileContWithOutOfRangeParam_rejected() {
+        // PR #6b: percentile outside [0,1] must be caught at the
+        // schema gate (number max=1).
+        String json = "{\"contractVersion\":1,\"key\":\"r-pct-bad\",\"version\":\"1.0\","
+                + "\"title\":\"PctBad\",\"category\":\"Finans\","
+                + "\"source\":\"TBL\",\"sourceSchema\":\"workcube_mikrolink_1\","
+                + "\"schemaMode\":\"static\","
+                + "\"tenantBoundary\":{\"mode\":\"schema\",\"scopeType\":\"tenant\","
+                + "\"schemaResolver\":\"sourceSchemaLiteral\","
+                + "\"schemaPattern\":\"workcube_mikrolink_{tenantId}\","
+                + "\"reason\":\"Tenant-scoped via literal schema name suffix\"},"
+                + "\"columns\":[{\"field\":\"AMOUNT\",\"headerName\":\"Amount\","
+                + "\"type\":\"number\",\"aggregatable\":true,"
+                + "\"defaultAggFunc\":\"percentilecont\","
+                + "\"defaultAggParams\":{\"percentile\":1.5}}]}";
+
+        List<ContractViolation> violations = validator.validate(json, "r-pct-bad.json");
+
+        assertThat(violations).anyMatch(v ->
+                "REPORT_SCHEMA_INVALID".equals(v.ruleId())
+                        && v.field().contains("percentile"));
+    }
+
+    @Test
+    void validate_defaultAggParamsUnknownProperty_rejected() {
+        // additionalProperties=false guard: stray keys in defaultAggParams
+        // must fail the schema gate so config typos surface early.
+        String json = "{\"contractVersion\":1,\"key\":\"r-pct-extra\",\"version\":\"1.0\","
+                + "\"title\":\"PctExtra\",\"category\":\"Finans\","
+                + "\"source\":\"TBL\",\"sourceSchema\":\"workcube_mikrolink_1\","
+                + "\"schemaMode\":\"static\","
+                + "\"tenantBoundary\":{\"mode\":\"schema\",\"scopeType\":\"tenant\","
+                + "\"schemaResolver\":\"sourceSchemaLiteral\","
+                + "\"schemaPattern\":\"workcube_mikrolink_{tenantId}\","
+                + "\"reason\":\"Tenant-scoped via literal schema name suffix\"},"
+                + "\"columns\":[{\"field\":\"AMOUNT\",\"headerName\":\"Amount\","
+                + "\"type\":\"number\",\"aggregatable\":true,"
+                + "\"defaultAggFunc\":\"percentilecont\","
+                + "\"defaultAggParams\":{\"percentile\":0.9,\"unknown\":\"x\"}}]}";
+
+        List<ContractViolation> violations = validator.validate(json, "r-pct-extra.json");
+
+        assertThat(violations).anyMatch(v ->
+                "REPORT_SCHEMA_INVALID".equals(v.ruleId()));
+    }
+
+    @Test
     void validate_reportKeyTakenFromJsonNotFilePath() {
         // Verifies resolveReportKey: prefer JSON-declared key over file name path
         String json = "{\"contractVersion\":1,\"key\":\"actual-key\",\"version\":\"1.0\","
