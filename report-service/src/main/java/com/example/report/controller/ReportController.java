@@ -206,8 +206,23 @@ public class ReportController {
                 .filter(ColumnDefinition::aggregatable)
                 .map(ColumnDefinition::field)
                 .toList();
+        // PR-0.4a (Codex 019e2695 hybrid pivot design): pivot capability
+        // derivation. `serverSidePivoting` and `clientPivotAllowed` stay
+        // false-by-default until a report explicitly opts in via its
+        // registry entry — backend pivot SQL is not yet wired in
+        // SqlBuilder (lands in PR-0.4b). For now we surface the
+        // pivotableFields list so the frontend can already plan AG Grid's
+        // `enablePivot` per-column gating; the capability flags will flip
+        // to true on a per-report basis as the SSRM pivot path matures.
+        List<String> pivotable = visibleCols.stream()
+                .filter(ColumnDefinition::pivotable)
+                .map(ColumnDefinition::field)
+                .toList();
         ReportCapabilitiesDto capabilities = new ReportCapabilitiesDto(
-                !groupable.isEmpty(), groupable, aggregatable);
+                !groupable.isEmpty(), groupable, aggregatable,
+                /* serverSidePivoting */ false,
+                /* clientPivotAllowed */ false,
+                pivotable);
 
         return ResponseEntity.ok(new ReportMetadataDto(
                 def.key(), def.title(), def.description(), def.category(),

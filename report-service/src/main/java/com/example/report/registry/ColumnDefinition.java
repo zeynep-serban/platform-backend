@@ -55,7 +55,8 @@ public record ColumnDefinition(
         boolean groupable,
         boolean aggregatable,
         String defaultAggFunc,
-        Map<String, Object> defaultAggParams
+        Map<String, Object> defaultAggParams,
+        boolean pivotable
 ) {
     public ColumnDefinition {
         if (field == null || field.isBlank()) {
@@ -111,7 +112,7 @@ public record ColumnDefinition(
     public ColumnDefinition(String field, String headerName, String type,
                             Integer width, boolean sensitive) {
         this(field, headerName, type, width, sensitive,
-                false, false, null, null);
+                false, false, null, null, false);
     }
 
     /**
@@ -125,6 +126,21 @@ public record ColumnDefinition(
                             boolean groupable, boolean aggregatable,
                             String defaultAggFunc) {
         this(field, headerName, type, width, sensitive,
-                groupable, aggregatable, defaultAggFunc, null);
+                groupable, aggregatable, defaultAggFunc, null, false);
+    }
+
+    /**
+     * Backward-compatible 9-arg constructor for PR #6b call sites that
+     * predate PR-0.4a's {@code pivotable} flag. Defaults the new flag
+     * to {@code false} so existing tests / registry entries continue
+     * to deserialize without modification.
+     */
+    public ColumnDefinition(String field, String headerName, String type,
+                            Integer width, boolean sensitive,
+                            boolean groupable, boolean aggregatable,
+                            String defaultAggFunc,
+                            Map<String, Object> defaultAggParams) {
+        this(field, headerName, type, width, sensitive,
+                groupable, aggregatable, defaultAggFunc, defaultAggParams, false);
     }
 }

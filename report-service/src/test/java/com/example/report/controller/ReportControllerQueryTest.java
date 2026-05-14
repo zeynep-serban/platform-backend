@@ -1545,6 +1545,56 @@ class ReportControllerQueryTest {
             assertEquals(List.of("category"), caps.groupableFields());
             assertEquals(List.of("amount"), caps.aggregatableFields());
         }
+
+        @Test
+        void getMetadata_pivotableFieldsListedWhenColumnsOptIn() {
+            // PR-0.4a (Codex 019e2695 hybrid pivot): pivotableFields
+            // surfaces every column with pivotable=true. The flags
+            // (serverSidePivoting / clientPivotAllowed) stay false until
+            // the SSRM pivot path lands in PR-0.4b — for now the
+            // metadata only signals "these columns are pivotable when
+            // the modes are eventually flipped on".
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null, null, false),
+                            new ColumnDefinition("action_type", "Action", "text",
+                                    100, false, true, false, null, null, true),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "sum", null, false)));
+
+            ReportCapabilitiesDto caps = response("any").getBody().capabilities();
+
+            assertEquals(List.of("action_type"), caps.pivotableFields(),
+                    "Only columns explicitly marked pivotable=true are listed");
+            assertFalse(caps.serverSidePivoting(),
+                    "PR-0.4a only surfaces the field list; backend pivot SQL "
+                            + "(serverSidePivoting=true) lands in PR-0.4b");
+            assertFalse(caps.clientPivotAllowed(),
+                    "PR-0.4a defaults clientPivotAllowed=false; per-report opt-in lights it up");
+        }
+
+        @Test
+        void getMetadata_pivotableFieldsEmptyByDefault() {
+            // Legacy reports without pivotable columns surface an empty
+            // pivotableFields list. The frontend's PR-0.4a wiring should
+            // hide the pivot UI entirely on these reports.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("col1", "Col 1", "text", 150, false)));
+
+            ReportCapabilitiesDto caps = response("any").getBody().capabilities();
+
+            assertEquals(List.of(), caps.pivotableFields());
+        }
+
+        private org.springframework.http.ResponseEntity<ReportMetadataDto> response(String key) {
+            return controller.getMetadata(key, testJwt("admin"));
+        }
     }
 
     @Nested

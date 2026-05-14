@@ -235,6 +235,55 @@ class ColumnDefinitionJacksonTest {
         assertEquals("stddevp", cd.defaultAggFunc());
     }
 
+    // ── PR-0.4a (Codex 019e2695 hybrid pivot): pivotable column flag ───
+    // The backend allowlist is authoritative for both server-mode (backend
+    // pivot SQL) and client-mode (AG Grid native client pivot). Legacy
+    // registry entries without the flag default to pivotable=false.
+
+    @Test
+    void pivotableFlagAccepted() throws Exception {
+        String json = """
+                {
+                  "field": "ACTION_TYPE",
+                  "headerName": "Action",
+                  "type": "text",
+                  "width": 120,
+                  "sensitive": false,
+                  "groupable": true,
+                  "pivotable": true
+                }
+                """;
+
+        ColumnDefinition cd = mapper.readValue(json, ColumnDefinition.class);
+
+        assertEquals("ACTION_TYPE", cd.field());
+        assertTrue(cd.pivotable(),
+                "pivotable must round-trip through Jackson when explicitly set");
+        assertTrue(cd.groupable(),
+                "groupable flag in the same payload must stay populated");
+    }
+
+    @Test
+    void pivotableFlagDefaultsFalseWhenMissing() throws Exception {
+        // Legacy 5-field JSON: every existing report registry entry today.
+        // The pivotable flag must default to false so registry files don't
+        // need to be re-emitted just to opt out of pivot.
+        String legacy = """
+                {
+                  "field": "ACCOUNT_CODE",
+                  "headerName": "Hesap Kodu",
+                  "type": "text",
+                  "width": 140,
+                  "sensitive": false
+                }
+                """;
+
+        ColumnDefinition cd = mapper.readValue(legacy, ColumnDefinition.class);
+
+        assertFalse(cd.pivotable(),
+                "pivotable must default to false for legacy 5-field JSON");
+    }
+
     @Test
     void backwardCompatConstructor5ArgEqualsLegacyDeserialization() throws Exception {
         // The 5-arg secondary constructor is what most existing

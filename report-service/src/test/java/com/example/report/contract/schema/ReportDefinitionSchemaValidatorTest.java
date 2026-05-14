@@ -331,6 +331,27 @@ class ReportDefinitionSchemaValidatorTest {
     }
 
     @Test
+    void validate_pivotableColumnFlag_passesSchemaGate() {
+        // PR-0.4a (Codex 019e2695): the new per-column `pivotable` flag
+        // is a plain boolean — the schema gate just needs to accept it
+        // without breaking existing reports.
+        String json = "{\"contractVersion\":1,\"key\":\"r-pivot\",\"version\":\"1.0\","
+                + "\"title\":\"Pivot\",\"category\":\"Finans\","
+                + "\"source\":\"TBL\",\"sourceSchema\":\"workcube_mikrolink_1\","
+                + "\"schemaMode\":\"static\","
+                + "\"tenantBoundary\":{\"mode\":\"schema\",\"scopeType\":\"tenant\","
+                + "\"schemaResolver\":\"sourceSchemaLiteral\","
+                + "\"schemaPattern\":\"workcube_mikrolink_{tenantId}\","
+                + "\"reason\":\"Tenant-scoped via literal schema name suffix\"},"
+                + "\"columns\":[{\"field\":\"ACTION_TYPE\",\"headerName\":\"Action\","
+                + "\"type\":\"text\",\"groupable\":true,\"pivotable\":true}]}";
+
+        List<ContractViolation> violations = validator.validate(json, "r-pivot.json");
+
+        assertThat(violations).isEmpty();
+    }
+
+    @Test
     void validate_reportKeyTakenFromJsonNotFilePath() {
         // Verifies resolveReportKey: prefer JSON-declared key over file name path
         String json = "{\"contractVersion\":1,\"key\":\"actual-key\",\"version\":\"1.0\","

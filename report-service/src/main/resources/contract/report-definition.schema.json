@@ -142,6 +142,10 @@
           "description": "PR-0.2: AG Grid SSRM valueCols candidate.",
           "type": "boolean"
         },
+        "pivotable": {
+          "description": "PR-0.4a (Codex 019e2695 hybrid pivot): column may be dragged into AG Grid's pivot column drop zone. The backend allowlist is authoritative for both server-mode (backend pivot SQL) and client-mode (AG Grid native client pivot).",
+          "type": "boolean"
+        },
         "defaultAggFunc": {
           "description": "PR-0.2 + PR-0.4z + PR #6a + PR #6b: default aggregation function (sum/avg/min/max/count/stddev/stddevp/distinctcount/median/percentilecont). null → sum for numeric, count otherwise. weightedAvg deferred to PR-0.4.",
           "type": ["string", "null"],
