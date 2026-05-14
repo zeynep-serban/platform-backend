@@ -384,4 +384,210 @@ class AuthImpersonationWireMockIT {
                 .as("permission-service session create must carry the internal API key")
                 .isNotEmpty();
     }
+
+    /** Faz 2 helper — stub permission-service session create to 409. */
+    void stubSessionCreate409() {
+        wireMock.stubFor(WireMock.post(urlPathEqualTo("/api/v1/internal/impersonation/sessions"))
+                .willReturn(aResponse()
+                        .withStatus(409)
+                        .withHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                        .withBody("{\"errorCode\":\"ACTIVE_IMPERSONATION_EXISTS\","
+                                + "\"message\":\"Aktif oturum mevcut\"}")));
+    }
+
+    /** Faz 2 helper — stub stopSession (DELETE on internal session row). */
+    void stubSessionStop204(String sessionId) {
+        wireMock.stubFor(WireMock.delete(urlPathEqualTo(
+                        "/api/v1/internal/impersonation/sessions/" + sessionId))
+                .willReturn(aResponse().withStatus(204)));
+    }
+
+    /** Faz 2 helper — fetch active session info (used by DELETE /current path). */
+    void stubActiveSessionExists(String sessionId, long impersonatorUserId, long targetUserId) {
+        String body = "{\"sessionId\":\"" + sessionId + "\""
+                + ",\"impersonatorUserId\":" + impersonatorUserId
+                + ",\"targetUserId\":" + targetUserId
+                + ",\"startedAt\":\"2026-05-14T00:00:00Z\""
+                + ",\"expiresAt\":\"2026-05-14T01:00:00Z\""
+                + ",\"status\":\"ACTIVE\"}";
+        wireMock.stubFor(get(urlPathEqualTo("/api/v1/internal/impersonation/sessions/active"))
+                .willReturn(aResponse()
+                        .withStatus(200)
+                        .withHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                        .withBody(body)));
+    }
+
+    // ------------------------------------------------------------------
+    // Faz 2 case set — negative branches + revoke. Codex 019e2022.
+    // ------------------------------------------------------------------
+
+    @Test
+    void target_user_disabled_emits_blocked_audit() throws Exception {
+        // arrange — authz superAdmin true, user-service returns disabled
+        stubAuthzMe(true);
+        long targetUserId = 42L;
+        String targetEmail = "disabled.user@example.com";
+        stubUserServiceTarget(targetUserId, "any-uuid", targetEmail, /*enabled*/ false);
+        stubAuditAccepted();
+
+        var mvcResult = mockMvc.perform(post("/api/v1/impersonation/sessions")
+                        .with(jwt().jwt(j -> j.subject("admin-uuid")
+                                .claim("userId", 1L)
+                                .claim("email", "admin@example.com")
+                                .claim("azp", "frontend")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"targetUserId\":" + targetUserId
+                                + ",\"reason\":\"Faz 2 disabled target case\"}"))
+                .andReturn();
+
+        assertThat(mvcResult.getResponse().getStatus()).isEqualTo(403);
+        JsonNode response = objectMapper.readTree(mvcResult.getResponse().getContentAsString());
+        assertThat(response.get("errorCode").asText()).isEqualTo("TARGET_USER_DISABLED");
+
+        JsonNode auditBody = lastBodyTo("/api/v1/internal/impersonation/audit-events");
+        assertThat(auditBody).isNotNull();
+        assertThat(auditBody.get("eventType").asText()).isEqualTo("IMPERSONATION_BLOCKED");
+        assertThat(auditBody.get("errorCode").asText()).isEqualTo("TARGET_USER_DISABLED");
+        assertThat(auditBody.get("targetEmail").asText()).isEqualTo(targetEmail);
+        assertThat(auditBody.get("targetUserId").asLong()).isEqualTo(targetUserId);
+
+        // No session create, no broker exchange
+        assertThat(countPostsTo("/api/v1/internal/impersonation/sessions")).isZero();
+        verify(keycloakBrokerClient, never()).exchange(any(), any());
+    }
+
+    @Test
+    void target_subject_unresolvable_step1f_emits_blocked_audit() throws Exception {
+        // BUG #1 Step 1f branch — kcSubject null on the user-service payload.
+        stubAuthzMe(true);
+        long targetUserId = 99L;
+        String targetEmail = "no-kc-mapping@example.com";
+        // null kcSubject — stubUserServiceTarget omits the field when null
+        stubUserServiceTarget(targetUserId, /*kcSubject*/ null, targetEmail, /*enabled*/ true);
+        stubAuditAccepted();
+
+        var mvcResult = mockMvc.perform(post("/api/v1/impersonation/sessions")
+                        .with(jwt().jwt(j -> j.subject("admin-uuid")
+                                .claim("userId", 1L)
+                                .claim("email", "admin@example.com")
+                                .claim("azp", "frontend")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"targetUserId\":" + targetUserId
+                                + ",\"reason\":\"Faz 2 BUG#1 Step 1f branch\"}"))
+                .andReturn();
+
+        assertThat(mvcResult.getResponse().getStatus()).isEqualTo(422);
+        JsonNode response = objectMapper.readTree(mvcResult.getResponse().getContentAsString());
+        assertThat(response.get("errorCode").asText()).isEqualTo("TARGET_SUBJECT_UNRESOLVABLE");
+
+        // BUG #1 Step 1f proof — audit body carries the targetEmail
+        JsonNode auditBody = lastBodyTo("/api/v1/internal/impersonation/audit-events");
+        assertThat(auditBody).isNotNull();
+        assertThat(auditBody.get("eventType").asText()).isEqualTo("IMPERSONATION_BLOCKED");
+        assertThat(auditBody.get("errorCode").asText()).isEqualTo("TARGET_SUBJECT_UNRESOLVABLE");
+        assertThat(auditBody.get("targetEmail").asText()).isEqualTo(targetEmail);
+        assertThat(auditBody.get("targetUserId").asLong()).isEqualTo(targetUserId);
+
+        assertThat(countPostsTo("/api/v1/internal/impersonation/sessions")).isZero();
+        verify(keycloakBrokerClient, never()).exchange(any(), any());
+    }
+
+    @Test
+    void insufficient_authority_when_authz_returns_not_super_admin() throws Exception {
+        // ImpersonationController resolves the target via user-service BEFORE
+        // the SuperAdmin authority check (Step 2 lands after Step 1c/1f).
+        // The contract pinned here: authz/me returning superAdmin=false ends
+        // the chain BEFORE session create + broker exchange — user-service
+        // may or may not be called depending on branch ordering.
+        stubAuthzMe(false);
+        stubUserServiceTarget(42L, "target-uuid", "halil@example.com", true);
+        stubAuditAccepted();
+
+        var mvcResult = mockMvc.perform(post("/api/v1/impersonation/sessions")
+                        .with(jwt().jwt(j -> j.subject("admin-uuid")
+                                .claim("userId", 1L)
+                                .claim("email", "viewer@example.com")
+                                .claim("azp", "frontend")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"targetUserId\":42,\"reason\":\"Faz 2 insufficient authority case\"}"))
+                .andReturn();
+
+        assertThat(mvcResult.getResponse().getStatus()).isEqualTo(403);
+        JsonNode response = objectMapper.readTree(mvcResult.getResponse().getContentAsString());
+        assertThat(response.get("errorCode").asText()).isEqualTo("INSUFFICIENT_AUTHORITY");
+
+        // The critical invariant — no session create + no broker exchange.
+        assertThat(countPostsTo("/api/v1/internal/impersonation/sessions")).isZero();
+        verify(keycloakBrokerClient, never()).exchange(any(), any());
+    }
+
+    @Test
+    void active_session_conflict_returns_409() throws Exception {
+        // arrange — full chain ok except permission-service returns 409
+        stubAuthzMe(true);
+        long targetUserId = 42L;
+        String targetSubject = "target-uuid-409";
+        stubUserServiceTarget(targetUserId, targetSubject, "halil@example.com", true);
+        stubSessionCreate409();
+        stubAuditAccepted();
+
+        String fakeJwt = TestTokens.buildFakeExchangedJwt(
+                "https://wiremock-it/realms/test", "jti-409", "sid-409",
+                targetSubject, "impersonation-broker", 9_999_999_999L, "halil@example.com");
+        KeycloakBrokerClient.DecodedClaims claims = new KeycloakBrokerClient.DecodedClaims(
+                "https://wiremock-it/realms/test", "jti-409", "sid-409",
+                targetSubject, "impersonation-broker", 9_999_999_999L, "halil@example.com");
+        when(keycloakBrokerClient.exchange(any(), eq(targetSubject)))
+                .thenReturn(new KeycloakBrokerClient.ExchangeResult(fakeJwt, 3600L, claims));
+
+        var mvcResult = mockMvc.perform(post("/api/v1/impersonation/sessions")
+                        .with(jwt().jwt(j -> j.subject("admin-uuid")
+                                .claim("userId", 1L)
+                                .claim("email", "admin@example.com")
+                                .claim("azp", "frontend")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"targetUserId\":" + targetUserId
+                                + ",\"reason\":\"Faz 2 concurrent 409 case\"}"))
+                .andReturn();
+
+        assertThat(mvcResult.getResponse().getStatus()).isEqualTo(409);
+        JsonNode response = objectMapper.readTree(mvcResult.getResponse().getContentAsString());
+        assertThat(response.get("errorCode").asText()).isEqualTo("ACTIVE_IMPERSONATION_EXISTS");
+
+        // 409 path runs the full chain up to session create — verify it.
+        assertThat(countPostsTo("/api/v1/internal/impersonation/sessions")).isEqualTo(1);
+    }
+
+    @Test
+    void revoke_active_session_returns_204() throws Exception {
+        // DELETE /current flow:
+        //   1. controller reads active session via
+        //      GET /api/v1/internal/impersonation/sessions/active?impersonatorUserId={N}
+        //   2. controller stops it via
+        //      DELETE /api/v1/internal/impersonation/sessions/{id}
+        String sessionId = "00000000-0000-0000-0000-000000000042";
+        stubActiveSessionExists(sessionId, 1L, 42L);
+        stubSessionStop204(sessionId);
+        stubAuditAccepted();
+
+        var mvcResult = mockMvc.perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                                .delete("/api/v1/impersonation/sessions/current")
+                                .with(jwt().jwt(j -> j.subject("admin-uuid")
+                                        .claim("userId", 1L)
+                                        .claim("email", "admin@example.com")
+                                        .claim("azp", "frontend"))))
+                .andReturn();
+
+        assertThat(mvcResult.getResponse().getStatus()).isEqualTo(204);
+
+        // Verify the controller hit the canonical DELETE path with the
+        // session id resolved from the active lookup.
+        var stopEvents = wireMock.findAll(
+                WireMock.deleteRequestedFor(urlPathEqualTo(
+                        "/api/v1/internal/impersonation/sessions/" + sessionId)));
+        assertThat(stopEvents)
+                .as("permission-service DELETE on the resolved session id must be called")
+                .isNotEmpty();
+    }
 }
