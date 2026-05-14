@@ -1372,6 +1372,80 @@ class SqlBuilderTest {
         }
 
         @Test
+        void pivotResultColumnsAlignWithPivotResultFieldsByIndex() {
+            // PR-0.4d-be (Codex 019e2695): the two response envelope
+            // lists share the same ordering so frontend can index either
+            // list with the same row pointer. Builder asserts the
+            // invariant at construction; this regression-pin makes sure
+            // a future loop refactor can't desync them.
+            ReportDefinition def = pivotDef();
+            SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                    def, null, PIVOT_COLS,
+                    "category", "status",
+                    List.of(new PivotValue("A", "Aktif"),
+                            new PivotValue("P", "Pasif")),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum"),
+                            new SqlBuilder.GroupedAggregation("qty", "avg")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.pivotResultColumns()).hasSize(q.pivotResultFields().size());
+            for (int i = 0; i < q.pivotResultColumns().size(); i++) {
+                assertThat(q.pivotResultColumns().get(i).field())
+                        .isEqualTo(q.pivotResultFields().get(i));
+            }
+            // Spot-check semantic metadata so a regression in alias
+            // packing also surfaces here.
+            com.example.report.query.PivotResultColumn first =
+                    q.pivotResultColumns().get(0);
+            assertThat(first.pivotField()).isEqualTo("status");
+            assertThat(first.pivotValue()).isEqualTo("A");
+            assertThat(first.pivotLabel()).isEqualTo("Aktif");
+            assertThat(first.aggFunc()).isEqualTo("sum");
+            assertThat(first.valueField()).isEqualTo("amount");
+        }
+
+        @Test
+        void pivotResultColumnsCarryLabelWhenRegistryShipsObjectForm() {
+            // Object-form pivotValues (PR-0.4b registry) preserve the
+            // user-facing label through to the response envelope so the
+            // frontend renders "Aktif" rather than "A" in the secondary
+            // header.
+            ReportDefinition def = pivotDef();
+            SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                    def, null, PIVOT_COLS,
+                    "category", "status",
+                    List.of(new PivotValue("A", "Aktif")),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.pivotResultColumns()).hasSize(1);
+            assertThat(q.pivotResultColumns().get(0).pivotLabel())
+                    .isEqualTo("Aktif");
+            assertThat(q.pivotResultColumns().get(0).pivotValue())
+                    .isEqualTo("A");
+        }
+
+        @Test
+        void pivotResultColumnsLabelDefaultsToValueOnShortFormRegistry() {
+            // Short-form `pivotValues: ["A", "B"]` collapses label==value.
+            // The metadata envelope reflects this so the frontend
+            // doesn't have to invent a fallback.
+            ReportDefinition def = pivotDef();
+            SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                    def, null, PIVOT_COLS,
+                    "category", "status",
+                    List.of(new PivotValue("A")),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.pivotResultColumns().get(0).pivotLabel())
+                    .isEqualTo("A");
+        }
+
+        @Test
         void aliasCollisionFromSanitizationRejected() {
             // Codex 019e2695 iter-2 P1: two distinct registry values
             // ("A-B" and "A/B") both sanitise into the `A_B` alias key.

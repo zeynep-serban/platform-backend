@@ -94,7 +94,9 @@ public class QueryEngine {
         }
 
         return new PagedData(items, total, page, pageSize,
-                dataQuery.warnings(), dataQuery.pivotResultFields());
+                dataQuery.warnings(),
+                dataQuery.pivotResultFields(),
+                dataQuery.pivotResultColumns());
     }
 
     /**
@@ -116,16 +118,24 @@ public class QueryEngine {
             int page,
             int pageSize,
             List<DegradationWarning> warnings,
-            List<String> pivotResultFields) {
+            List<String> pivotResultFields,
+            List<PivotResultColumn> pivotResultColumns) {
 
         public PagedData(List<Map<String, Object>> items, long total, int page, int pageSize) {
-            this(items, total, page, pageSize, List.of(), List.of());
+            this(items, total, page, pageSize, List.of(), List.of(), List.of());
         }
 
         public PagedData(List<Map<String, Object>> items, long total,
                           int page, int pageSize,
                           List<DegradationWarning> warnings) {
-            this(items, total, page, pageSize, warnings, List.of());
+            this(items, total, page, pageSize, warnings, List.of(), List.of());
+        }
+
+        public PagedData(List<Map<String, Object>> items, long total,
+                          int page, int pageSize,
+                          List<DegradationWarning> warnings,
+                          List<String> pivotResultFields) {
+            this(items, total, page, pageSize, warnings, pivotResultFields, List.of());
         }
 
         public PagedData {
@@ -133,6 +143,9 @@ public class QueryEngine {
             pivotResultFields = pivotResultFields == null
                     ? List.of()
                     : List.copyOf(pivotResultFields);
+            pivotResultColumns = pivotResultColumns == null
+                    ? List.of()
+                    : List.copyOf(pivotResultColumns);
         }
     }
 

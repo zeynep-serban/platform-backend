@@ -73,13 +73,51 @@ public class SqlBuilder {
             String sql,
             MapSqlParameterSource params,
             List<DegradationWarning> warnings,
-            List<String> pivotResultFields) {
+            List<String> pivotResultFields,
+            List<PivotResultColumn> pivotResultColumns) {
 
         public PivotedBuiltQuery {
             warnings = warnings == null ? List.of() : List.copyOf(warnings);
             pivotResultFields = pivotResultFields == null
                     ? List.of()
                     : List.copyOf(pivotResultFields);
+            pivotResultColumns = pivotResultColumns == null
+                    ? List.of()
+                    : List.copyOf(pivotResultColumns);
+            // PR-0.4d-be (Codex thread 019e2695): ordering invariant —
+            // the two lists must align index-by-index so frontend can
+            // index either list with the same row pointer. Catch a
+            // mis-built query at construction time rather than letting
+            // the response shape drift silently.
+            if (!pivotResultColumns.isEmpty()
+                    && pivotResultColumns.size() != pivotResultFields.size()) {
+                throw new IllegalArgumentException(
+                        "PivotedBuiltQuery pivotResultColumns ("
+                                + pivotResultColumns.size()
+                                + ") must match pivotResultFields ("
+                                + pivotResultFields.size() + ")");
+            }
+            for (int i = 0; i < pivotResultColumns.size(); i++) {
+                if (!pivotResultColumns.get(i).field().equals(pivotResultFields.get(i))) {
+                    throw new IllegalArgumentException(
+                            "PivotedBuiltQuery pivotResultColumns[" + i
+                                    + "].field='" + pivotResultColumns.get(i).field()
+                                    + "' must equal pivotResultFields[" + i
+                                    + "]='" + pivotResultFields.get(i) + "'");
+                }
+            }
+        }
+
+        /**
+         * Backward-compat constructor for callers that predate PR-0.4d-be.
+         * Defaults {@code pivotResultColumns} to an empty list so older
+         * consumers (mock builds, unit tests) keep compiling. The
+         * canonical path now always populates the metadata.
+         */
+        public PivotedBuiltQuery(String sql, MapSqlParameterSource params,
+                                  List<DegradationWarning> warnings,
+                                  List<String> pivotResultFields) {
+            this(sql, params, warnings, pivotResultFields, List.of());
         }
     }
 
@@ -867,6 +905,7 @@ public class SqlBuilder {
         sql.append(", COUNT(*) AS [_rowCount]");
 
         List<String> pivotResultFields = new ArrayList<>();
+        List<PivotResultColumn> pivotResultColumns = new ArrayList<>();
         // PR-0.4b post-spec hardening (Codex 019e2695 iter-2 P1 absorb):
         // alias sanitisation maps non-identifier codepoints onto `_`, so
         // two distinct registry values like `A-B` and `A/B` would collide
@@ -899,6 +938,18 @@ public class SqlBuilder {
                                     + "to `A_B`).");
                 }
                 pivotResultFields.add(alias);
+                // PR-0.4d-be (Codex 019e2695): emit the alias-aligned
+                // metadata record so the frontend can build the secondary
+                // column header without re-deriving label/agg/value from
+                // the SQL alias string. Order matches pivotResultFields
+                // index-by-index (PivotedBuiltQuery canonical asserts).
+                pivotResultColumns.add(new PivotResultColumn(
+                        alias,
+                        pivotColumn,
+                        pv.value(),
+                        pv.label(),
+                        a.func(),
+                        a.field()));
                 sql.append(", ")
                         .append(renderPivotAggExpression(a, pivotColumn, paramName))
                         .append(" AS [").append(alias).append("]");
@@ -922,7 +973,7 @@ public class SqlBuilder {
         params.addValue("_pageSize", pageSize);
 
         return new PivotedBuiltQuery(sql.toString(), params,
-                fromResult.warnings(), pivotResultFields);
+                fromResult.warnings(), pivotResultFields, pivotResultColumns);
     }
 
     /**

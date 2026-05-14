@@ -520,13 +520,26 @@ public class ReportController {
         // Codex 019e0c99 iter-3 §C: degradation header propagation
         // (multi-level grouped path uses same warning list as flat path).
         // PR-0.4b: pivot-aware response carries `pivotResultFields` so
-        // AG Grid SSRM can register the secondary columns it needs to
-        // render the pivot output buckets.
+        // AG Grid SSRM can register the secondary columns it needs.
+        // PR-0.4d-be: also surface the alias-aligned `pivotResultColumns`
+        // semantic metadata so the frontend can render the user-facing
+        // header without re-deriving label/agg/value from the alias.
+        List<com.example.report.dto.PivotResultColumnDto> pivotColumnsDto =
+                result.pivotResultColumns().stream()
+                        .map(prc -> new com.example.report.dto.PivotResultColumnDto(
+                                prc.field(),
+                                prc.pivotField(),
+                                prc.pivotValue(),
+                                prc.pivotLabel(),
+                                prc.aggFunc(),
+                                prc.valueField()))
+                        .toList();
         return ResponseEntity.ok()
                 .headers(com.example.report.query.DegradationHeaders.of(result.warnings()))
                 .body(new PagedResultDto<>(
                         result.items(), result.total(), result.page(), result.pageSize(),
-                        result.pivotResultFields()));
+                        result.pivotResultFields(),
+                        pivotColumnsDto));
     }
 
     /** PR-0.3 hardening: cap recursion depth so a malicious payload

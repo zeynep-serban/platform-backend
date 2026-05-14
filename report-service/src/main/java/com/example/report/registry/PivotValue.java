@@ -20,19 +20,14 @@ import com.fasterxml.jackson.annotation.JsonCreator;
  * @param value SQL comparison literal; bound as a named parameter so the
  *              {@code CASE WHEN} predicate stays parametric.
  * @param label User-facing label intended for the frontend secondary
- *              column header. <b>Reserved for PR-0.4d</b>
- *              (Codex thread {@code 019e2695} iter-2 absorb): PR-0.4b
- *              accepts the field in the registry and round-trips it
- *              through the record, but the {@code /query} response
- *              currently surfaces only {@link
- *              com.example.report.dto.PagedResultDto#pivotResultFields()}
- *              (the SQL alias list). PR-0.4d will add a
- *              backend-emitted {@code pivotResultColumns} list whose
- *              entries carry the alias + label pair so AG Grid can
- *              render the user-facing header without re-fetching
- *              metadata. Defaults to the value when the registry
- *              omits the label, so registries that do not need the
- *              metadata split can stay terse.
+ *              column header. Surfaced through the
+ *              {@link com.example.report.dto.PagedResultDto#pivotResultColumns()
+ *              pivotResultColumns} response envelope (PR-0.4d-be, Codex
+ *              thread {@code 019e2695}) so AG Grid can render the
+ *              user-facing header without re-fetching metadata. Defaults
+ *              to the value when the registry omits the label, so
+ *              registries that do not need the metadata split can stay
+ *              terse.
  */
 public record PivotValue(String value, String label) {
 

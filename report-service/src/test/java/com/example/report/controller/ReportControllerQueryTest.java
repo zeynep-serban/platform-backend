@@ -1717,6 +1717,16 @@ class ReportControllerQueryTest {
             when(registry.get("fin-pivot")).thenReturn(Optional.of(def));
             when(columnFilter.getVisibleColumnDefinitions(any(), any()))
                     .thenReturn(def.columns());
+            // PR-0.4d-be: PagedData now carries pivotResultColumns alongside
+            // pivotResultFields. Stub the engine with the full envelope so the
+            // controller hands both lists onto the response DTO.
+            List<com.example.report.query.PivotResultColumn> stubPivotCols = List.of(
+                    new com.example.report.query.PivotResultColumn(
+                            "pvt__status__A__sum__amount",
+                            "status", "A", "Aktif", "sum", "amount"),
+                    new com.example.report.query.PivotResultColumn(
+                            "pvt__status__P__sum__amount",
+                            "status", "P", "Pasif", "sum", "amount"));
             when(queryEngine.executePivotedGroupedQuery(
                     any(), any(), eq("category"), eq("status"),
                     any(), any(), any(), any(), anyInt(), anyInt()))
@@ -1725,7 +1735,8 @@ class ReportControllerQueryTest {
                                     "pvt__status__A__sum__amount", 100)),
                             1L, 1, 50, List.of(),
                             List.of("pvt__status__A__sum__amount",
-                                    "pvt__status__P__sum__amount")));
+                                    "pvt__status__P__sum__amount"),
+                            stubPivotCols));
 
             var pivot = new ReportQueryRequestDto(
                     0, 50,
@@ -1740,11 +1751,22 @@ class ReportControllerQueryTest {
             verify(queryEngine).executePivotedGroupedQuery(
                     any(), any(), eq("category"), eq("status"),
                     any(), any(), any(), any(), eq(1), eq(50));
-            // Pivot result fields surface on the response envelope.
+            // Pivot result fields + columns surface on the response envelope.
             PagedResultDto<?> body = assertInstanceOf(PagedResultDto.class, response.getBody());
             assertEquals(List.of(
                     "pvt__status__A__sum__amount",
                     "pvt__status__P__sum__amount"), body.pivotResultFields());
+            // PR-0.4d-be: the alias-aligned metadata is mapped onto DTO
+            // entries with label and agg/value preserved end-to-end.
+            assertEquals(2, body.pivotResultColumns().size());
+            com.example.report.dto.PivotResultColumnDto firstDto =
+                    body.pivotResultColumns().get(0);
+            assertEquals("pvt__status__A__sum__amount", firstDto.field());
+            assertEquals("status", firstDto.pivotField());
+            assertEquals("A", firstDto.pivotValue());
+            assertEquals("Aktif", firstDto.pivotLabel());
+            assertEquals("sum", firstDto.aggFunc());
+            assertEquals("amount", firstDto.valueField());
         }
 
         @Test
