@@ -12,16 +12,20 @@ import org.springframework.stereotype.Component;
 /**
  * Interim admin-only access guard for Workcube endpoints.
  *
- * <p>Active 2026-05-14 — plan §7 Adım 1.5, Codex thread {@code 019e258f} iter-4 (A-prime AGREE).
- * Restricts {@code /api/v1/workcube/*} to super-admin users only (OpenFGA
- * {@code admin@organization:default} tuple). Pre-prod compensating control;
- * test cluster keeps {@code REPORT_MSSQL_ENABLED=true} so the WorkcubeQueryAdapter
- * scope (plan §7 Adım 11) can be developed and tested against a live Workcube path.
+ * <p><b>Deprecation (Adım 11.4):</b> The class-level {@code @PreAuthorize} on
+ * {@link WorkcubeReportController} has been REMOVED. Full authz pipeline now
+ * runs in {@link WorkcubeReportExecutionService} (ReportAccessEvaluator +
+ * ColumnFilter + RowFilterInjector + ReportAuditClient). This guard is still
+ * referenced only by legacy {@code /views/*} method-level {@code @PreAuthorize}
+ * for back-compat until Adım 11.5 cutover, after which the legacy endpoints
+ * and this class will be removed together.
  *
- * <p>TODO(Adım-11): Replaced by full WorkcubeQueryAdapter authz/RLS/allowlist gate.
- * When the adapter lands, the {@code @PreAuthorize} references to this bean
- * MUST be removed and replaced by the adapter's per-tenant + per-allowlist
- * authorization pipeline. This guard is NOT prod-ready by itself.
+ * <p>Initially active 2026-05-14 — plan §7 Adım 1.5, Codex thread
+ * {@code 019e258f} iter-4 (A-prime AGREE). Restricted
+ * {@code /api/v1/workcube/*} to super-admin users only (OpenFGA
+ * {@code admin@organization:default} tuple) as pre-prod compensating control.
+ * Adım 11.4 (this PR) replaced that with the full service-level authz
+ * pipeline for the new {@code /reports/*} endpoints.
  *
  * <p>Fail-closed semantics (returns {@code false} → triggers 403 FORBIDDEN
  * via Spring Method Security):
@@ -34,7 +38,12 @@ import org.springframework.stereotype.Component;
  *
  * <p>Returns {@code true} only when {@link AuthzMeResponse#isSuperAdmin()} is
  * {@code true} — i.e. OpenFGA {@code admin@organization:default} check passed.
+ *
+ * @deprecated since Adım 11.4 — full authz pipeline in
+ *     {@link WorkcubeReportExecutionService} supersedes this guard. Remove
+ *     together with legacy {@code /views/*} endpoints at Adım 11.5 cutover.
  */
+@Deprecated(forRemoval = true, since = "Adim-11.4")
 @Component("workcubeAccessGuard")
 public class WorkcubeAccessGuard {
 

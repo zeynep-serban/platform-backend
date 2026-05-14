@@ -1,8 +1,14 @@
 package com.example.report.workcube;
 
+import com.example.report.access.ColumnFilter;
+import com.example.report.access.ReportAccessEvaluator;
+import com.example.report.access.ReportAccessEvaluator.AccessResult;
+import com.example.report.access.RowFilterInjector;
+import com.example.report.audit.ReportAuditClient;
 import com.example.report.authz.AuthzMeResponse;
 import com.example.report.authz.CompanyHeaderScopeNarrower;
 import com.example.report.authz.PermissionResolver;
+import com.example.report.security.JwtClaimExtractor;
 import com.example.report.dto.PagedResultDto;
 import com.example.report.query.CurrentTenantSchemaResolver;
 import com.example.report.query.YearlySchemaResolver;
@@ -33,26 +39,28 @@ import org.springframework.web.server.ResponseStatusException;
  * <ol>
  *   <li>{@link ReportRegistry#get} — 404 if unknown</li>
  *   <li>{@link PermissionResolver#getAuthzMe} — authz snapshot</li>
+ *   <li>{@link ReportAccessEvaluator#evaluate} — DENIED → audit + 403 BEFORE
+ *       narrow (report-level permission is tenant-independent)</li>
  *   <li>{@link CompanyHeaderScopeNarrower#narrow} — singleton COMPANY scope</li>
+ *   <li>{@link ColumnFilter#getVisibleColumns} — column-level RLS</li>
+ *   <li>{@link RowFilterInjector#buildRlsClause} — row-level RLS clause + params</li>
+ *   <li>{@link YearlySchemaResolver}/{@link CurrentTenantSchemaResolver} — schema target</li>
  *   <li>AG Grid filter + sort JSON parse</li>
  *   <li>{@link WorkcubeQueryAdapter#executeData} — rendered SQL + V1 +
  *       composite tenant boundary + JDBC</li>
+ *   <li>{@link ReportAuditClient#logReportAccess} — success audit</li>
  * </ol>
  *
- * <h2>Adım 11.3 minimum scope</h2>
- * Interim {@code @PreAuthorize} on {@link WorkcubeReportController} guards
- * non-admin (Adım 1.5 interim gate). This service does NOT yet add
- * {@code ReportAccessEvaluator}, {@code ColumnFilter}, {@code RowFilterInjector},
- * or schema resolution — those land in Adım 11.4 when the interim gate
- * is removed and the full authz pipeline takes over.
- *
- * <p>Visible columns are derived directly from
- * {@link ReportDefinition#columns()} (no column-level RLS yet). This is
- * safe under the interim super-admin gate: only super-admins reach this
- * service in Adım 11.3.
+ * <h2>Adım 11.4 — interim gate REMOVED</h2>
+ * Class-level {@code @PreAuthorize} on {@link WorkcubeReportController}
+ * REMOVED. Non-admin denial now happens at service level via
+ * {@link ReportAccessEvaluator}{@code .evaluate(def, authz) == DENIED} branch.
+ * Full authz pipeline (access evaluator + column filter + row filter +
+ * audit) takes over the role previously held by the interim super-admin gate.
  *
  * @see WorkcubeQueryAdapter
  * @see WorkcubeReportController
+ * @see WorkcubeAccessGuard (deprecated; legacy /views/* only)
  */
 @Service
 @ConditionalOnBean(name = "workcubeMssqlDataSource")
@@ -69,6 +77,10 @@ public class WorkcubeReportExecutionService {
     private final WorkcubeQueryAdapter adapter;
     private final YearlySchemaResolver yearlySchemaResolver;
     private final CurrentTenantSchemaResolver currentTenantSchemaResolver;
+    private final ReportAccessEvaluator accessEvaluator;
+    private final ColumnFilter columnFilter;
+    private final RowFilterInjector rowFilterInjector;
+    private final ReportAuditClient auditClient;
     private final ObjectMapper objectMapper;
 
     public WorkcubeReportExecutionService(ReportRegistry reportRegistry,
@@ -77,6 +89,10 @@ public class WorkcubeReportExecutionService {
                                           WorkcubeQueryAdapter adapter,
                                           YearlySchemaResolver yearlySchemaResolver,
                                           CurrentTenantSchemaResolver currentTenantSchemaResolver,
+                                          ReportAccessEvaluator accessEvaluator,
+                                          ColumnFilter columnFilter,
+                                          RowFilterInjector rowFilterInjector,
+                                          ReportAuditClient auditClient,
                                           ObjectMapper objectMapper) {
         this.reportRegistry = reportRegistry;
         this.permissionResolver = permissionResolver;
@@ -84,6 +100,10 @@ public class WorkcubeReportExecutionService {
         this.adapter = adapter;
         this.yearlySchemaResolver = yearlySchemaResolver;
         this.currentTenantSchemaResolver = currentTenantSchemaResolver;
+        this.accessEvaluator = accessEvaluator;
+        this.columnFilter = columnFilter;
+        this.rowFilterInjector = rowFilterInjector;
+        this.auditClient = auditClient;
         this.objectMapper = objectMapper;
     }
 
@@ -114,32 +134,48 @@ public class WorkcubeReportExecutionService {
                                                            Jwt jwt) {
         ReportDefinition def = findReportOrThrow(reportKey);
         AuthzMeResponse authz = permissionResolver.getAuthzMe(jwt);
-        if (authz != null) {
-            authz = narrower.narrow(authz, companyHeader);
+        String auditUsername = JwtClaimExtractor.extractAuditUsername(jwt);
+
+        // Codex iter-33 absorb: full authz check BEFORE narrow (report-level
+        // permission/group is tenant-independent; narrow drives row/schema/columns).
+        AccessResult access = accessEvaluator.evaluate(def, authz);
+        if (access != AccessResult.ALLOWED) {
+            auditClient.logReportAccessDenied(reportKey,
+                    authz != null ? authz.getUserId() : null,
+                    auditUsername, access.name());
+            throw new org.springframework.web.server.ResponseStatusException(
+                    HttpStatus.FORBIDDEN, "report_access_denied: " + access.name());
         }
+
+        AuthzMeResponse scopedAuthz = authz != null ? narrower.narrow(authz, companyHeader) : null;
+
         Map<String, Object> agGridFilter = parseMapJson(filterJson);
         List<Map<String, String>> sortModel = parseSortJson(sortJson);
 
         int boundedPageSize = Math.min(Math.max(pageSize > 0 ? pageSize : DEFAULT_PAGE_SIZE, 1), MAX_PAGE_SIZE);
         int boundedPage = Math.max(page, 1);
 
-        List<String> visibleColumns = def.columns().stream()
-                .map(ColumnDefinition::field)
-                .toList();
+        // Codex iter-33 absorb: scopedAuthz is single source of truth for
+        // schema/RLS/columns. Authz before narrow used only for report-level
+        // permission gate above.
+        List<String> visibleColumns = columnFilter.getVisibleColumns(def, scopedAuthz);
+        RowFilterInjector.RlsResult rls = rowFilterInjector.buildRlsClause(def, scopedAuthz);
+        String rlsClause = rls.whereClause() != null ? rls.whereClause() : "";
+        MapSqlParameterSource rlsParams = rls.params() != null ? rls.params() : new MapSqlParameterSource();
 
-        // Codex iter-30 blocker 1: yearly/current reports route through
-        // the resolver so X-Company-Id actually drives the schema target.
-        YearlySchemaResolver.ResolvedSchemas schemas = resolveSchemas(def, authz, agGridFilter);
+        YearlySchemaResolver.ResolvedSchemas schemas = resolveSchemas(def, scopedAuthz, agGridFilter);
 
         List<Map<String, Object>> rows = adapter.executeData(
                 def, schemas, visibleColumns, agGridFilter, sortModel,
-                "", new MapSqlParameterSource(),
+                rlsClause, rlsParams,
                 boundedPage, boundedPageSize);
 
-        // Codex iter-30 PagedResultDto.total fix: real count via adapter
-        // count path (extra DB round-trip; matches /api/v1/reports contract).
         long total = adapter.executeCount(def, schemas, agGridFilter, visibleColumns,
-                "", new MapSqlParameterSource());
+                rlsClause, rlsParams);
+
+        auditClient.logReportAccess(reportKey,
+                scopedAuthz != null ? scopedAuthz.getUserId() : null,
+                auditUsername);
 
         log.debug("Workcube execute report={} page={} pageSize={} rowCount={} total={}",
                 reportKey, boundedPage, boundedPageSize, rows.size(), total);
@@ -153,19 +189,25 @@ public class WorkcubeReportExecutionService {
                              Jwt jwt) {
         ReportDefinition def = findReportOrThrow(reportKey);
         AuthzMeResponse authz = permissionResolver.getAuthzMe(jwt);
-        if (authz != null) {
-            authz = narrower.narrow(authz, companyHeader);
+
+        AccessResult access = accessEvaluator.evaluate(def, authz);
+        if (access != AccessResult.ALLOWED) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    HttpStatus.FORBIDDEN, "report_access_denied: " + access.name());
         }
+
+        AuthzMeResponse scopedAuthz = authz != null ? narrower.narrow(authz, companyHeader) : null;
         Map<String, Object> agGridFilter = parseMapJson(filterJson);
 
-        List<String> visibleColumns = def.columns().stream()
-                .map(ColumnDefinition::field)
-                .toList();
+        List<String> visibleColumns = columnFilter.getVisibleColumns(def, scopedAuthz);
+        RowFilterInjector.RlsResult rls = rowFilterInjector.buildRlsClause(def, scopedAuthz);
+        String rlsClause = rls.whereClause() != null ? rls.whereClause() : "";
+        MapSqlParameterSource rlsParams = rls.params() != null ? rls.params() : new MapSqlParameterSource();
 
-        YearlySchemaResolver.ResolvedSchemas schemas = resolveSchemas(def, authz, agGridFilter);
+        YearlySchemaResolver.ResolvedSchemas schemas = resolveSchemas(def, scopedAuthz, agGridFilter);
 
         return adapter.executeCount(def, schemas, agGridFilter, visibleColumns,
-                "", new MapSqlParameterSource());
+                rlsClause, rlsParams);
     }
 
     private ReportDefinition findReportOrThrow(String key) {

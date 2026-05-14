@@ -49,7 +49,6 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/v1/workcube")
 @ConditionalOnBean(name = "workcubeMssqlDataSource")
-@PreAuthorize("@workcubeAccessGuard.isInterimAdmin(authentication)")
 public class WorkcubeReportController {
 
     private static final Logger log = LoggerFactory.getLogger(WorkcubeReportController.class);
@@ -74,6 +73,7 @@ public class WorkcubeReportController {
      * ]
      * </pre>
      */
+    @PreAuthorize("@workcubeAccessGuard.isInterimAdmin(authentication)")
     @GetMapping(value = "/views", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> listViews() {
         try {
@@ -94,6 +94,7 @@ public class WorkcubeReportController {
      *
      * <p>Örnek: {@code GET /api/v1/workcube/views/vw_recent_orders?limit=50&status=APPROVED}
      */
+    @PreAuthorize("@workcubeAccessGuard.isInterimAdmin(authentication)")
     @GetMapping(value = "/views/{key}", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> queryView(
             @PathVariable("key") String key,
@@ -130,6 +131,7 @@ public class WorkcubeReportController {
     /**
      * Allowlist key ile row count.
      */
+    @PreAuthorize("@workcubeAccessGuard.isInterimAdmin(authentication)")
     @GetMapping(value = "/views/{key}/count", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> countView(@PathVariable("key") String key) {
         if (!WorkcubeAllowlist.isAllowed(key)) {
@@ -161,15 +163,21 @@ public class WorkcubeReportController {
     // ---- Adım 11.3: adapter-backed report endpoints (Codex iter-29 absorb) ----
 
     /**
-     * Adapter-backed report execution endpoint (Adım 11.3).
+     * Adapter-backed report execution endpoint (Adım 11.3 + 11.4 full authz).
      *
      * <p>Path: {@code GET /api/v1/workcube/reports/{key}/data}
      *
-     * <p>Pipeline: registry → permission resolver → company narrower →
-     * {@link WorkcubeQueryAdapter#executeData} → {@link PagedResultDto}.
+     * <p>Pipeline (Adım 11.4): registry → permission resolver →
+     * {@code ReportAccessEvaluator.evaluate} (DENIED → audit + 403 BEFORE
+     * narrow; report-level permission is tenant-independent) → company narrower
+     * → {@code ColumnFilter} → {@code RowFilterInjector} → schema resolver →
+     * {@link WorkcubeQueryAdapter#executeData} → {@link PagedResultDto} →
+     * success audit.
      *
-     * <p>Interim {@code @PreAuthorize} class-level gate still applies:
-     * non-admin → 403 (Adım 1.5 gate; Adım 11.4 removes it).
+     * <p>Adım 11.4: class-level {@code @PreAuthorize} interim gate REMOVED;
+     * non-admin denial now happens at service level via
+     * {@link WorkcubeReportExecutionService} accessEvaluator branch. Legacy
+     * {@code /views/*} retains method-level guard until Adım 11.5 cutover.
      */
     @GetMapping(value = "/reports/{key}/data", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> reportData(
