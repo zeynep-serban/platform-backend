@@ -68,12 +68,60 @@ class RC011WorkcubeSourceAllowlistedTest {
         assertThat(viol.message()).contains("ReportingAllowlist.V1");
     }
 
+    // ---- Adım 11.2a: sourceQuery branch tests (Codex iter-21 REVISE-1) -----
+
     @Test
-    void null_source_bypasses_rule() {
-        // sourceQuery-only report (yearly schemaMode) — RC-011 skips, Adım 11.2 covers
-        List<ContractViolation> v = rule.validate(defSourceQuery("yearly-rpt",
-                "SELECT * FROM workcube_mikrolink_{year}_{tenantId}.CARI_ROWS"));
+    void sourceQueryOnly_allowedRefs_passes() {
+        // hr-compensation-detay pattern: source=null, sourceQuery uses
+        // canonical workcube_mikrolink schema with V1 tables only.
+        List<ContractViolation> v = rule.validate(defSourceQuery("hr-rpt",
+                "SELECT * FROM [workcube_mikrolink].[EMPLOYEES] e "
+                        + "LEFT JOIN [workcube_mikrolink].[BRANCH] br ON br.BRANCH_ID = e.BRANCH_ID"));
         assertThat(v).isEmpty();
+    }
+
+    @Test
+    void sourceQueryOnly_unknownRef_fails() {
+        List<ContractViolation> v = rule.validate(defSourceQuery("rogue-yearly",
+                "SELECT * FROM [{schema}].[SECRET_TABLE_NOT_IN_V1]"));
+        assertThat(v).hasSize(1);
+        assertThat(v.get(0).message()).contains("SECRET_TABLE_NOT_IN_V1");
+        assertThat(v.get(0).message()).contains("not in ReportingAllowlist.V1");
+    }
+
+    @Test
+    void sourcePresentAndSourceQueryUnknownRef_stillFails() {
+        // Both fields populated — sourceQuery branch must not be skipped
+        ReportDefinition def = new ReportDefinition(
+                "mixed-rpt", "1.0", "Title", "Description", "category",
+                "INVOICE", "dbo", "static", null,
+                "SELECT * FROM [{schema}].[SECRET_ROGUE_TABLE]",
+                List.of(new ColumnDefinition("col", "col", "STRING", null, false, false, false, null)),
+                null, "ASC", null
+        );
+        List<ContractViolation> v = rule.validate(def);
+        assertThat(v).hasSize(1);
+        assertThat(v.get(0).field()).isEqualTo("sourceQuery");
+        assertThat(v.get(0).message()).contains("SECRET_ROGUE_TABLE");
+    }
+
+    @Test
+    void sourceQuery_unqualifiedTable_failsClosed() {
+        // Codex iter-21 REVISE-1 #2: unqualified FROM/JOIN targets must
+        // not silently bypass. Even allowlisted table names without
+        // explicit schema → fail-closed.
+        List<ContractViolation> v = rule.validate(defSourceQuery("unqualified-rpt",
+                "SELECT * FROM ACCOUNT_CARD_ROWS"));
+        assertThat(v).hasSize(1);
+        assertThat(v.get(0).message()).containsAnyOf("unqualified", "Unqualified");
+    }
+
+    @Test
+    void sourceQuery_unsupportedTarget_failsClosed() {
+        List<ContractViolation> v = rule.validate(defSourceQuery("temp-table-rpt",
+                "SELECT * FROM #temp_data WHERE id > 0"));
+        assertThat(v).hasSize(1);
+        assertThat(v.get(0).message()).containsAnyOf("Unsupported", "unqualified");
     }
 
     @Test

@@ -70,8 +70,16 @@ public final class WorkcubeSqlTableRefScanner {
     private static final Pattern OPENQUERY = Pattern.compile("\\bOPENQUERY\\s*\\(", Pattern.CASE_INSENSITIVE);
     private static final Pattern TEMP_TABLE = Pattern.compile("\\b(?:FROM|JOIN|APPLY)\\s+(#{1,2}[A-Za-z_][\\w]*)", Pattern.CASE_INSENSITIVE);
     private static final Pattern TABLE_VARIABLE = Pattern.compile("\\b(?:FROM|JOIN|APPLY)\\s+(@[A-Za-z_][\\w]*)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern THREE_PART = Pattern.compile(
-            "\\[?[\\w{}]+\\]?\\.\\[?[\\w{}]+\\]?\\.\\[?[A-Za-z_][\\w]*\\]?\\.\\[?[A-Za-z_][\\w]*\\]?"
+
+    /**
+     * Unqualified table after FROM/JOIN/APPLY — no schema prefix.
+     * Codex iter-21 REVISE-1: must not silently bypass; classified as
+     * {@link SchemaKind#UNQUALIFIED} so the caller can fail-closed.
+     * The negative lookahead skips refs already matched as two-part.
+     */
+    private static final Pattern UNQUALIFIED_AFTER_KEYWORD = Pattern.compile(
+            "\\b(?:FROM|JOIN|APPLY)\\s+(?![\\[#@])(?![\\w{}]+[\\.])([A-Za-z_][\\w]*)\\b",
+            Pattern.CASE_INSENSITIVE
     );
 
     /**
@@ -122,7 +130,32 @@ public final class WorkcubeSqlTableRefScanner {
             refs.add(new TableRef(m.group(1), null, m.group(1), SchemaKind.UNKNOWN, "FROM", m.start()));
         }
 
+        // Codex iter-21 REVISE-1: unqualified table refs (no schema prefix)
+        // also emitted so callers can fail-closed in sourceQuery contexts.
+        m = UNQUALIFIED_AFTER_KEYWORD.matcher(masked);
+        while (m.find()) {
+            String table = m.group(1).toUpperCase(Locale.ROOT);
+            // Skip SQL keywords mis-detected as table names (PRIMARY, LATERAL, etc.)
+            if (isSqlKeyword(table)) continue;
+            String matched = m.group();
+            String clause = matched.substring(0, matched.indexOf(' ')).toUpperCase(Locale.ROOT);
+            refs.add(new TableRef(matched, null, table, SchemaKind.UNQUALIFIED, clause, m.start()));
+        }
+
         return refs;
+    }
+
+    /**
+     * Common T-SQL keywords that can follow FROM/JOIN/APPLY but aren't
+     * table names — keeps the unqualified scan from picking them up.
+     */
+    private static boolean isSqlKeyword(String upper) {
+        return switch (upper) {
+            case "OPENQUERY", "OPENROWSET", "OPENXML", "OPENDATASOURCE" -> true;
+            case "LATERAL", "OUTER", "INNER", "LEFT", "RIGHT", "CROSS", "FULL" -> true;
+            case "SELECT" -> true;
+            default -> false;
+        };
     }
 
     /**

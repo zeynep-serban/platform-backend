@@ -137,6 +137,37 @@ class WorkcubeSqlTableRefScannerTest {
         assertThat(refs.get(0).table()).isEqualTo("COMPANY");
     }
 
+    // ---- Codex iter-21 REVISE-1: unqualified target coverage --------
+
+    @Test
+    void unqualified_from_target_marked_unqualified() {
+        List<TableRef> refs = WorkcubeSqlTableRefScanner.scan(
+                "SELECT * FROM ACCOUNT_CARD_ROWS WITH (NOLOCK)");
+        assertThat(refs).hasSize(1);
+        assertThat(refs.get(0).schemaKind()).isEqualTo(SchemaKind.UNQUALIFIED);
+        assertThat(refs.get(0).table()).isEqualTo("ACCOUNT_CARD_ROWS");
+    }
+
+    @Test
+    void unqualified_join_target_marked_unqualified() {
+        List<TableRef> refs = WorkcubeSqlTableRefScanner.scan(
+                "SELECT * FROM [{schema}].[INVOICE] I "
+                        + "LEFT JOIN SECRET_TABLE S ON S.ID = I.ID");
+        assertThat(refs).hasSize(2);
+        assertThat(refs).extracting(TableRef::schemaKind)
+                .contains(SchemaKind.PLACEHOLDER, SchemaKind.UNQUALIFIED);
+    }
+
+    @Test
+    void unqualified_does_not_match_inside_two_part_ref() {
+        // After bracketed match, the scanner should not double-count
+        // the embedded table name as unqualified.
+        List<TableRef> refs = WorkcubeSqlTableRefScanner.scan(
+                "FROM [{schema}].[CARI_ROWS]");
+        assertThat(refs).hasSize(1);
+        assertThat(refs.get(0).schemaKind()).isEqualTo(SchemaKind.PLACEHOLDER);
+    }
+
     @Test
     void position_metadata_tracks_source_offset() {
         // Position tracks character offset for diagnostic error messages
