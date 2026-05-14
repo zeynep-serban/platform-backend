@@ -1,0 +1,56 @@
+# WireMock IT profile — full-chain HTTP integration smoke for the
+# impersonation broker. Codex 019e2022 strategy AGREE'd.
+#
+# Base URLs are overridden at runtime via @DynamicPropertySource in
+# AuthImpersonationWireMockIT to point to the in-memory WireMock server.
+# This profile only pins the static knobs that must NOT come from the
+# default application.properties (Vault, Eureka, etc.).
+
+spring:
+  cloud:
+    vault:
+      enabled: false
+  datasource:
+    url: jdbc:h2:mem:wiremock-it;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Spring Security JWT decoder is bypassed by SecurityMockMvcRequestPostProcessors.jwt();
+          # these placeholder URIs only exist to satisfy bean wiring at startup.
+          issuer-uri: http://localhost:8081/realms/wiremock-it
+          jwk-set-uri: http://localhost:8081/realms/wiremock-it/protocol/openid-connect/certs
+
+auth:
+  impersonation:
+    # WireMock-stubbed token endpoint; KeycloakBrokerClient itself is @MockBean'd
+    # in this fixture so this URL is never actually called by the broker tests.
+    keycloak-token-url: http://localhost:0/realms/wiremock-it/protocol/openid-connect/token
+    broker-client-id: impersonation-broker
+    # Non-secret placeholder values; env override allowed for parameterised runs.
+    broker-client-secret: ${IT_BROKER_SECRET:wiremock-it}
+    exchange-audience: account
+
+permission:
+  audit-mirror:
+    internal-api-key: ${IT_INTERNAL_KEY:wiremock-it}
+
+management:
+  endpoints:
+    access:
+      default: none
+
+eureka:
+  client:
+    enabled: false
+
+logging:
+  level:
+    root: WARN
+    com.example.auth.impersonation: INFO
