@@ -25,6 +25,19 @@ public class KeycloakUserProvisionRequest {
 
     private Integer sessionTimeoutMinutes;
 
+    /**
+     * Keycloak subject UUID (the "sub" claim of the user's KC tokens).
+     * Codex 019e2022 follow-up: BUG #1 prevention — if this field is
+     * null on a freshly-provisioned user, the auth-service impersonation
+     * broker rejects every impersonation attempt with
+     * TARGET_SUBJECT_UNRESOLVABLE (Step 1f). The caller should always
+     * supply this value at provision time. Optional for backward
+     * compatibility with older callers that handled backfill via the
+     * separate {@code RB-kc-subject-backfill.md} runbook.
+     */
+    @Size(max = 64)
+    private String kcSubject;
+
     public String getEmail() {
         return email;
     }
@@ -63,5 +76,13 @@ public class KeycloakUserProvisionRequest {
 
     public void setSessionTimeoutMinutes(Integer sessionTimeoutMinutes) {
         this.sessionTimeoutMinutes = sessionTimeoutMinutes;
+    }
+
+    public String getKcSubject() {
+        return kcSubject;
+    }
+
+    public void setKcSubject(String kcSubject) {
+        this.kcSubject = kcSubject;
     }
 }
