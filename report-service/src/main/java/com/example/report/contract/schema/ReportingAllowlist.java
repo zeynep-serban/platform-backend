@@ -48,9 +48,11 @@ public final class ReportingAllowlist {
     }
 
     /**
-     * Pre-SEAL V1 allowlist — 23 ADR-0012-SS canonical + extras surfaced
-     * in the current 32 report definitions. {@code V2} succeeds this set
-     * after Faz 16.1 annex 2A SEAL.
+     * Pre-SEAL V1 allowlist — 40 tables: 23 ADR-0012-SS canonical + 7
+     * existing-report {@code source} field entries + 10 sourceQuery JOIN-target
+     * entries surfaced by the Adım 11.2a sourceQuery inventory sweep (Codex
+     * iter-20 absorb). {@code V2} succeeds this set after Faz 16.1 annex 2A
+     * SEAL.
      */
     public static final Set<String> V1 = Set.of(
             // ADR-0012-SS §2.2 23 canonical
@@ -77,15 +79,25 @@ public final class ReportingAllowlist {
             "SETUP_PROCESS_CAT",
             "EMPLOYEE_POSITIONS",
             "EMPLOYEES_SALARY",
-            // Existing report JSON sources (regression-safety; surfaced in
-            // src/main/resources/reports/*.json)
+            // Existing report `source` regression-safety (7)
             "BUDGET_PLAN_ROW",
             "EMPLOYEES_IN_OUT",
             "EMPLOYEES_PUANTAJ_ROWS",
             "EMPLOYEES_SALARY_HISTORY",
             "EMPLOYEE_DAILY_IN_OUT",
             "OFFTIME",
-            "TRAINING_CLASS_ATTENDER"
+            "TRAINING_CLASS_ATTENDER",
+            // Adım 11.2a inventory sweep — sourceQuery JOIN targets (10)
+            "ACCOUNT_PLAN",
+            "COMPANY",
+            "CONSUMER",
+            "EMPLOYEES",
+            "EMPLOYEES_DETAIL",
+            "EMPLOYEES_IDENTY",
+            "EMPLOYEES_PUANTAJ",
+            "EXPENSE_ITEMS",
+            "MONEY_HISTORY",
+            "SETUP_DOCUMENT_TYPE"
     );
 
     /**
