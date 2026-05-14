@@ -1,0 +1,29 @@
+# Deferred Stub Rules — R16 close-out discipline registry
+#
+# ContractRule.validate() metodu davranışsız (sadece `return List.of();` body)
+# implementasyonların explicit kayıt yeri. Bu dosyaya kayıtlı olmayan stub'lar
+# `ContractRuleStubDetectorTest` ile CI'da FAIL ettirilir.
+#
+# Yeni stub eklemek için: deferral_until tarihi + owner + reason + tracking_pr
+# zorunlu. deferral_until tarihi geçtikten sonra ya stub implement edilir ya da
+# kayıt güncellenir (yeniden gözden geçirme; deferral suistimal kapısı değildir).
+#
+# Reference: ADR-0017 Contract-Registry Cross-Check Pattern, R16 close-out
+# discipline gap (session-handoff-2026-05-14-session-53).
+
+deferred_stub_rules:
+  - rule_id: RC-009
+    file: RC009ActionScopeValid.java
+    reason: "actions field henüz ReportDefinition record'una parse edilmedi; Faz 2 Program 1c migration ile actions[] field eklenir + bu rule wire edilir."
+    owner: platform-team
+    deferral_until: "2026-06-30"
+    tracking_pr: 193
+    adr: ADR-0017
+
+  - rule_id: RC-010
+    file: RC010DestructiveActionRequiresPermissionAndConfirm.java
+    reason: "actions[] field henüz ReportDefinition record'una parse edilmedi; RC-009 ile aynı 1c migration ile wire edilecek. destructive=true + permission + confirmation enforcement."
+    owner: platform-team
+    deferral_until: "2026-06-30"
+    tracking_pr: 193
+    adr: ADR-0017

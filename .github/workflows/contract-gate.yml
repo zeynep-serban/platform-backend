@@ -29,11 +29,14 @@ jobs:
           distribution: temurin
           cache: maven
 
-      - name: Run report contract gate test
+      - name: Run report contract gate test + R16 stub detector
         id: gate
         continue-on-error: true
         working-directory: .
-        run: ./mvnw -B -q -pl report-service -am test -Dtest=ReportDefinitionContractTest -Dsurefire.failIfNoSpecifiedTests=false
+        # R16 PR-A (Codex 019e2804 REVISE P1 absorb): contract gate lane
+        # now includes ContractRuleStubDetectorTest so silent RC stub
+        # regressions are caught here (not only via full reactor test).
+        run: ./mvnw -B -q -pl report-service -am test -Dtest='ReportDefinitionContractTest,ContractRuleStubDetectorTest' -Dsurefire.failIfNoSpecifiedTests=false
 
       - name: Ensure comment.md exists (failure fallback)
         if: always()
