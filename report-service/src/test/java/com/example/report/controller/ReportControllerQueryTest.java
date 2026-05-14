@@ -481,10 +481,14 @@ class ReportControllerQueryTest {
         }
 
         @Test
-        void groupKeysNull_returns400AndDoesNotQuery() {
-            // PR-0.3 Codex iter-1 absorb: null groupKey would have
-            // silently dropped the ancestor filter and returned rows
-            // from every category.
+        void groupKeysWithNullEntry_acceptedAsBlankFilterMerge() {
+            // PR #4 contract (Codex thread 019e2695, supersedes PR-0.3
+            // null reject): AG Grid SSRM emits `groupKeys=[null]` when
+            // the user expands the "(Blanks)" bucket on a nullable
+            // group column. The merge layer now injects a blank filter
+            // on the ancestor column rather than failing the request
+            // closed. FilterTranslator's existing `blank` semantics
+            // (IS NULL) push the bucket constraint into SQL.
             stubAuthz(true, List.of());
             when(registry.get("any")).thenReturn(Optional.of(report("any")));
             when(columnFilter.getVisibleColumnDefinitions(any(), any()))
@@ -493,9 +497,13 @@ class ReportControllerQueryTest {
                                     150, false, true, false, null),
                             new ColumnDefinition("region", "Region", "text",
                                     150, false, true, false, null)));
+            when(queryEngine.executeGroupedQuery(any(), any(), any(), any(),
+                    any(), any(), anyInt(), anyInt()))
+                    .thenReturn(new com.example.report.query.QueryEngine.PagedData(
+                            java.util.List.of(), 0, 1, 50, java.util.List.of()));
 
             var groupKeys = new java.util.ArrayList<String>();
-            groupKeys.add(null); // ← the offending value
+            groupKeys.add(null);
 
             var dto = new ReportQueryRequestDto(
                     0, 50,
@@ -507,13 +515,64 @@ class ReportControllerQueryTest {
 
             var response = controller.queryReport("any", dto, null, testJwt("admin"));
 
+            assertEquals(200, response.getStatusCode().value());
+
+            @SuppressWarnings("unchecked")
+            org.mockito.ArgumentCaptor<java.util.Map<String, Object>> filterCaptor =
+                    (org.mockito.ArgumentCaptor<java.util.Map<String, Object>>)
+                            (org.mockito.ArgumentCaptor<?>)
+                                    org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+            verify(queryEngine).executeGroupedQuery(any(), any(), any(), any(),
+                    filterCaptor.capture(), any(), anyInt(), anyInt());
+            var mergedFilter = filterCaptor.getValue();
+
+            // Null ancestor key → blank filter on the matching column.
+            assertNotNull(mergedFilter.get("category"),
+                    "category column must carry the merged ancestor filter");
+            @SuppressWarnings("unchecked")
+            var categoryFilter = (java.util.Map<String, Object>) mergedFilter.get("category");
+            assertEquals("blank", categoryFilter.get("type"),
+                    "null ancestor groupKey must merge as a blank filter, "
+                            + "not an equals/null filter");
+            assertFalse(categoryFilter.containsKey("filter"),
+                    "blank filter must not carry a literal value");
+        }
+
+        @Test
+        void groupKeysNullCollidesWithUserFilter_returns400() {
+            // Null ancestor key still collides with a user filterModel
+            // entry on the same column — the merge layer enforces the
+            // single-filter-per-column invariant regardless of whether
+            // the ancestor key value is null or scalar. Compound AND
+            // belongs to a follow-up PR (E4 ancestor filter compound AND).
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("region", "Region", "text",
+                                    150, false, true, false, null)));
+
+            var groupKeys = new java.util.ArrayList<String>();
+            groupKeys.add(null);
+
+            Map<String, Object> userFilter = new java.util.HashMap<>();
+            userFilter.put("category", Map.of("type", "contains", "filter", "FI"));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(
+                            new ColumnVO("category", "Category", "category", null),
+                            new ColumnVO("region", "Region", "region", null)),
+                    null, null, false,
+                    groupKeys, userFilter, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
             assertEquals(400, response.getStatusCode().value());
-            assertEquals("GROUPING_NOT_SUPPORTED",
+            assertEquals("ANCESTOR_FILTER_COLLISION",
                     assertInstanceOf(ReportQueryErrorDto.class, response.getBody()).code());
-            verify(queryEngine, never()).executeQuery(
-                    any(), any(), any(), any(), anyInt(), anyInt());
-            verify(queryEngine, never()).executeGroupedQuery(
-                    any(), any(), any(), any(), any(), any(), anyInt(), anyInt());
         }
 
         @Test

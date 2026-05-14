@@ -11,6 +11,7 @@ import com.example.report.registry.ReportDefinition;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -91,7 +92,7 @@ class RlsExecutionMssqlIntegrationTest {
                 "CREATE TABLE [" + TEST_SCHEMA + "].[tx_rls] ("
                         + "id INT NOT NULL PRIMARY KEY, "
                         + "owner_id INT NOT NULL, "
-                        + "category NVARCHAR(20) NOT NULL, "
+                        + "category NVARCHAR(20) NULL, "  // PR #4: nullable so the IS NULL bucket test can seed a null row
                         + "amount DECIMAL(18,2) NOT NULL)");
         List<String> seeds = List.of(
                 "INSERT INTO [" + TEST_SCHEMA + "].[tx_rls] VALUES (1, 100, 'FIN', 10.00)",
@@ -241,6 +242,69 @@ class RlsExecutionMssqlIntegrationTest {
         List<Map<String, Object>> rows = jdbc.queryForList(q.sql(), q.params());
 
         assertThat(rows).hasSize(6);
+    }
+
+    /**
+     * PR #4 (Codex 019e2695) cross-feature proof: RLS + nullable
+     * group column. The fixture is seeded with one row whose
+     * {@code category} is {@code NULL}; a scoped user expanding the
+     * "(Blanks)" bucket should see only that row, and only when their
+     * RLS scope permits the owner.
+     */
+    @Test
+    void rlsCombinesWithNullGroupBucketExpansion() {
+        // Add one NULL-category row to the shared fixture; isolation
+        // is preserved because the row is owned by owner 100 (already
+        // visible to the scoped fixture) and read-only.
+        jdbc.getJdbcTemplate().execute(
+                "INSERT INTO [" + TEST_SCHEMA + "].[tx_rls] "
+                        + "(id, owner_id, category, amount) VALUES (7, 100, NULL, 99.00)");
+
+        ReportDefinition def = rlsDef();
+        AuthzMeResponse authz = companyScopedUser("100", "200");
+
+        RowFilterInjector.RlsResult rls = injector.buildRlsClause(def, authz);
+
+        // Build a filter that exactly matches what mergeAncestorFilters
+        // emits for a null groupKey: {category: {type: blank}}. The
+        // SqlBuilder receives the agGridFilter and pushes it through
+        // FilterTranslator → IS NULL.
+        java.util.Map<String, Object> nullBucketFilter = java.util.Map.of(
+                "category", java.util.Map.of("type", "blank"));
+
+        SqlBuilder.BuiltQuery q = builder.buildDataQuery(
+                def, null, List.of("id", "owner_id", "category", "amount"),
+                nullBucketFilter,
+                List.of(Map.of("colId", "id", "sort", "asc")),
+                rls.whereClause(), rls.params(), 1, 100);
+
+        // Expected SQL composition: RLS + IS NULL on category.
+        assertThat(q.sql())
+                .contains("[owner_id] IN (:_rlsIds)")
+                .contains("[category] IS NULL");
+
+        List<Map<String, Object>> rows = jdbc.queryForList(q.sql(), q.params());
+
+        // Only the new null-category row matches both predicates
+        // (owner 100 ∈ scope, category IS NULL).
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).get("id")).isEqualTo(7);
+        assertThat(rows.get(0).get("category")).isNull();
+
+    }
+
+    /**
+     * Codex 019e2695 review iter-3 absorb: the null-bucket scenario
+     * is the first mutating case in an otherwise read-only shared
+     * fixture. {@link AfterEach} keeps the canonical 6-row baseline
+     * intact unconditionally — including the case where the test
+     * body fails before reaching its inline cleanup, which would
+     * otherwise cascade into the next test.
+     */
+    @AfterEach
+    void resetMutatingFixtureRow() {
+        jdbc.getJdbcTemplate().execute(
+                "DELETE FROM [" + TEST_SCHEMA + "].[tx_rls] WHERE id = 7");
     }
 
     @Test

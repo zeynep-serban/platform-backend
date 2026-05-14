@@ -430,9 +430,13 @@ public class ReportController {
      *   <li>Duplicate {@code rowGroupCols.field} entries are rejected
      *       (a path with two of the same column would either silently
      *       collapse a level or break the ancestor-filter merge).</li>
-     *   <li>{@code groupKeys[i] == null} is rejected — IS NULL bucket
-     *       support would need a separate filter contract, out of
-     *       scope for PR-0.3.</li>
+     *   <li>{@code groupKeys[i] == null} is accepted as an
+     *       {@code IS NULL} ancestor key (PR #4 contract, Codex thread
+     *       {@code 019e2695}): AG Grid SSRM emits this when the user
+     *       expands the "(Blanks)" bucket on a nullable group column.
+     *       {@link #mergeAncestorFilters} renders the entry as a
+     *       {@code blank} filter so {@link com.example.report.query.FilterTranslator}
+     *       pushes it down to {@code WHERE [col] IS NULL}.</li>
      * </ul>
      */
     private static boolean multiLevelGroupRequest(ReportQueryRequestDto req,
@@ -446,13 +450,9 @@ public class ReportController {
         // claims to have expanded deeper than the path defines.
         int gkSize = req.groupKeys() != null ? req.groupKeys().size() : 0;
         if (gkSize > req.rowGroupCols().size()) return false;
-        // Null groupKey is malformed; IS NULL bucket support is a
-        // separate contract.
-        if (req.groupKeys() != null) {
-            for (String key : req.groupKeys()) {
-                if (key == null) return false;
-            }
-        }
+        // PR #4: null groupKey is no longer rejected here. It is
+        // accepted as an IS NULL ancestor expansion and merged as a
+        // blank filter by {@link #mergeAncestorFilters}.
         Set<String> seenFields = new java.util.HashSet<>();
         for (var rgc : req.rowGroupCols()) {
             if (rgc == null || rgc.field() == null) return false;
@@ -488,6 +488,17 @@ public class ReportController {
      *       SQL Server driver accepts ISO-8601). Parse failures become
      *       a structured 400 so a client never sees a silent SQL
      *       implicit-conversion result.</li>
+     *   <li>PR #4 (Codex thread {@code 019e2695}): a {@code null}
+     *       ancestor key renders as a {@code blank} filter entry rather
+     *       than an {@code equals null} (which {@code Map.of} cannot
+     *       even represent and which is the wrong SQL semantics
+     *       anyway). {@link com.example.report.query.FilterTranslator}
+     *       already maps {@code blank} → {@code [col] IS NULL}, so the
+     *       AG Grid "(Blanks)" expansion case now lights up end-to-end
+     *       without any further wiring. Collision detection runs first
+     *       — a {@code null} ancestor key on a column that also has a
+     *       user filterModel entry still throws
+     *       {@link AncestorFilterCollisionException}.</li>
      * </ul>
      */
     private static Map<String, Object> mergeAncestorFilters(
@@ -514,10 +525,18 @@ public class ReportController {
                                 + "user filter on this column or wait until the "
                                 + "follow-up PR extends FilterTranslator.");
             }
-            Object coercedValue = coerceGroupKey(field, value, byField.get(field));
-            merged.put(field, Map.of(
-                    "type", "equals",
-                    "filter", coercedValue));
+            if (value == null) {
+                // PR #4: null ancestor → blank filter (IS NULL).
+                // coerceGroupKey is intentionally skipped for null
+                // values; there is no scalar to type-coerce, and the
+                // FilterTranslator `blank` branch is type-agnostic.
+                merged.put(field, Map.of("type", "blank"));
+            } else {
+                Object coercedValue = coerceGroupKey(field, value, byField.get(field));
+                merged.put(field, Map.of(
+                        "type", "equals",
+                        "filter", coercedValue));
+            }
         }
         return merged;
     }
