@@ -1,5 +1,6 @@
 package com.example.user.service;
 
+import com.example.user.dto.KeycloakUserProvisionRequest;
 import com.example.user.dto.RegisterRequest;
 import com.example.user.model.User;
 import com.example.user.repository.UserRepository;
@@ -7,6 +8,7 @@ import com.example.user.repository.UserAuditEventRepository;
 import com.example.user.authz.AuthorizationContextService;
 import com.example.commonauth.AuthorizationContext;
 import com.example.user.permission.UserAuditMirrorClient;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -191,6 +193,110 @@ class UserServiceTest {
         assertEquals(1, result.getTotalElements()); // sadece company_id NULL kayıtlar görünür
         verify(userRepository, never()).findAll(any(Pageable.class));
         verify(userRepository).findAll(any(org.springframework.data.jpa.domain.Specification.class), any(Pageable.class));
+    }
+
+    // ------------------------------------------------------------------
+    // kc_subject auto-backfill regression tests (Codex 019e2022 follow-up,
+    // BUG #1 prevention at the provisioning boundary).
+    //
+    // Pinning the contract: when /api/v1/users/internal/provision is
+    // called with a `kcSubject` field, the persisted User row must carry
+    // it. Without that, freshly-provisioned users land with kc_subject=null
+    // and the auth-service impersonation broker rejects every attempt to
+    // impersonate them with TARGET_SUBJECT_UNRESOLVABLE (Step 1f).
+    // ------------------------------------------------------------------
+
+    @Test
+    void provisionFromKeycloak_persistsKcSubjectWhenSupplied() {
+        // arrange — fresh user (existsByEmail false), DTO carries kcSubject
+        KeycloakUserProvisionRequest request = new KeycloakUserProvisionRequest();
+        request.setEmail("new.user@example.com");
+        request.setName("New User");
+        request.setEnabled(true);
+        request.setRole("USER");
+        request.setKcSubject("kc-subject-uuid-fresh");
+
+        when(userRepository.findByEmail("new.user@example.com")).thenReturn(java.util.Optional.empty());
+        when(passwordEncoder.encode(any(String.class))).thenReturn("random-encoded");
+        ArgumentCaptor<User> savedUser = ArgumentCaptor.forClass(User.class);
+        when(userRepository.save(savedUser.capture())).thenAnswer(inv -> inv.getArgument(0));
+
+        // act
+        User result = userService.provisionFromKeycloak(request);
+
+        // assert — captured user has kcSubject from request
+        assertEquals("kc-subject-uuid-fresh", savedUser.getValue().getKcSubject());
+        assertEquals("kc-subject-uuid-fresh", result.getKcSubject());
+    }
+
+    @Test
+    void provisionFromKeycloak_preservesExistingKcSubjectWhenRequestOmitsIt() {
+        // arrange — existing user has a kcSubject, request omits the field
+        User existing = new User();
+        existing.setId(42L);
+        existing.setEmail("existing@example.com");
+        existing.setName("Existing Name");
+        existing.setKcSubject("kc-subject-already-set");
+        existing.setEnabled(true);
+
+        KeycloakUserProvisionRequest request = new KeycloakUserProvisionRequest();
+        request.setEmail("existing@example.com");
+        request.setName("Updated Name");
+        // kcSubject intentionally left null — older callers that don't
+        // know about the field must NOT wipe a backfilled subject.
+
+        when(userRepository.findByEmail("existing@example.com")).thenReturn(java.util.Optional.of(existing));
+        ArgumentCaptor<User> savedUser = ArgumentCaptor.forClass(User.class);
+        when(userRepository.save(savedUser.capture())).thenAnswer(inv -> inv.getArgument(0));
+
+        // act
+        userService.provisionFromKeycloak(request);
+
+        // assert — the captured user kept the existing kcSubject untouched
+        assertEquals("kc-subject-already-set", savedUser.getValue().getKcSubject());
+    }
+
+    @Test
+    void provisionFromKeycloak_leavesKcSubjectNullWhenRequestOmitsAndUserIsFresh() {
+        // arrange — fresh user, request omits kcSubject (older caller)
+        KeycloakUserProvisionRequest request = new KeycloakUserProvisionRequest();
+        request.setEmail("legacy@example.com");
+        request.setName("Legacy Provision");
+        request.setEnabled(true);
+        // kcSubject left null
+
+        when(userRepository.findByEmail("legacy@example.com")).thenReturn(java.util.Optional.empty());
+        when(passwordEncoder.encode(any(String.class))).thenReturn("random-encoded");
+        ArgumentCaptor<User> savedUser = ArgumentCaptor.forClass(User.class);
+        when(userRepository.save(savedUser.capture())).thenAnswer(inv -> inv.getArgument(0));
+
+        // act
+        userService.provisionFromKeycloak(request);
+
+        // assert — kcSubject stays null. This pins the regression: such
+        // users CANNOT be impersonated until the kc_subject backfill
+        // runbook (RB-kc-subject-backfill.md) is run. New callers SHOULD
+        // supply the value at provision time.
+        assertNull(savedUser.getValue().getKcSubject());
+    }
+
+    @Test
+    void registerUser_doesNotPopulateKcSubject_documentedGap() {
+        // BUG #1 prevention documentation: the (deprecated) registerUser
+        // path does NOT know about Keycloak and therefore leaves
+        // kc_subject null. Future callers that need impersonable users
+        // must go through /internal/provision with a kcSubject value, or
+        // run the backfill runbook afterwards.
+        when(userRepository.existsByEmail(any(String.class))).thenReturn(false);
+        when(passwordEncoder.encode(any(String.class))).thenReturn("hashed");
+        ArgumentCaptor<User> savedUser = ArgumentCaptor.forClass(User.class);
+        when(userRepository.save(savedUser.capture())).thenAnswer(inv -> inv.getArgument(0));
+
+        userService.registerUser(registerRequest);
+
+        // Pin the current behaviour — change this assertion when the
+        // register path learns about Keycloak subject seeding.
+        assertNull(savedUser.getValue().getKcSubject());
     }
 }
 

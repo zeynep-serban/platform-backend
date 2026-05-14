@@ -312,6 +312,16 @@ public class UserService implements UserDetailsService { // UserDetailsService a
         target.setDateFormat(resolveRequestedDateFormat(target.getDateFormat()));
         target.setTimeFormat(resolveRequestedTimeFormat(target.getTimeFormat()));
 
+        // Codex 019e2022 follow-up — BUG #1 prevention: persist the
+        // Keycloak subject UUID when the caller supplies one. Without
+        // this the auth-service impersonation broker rejects every
+        // impersonation attempt for the user with TARGET_SUBJECT_UNRESOLVABLE.
+        // Only overwrite when the request actually carries a value; this
+        // preserves any backfilled subject on the existing row.
+        if (StringUtils.hasText(request.getKcSubject())) {
+            target.setKcSubject(request.getKcSubject().trim());
+        }
+
         return userRepository.save(target);
     }
 
