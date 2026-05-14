@@ -141,7 +141,7 @@ jobs:
     # so Testcontainers picks the daemon up without overrides. The
     # `integration-tests` Maven profile flips Surefire's group filter
     # to include only @Tag("integration") classes — currently just
-    # SqlBuilderMssqlIntegrationTest in this module.
+    # SqlBuilderMssqlIntegrationTest, WorkcubeQueryAdapterIT in this module.
 
     steps:
       - name: Checkout
@@ -158,7 +158,7 @@ jobs:
         run: ./mvnw -q -pl common-auth install -DskipTests
 
       - name: Run report-service MSSQL Testcontainers integration tests
-        run: ./mvnw -q -pl report-service test -Pintegration-tests -Dtest='SqlBuilderMssqlIntegrationTest'
+        run: ./mvnw -q -pl report-service test -Pintegration-tests -Dtest='SqlBuilderMssqlIntegrationTest,WorkcubeQueryAdapterIT'
 
   auth-service-impersonation-it:
     name: auth-service impersonation WireMock IT (Session 47 Faz 1)
