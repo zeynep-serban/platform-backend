@@ -1,5 +1,6 @@
 package com.example.report.query;
 
+import com.example.report.registry.PivotValue;
 import com.example.report.registry.ReportDefinition;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -43,6 +44,31 @@ public class SqlBuilder {
      * caller builders can attach them to the final {@link BuiltQuery}).
      */
     private record FromClauseResult(String sql, List<DegradationWarning> warnings) {}
+
+    /**
+     * PR-0.4b (Codex thread {@code 019e2695}): SQL artifact + ordered pivot
+     * alias list produced by {@link #buildPivotedGroupedQuery}. The alias
+     * list mirrors AG Grid SSRM's {@code pivotResultFields} contract — the
+     * controller surfaces it on the response envelope so the frontend can
+     * register secondary columns without re-deriving the alias format from
+     * the result rows alone.
+     *
+     * <p>The list is always immutable (copy on construction) so a future
+     * controller-side mutation can't poison the response shape mid-flight.
+     */
+    public record PivotedBuiltQuery(
+            String sql,
+            MapSqlParameterSource params,
+            List<DegradationWarning> warnings,
+            List<String> pivotResultFields) {
+
+        public PivotedBuiltQuery {
+            warnings = warnings == null ? List.of() : List.copyOf(warnings);
+            pivotResultFields = pivotResultFields == null
+                    ? List.of()
+                    : List.copyOf(pivotResultFields);
+        }
+    }
 
     /** Codex iter-3: lookup table the placeholder targets (currently single). */
     private static final String SETUP_PROCESS_CAT_TABLE = "SETUP_PROCESS_CAT";
@@ -561,6 +587,345 @@ public class SqlBuilder {
         sql.append(") AS _g");
 
         return new BuiltQuery(sql.toString(), params, fromResult.warnings());
+    }
+
+    // ── Pivot queries (PR-0.4b single-level pivot) ──────────────────────
+
+    /**
+     * PR-0.4b aggregate funcs that are allowed inside a pivot {@code CASE
+     * WHEN} expression. Subset of {@link #ALLOWED_AGG_FUNCS}. The
+     * percentile family ({@code median}, {@code percentilecont}) is
+     * intentionally excluded — both depend on MSSQL's
+     * {@code PERCENTILE_CONT} window function which cannot be re-emitted
+     * one-per-pivot-bucket without a more elaborate wrapping shape; that
+     * work is deferred to a future PR.
+     */
+    private static final Set<String> ALLOWED_PIVOT_AGG_FUNCS = Set.of(
+            "sum", "avg", "min", "max", "count",
+            "stddev", "stddevp", "distinctcount");
+
+    /**
+     * PR-0.4b (Codex thread {@code 019e2695}): controller-side cap on the
+     * total number of pivot-derived response columns. With one pivot
+     * column the materialised count is {@code pivotValues * valueCols};
+     * 8 × 4 = 32 is the upper ceiling AG Grid can render without
+     * destabilising the secondary-column rendering budget.
+     */
+    public static final int MAX_PIVOT_OUTPUT_COLUMNS = 32;
+
+    /**
+     * Render the pivot-bucket aggregate expression for a single
+     * {@link GroupedAggregation} + {@link PivotValue} pair.
+     *
+     * <p>Agg-specific null semantics (Codex Q5 verdict):
+     * <ul>
+     *   <li>{@code sum} → {@code SUM(CASE WHEN [pivot] = :p THEN [field] ELSE 0 END)}.
+     *       Finance pivots want a zero-rather-than-NULL cell when the
+     *       bucket is empty, matching every prior MSSQL pivot the
+     *       Workcube reports ship today.</li>
+     *   <li>{@code avg} → {@code AVG(CASE WHEN [pivot] = :p THEN [field] END)}.
+     *       The {@code ELSE 0} branch would otherwise drag every
+     *       out-of-bucket row into the denominator, biasing the
+     *       average towards zero.</li>
+     *   <li>{@code min}, {@code max} → {@code MIN/MAX(CASE WHEN ... END)};
+     *       same null-pass-through rationale as AVG.</li>
+     *   <li>{@code count} → {@code COUNT(CASE WHEN ... THEN [field] END)}.
+     *       Out-of-bucket rows produce NULL and {@code COUNT(NULL)} omits
+     *       them automatically, matching the legacy {@code COUNT([field])}
+     *       semantic (non-null count).</li>
+     *   <li>{@code distinctcount} → {@code COUNT(DISTINCT CASE WHEN ... END)}.</li>
+     *   <li>{@code stddev}, {@code stddevp} → wrap MSSQL's
+     *       {@code STDEV}/{@code STDEVP} aggregates the same way as AVG.</li>
+     * </ul>
+     *
+     * <p>The pivot value comparison is bound as the named parameter
+     * referenced by {@code paramName} so the predicate never carries a
+     * raw SQL literal (NVARCHAR / collation / N-prefix concerns all
+     * stay JDBC-owned).
+     */
+    private static String renderPivotAggExpression(
+            GroupedAggregation a, String pivotField, String paramName) {
+        String field = a.field();
+        String predicate = "[" + pivotField + "] = :" + paramName;
+        return switch (a.func()) {
+            case "sum" -> "SUM(CASE WHEN " + predicate
+                    + " THEN [" + field + "] ELSE 0 END)";
+            case "avg" -> "AVG(CASE WHEN " + predicate
+                    + " THEN [" + field + "] END)";
+            case "min" -> "MIN(CASE WHEN " + predicate
+                    + " THEN [" + field + "] END)";
+            case "max" -> "MAX(CASE WHEN " + predicate
+                    + " THEN [" + field + "] END)";
+            case "count" -> "COUNT(CASE WHEN " + predicate
+                    + " THEN [" + field + "] END)";
+            case "distinctcount" -> "COUNT(DISTINCT CASE WHEN " + predicate
+                    + " THEN [" + field + "] END)";
+            case "stddev" -> "STDEV(CASE WHEN " + predicate
+                    + " THEN [" + field + "] END)";
+            case "stddevp" -> "STDEVP(CASE WHEN " + predicate
+                    + " THEN [" + field + "] END)";
+            default -> throw new IllegalStateException(
+                    a.func() + " aggregation is not supported inside a pivot "
+                            + "CASE WHEN expression");
+        };
+    }
+
+    /**
+     * PR-0.4b (Codex thread {@code 019e2695}): deterministic SQL alias for
+     * a single (pivotField, pivotValue, aggFunc, valueField) tuple. AG
+     * Grid SSRM addresses pivot result fields by this identifier on both
+     * server-mode and client-mode, so the format must stay stable across
+     * the request lifecycle.
+     *
+     * <p>Format: {@code pvt__<pivotField>__<sanitizedValueKey>__<aggFunc>__<valueField>}
+     *
+     * <p>The pivot value key is sanitised through {@link #sanitizeAliasToken}
+     * so registry-supplied labels containing spaces, slashes, Turkish
+     * characters, or other identifier-hostile codepoints can't break the
+     * SQL alias contract. The pivot field, agg func and value field are
+     * already constrained to allowlisted column names / function tokens
+     * upstream, so they ride through unchanged.
+     */
+    public static String pivotAlias(String pivotField, String pivotValueKey,
+                                     String aggFunc, String valueField) {
+        return "pvt__" + pivotField
+                + "__" + sanitizeAliasToken(pivotValueKey)
+                + "__" + aggFunc
+                + "__" + valueField;
+    }
+
+    /**
+     * Map any pivot value key to a deterministic, identifier-friendly
+     * token so the materialised SQL alias is reproducible no matter
+     * what unicode codepoints the registry carries. Non-alphanumeric
+     * codepoints collapse into {@code _} and consecutive underscores
+     * fold into one; pure-underscore tokens fall back to a stable
+     * hash so two different registry values can't share the same
+     * sanitised alias suffix.
+     */
+    private static String sanitizeAliasToken(String token) {
+        if (token == null || token.isBlank()) {
+            return "_blank";
+        }
+        StringBuilder sb = new StringBuilder(token.length());
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9')) {
+                sb.append(c);
+            } else {
+                if (sb.length() == 0 || sb.charAt(sb.length() - 1) != '_') {
+                    sb.append('_');
+                }
+            }
+        }
+        // Trim trailing underscore so two adjacent tokens don't collapse
+        // into an ambiguous `pvt__field__value___sum__amount`.
+        while (sb.length() > 0 && sb.charAt(sb.length() - 1) == '_') {
+            sb.deleteCharAt(sb.length() - 1);
+        }
+        if (sb.length() == 0) {
+            // Pure-non-alphanumeric token (e.g. punctuation-only label).
+            // Use the original token's hash to keep the alias injective:
+            // two different sanitised-to-empty registry values must not
+            // resolve to the same SQL alias.
+            return "h" + Integer.toHexString(token.hashCode() & 0x7fffffff);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Build the SSRM single-level pivot query (PR-0.4b). SQL shape:
+     * <pre>{@code
+     * SELECT [groupColumn],
+     *        COUNT(*) AS [_rowCount],
+     *        SUM(CASE WHEN [pivot] = :pv_0 THEN [v] ELSE 0 END) AS [pvt__pivot__a__sum__v],
+     *        SUM(CASE WHEN [pivot] = :pv_1 THEN [v] ELSE 0 END) AS [pvt__pivot__b__sum__v]
+     *   FROM <fromClause>
+     *  GROUP BY [groupColumn]
+     *  ORDER BY [groupColumn] ASC
+     *  OFFSET :_offset ROWS FETCH NEXT :_pageSize ROWS ONLY;
+     * }</pre>
+     *
+     * <p>Caller contract:
+     * <ul>
+     *   <li>{@code groupColumn} must be in {@code visibleColumns}.</li>
+     *   <li>{@code pivotColumn} must be in {@code visibleColumns} and
+     *       distinct from {@code groupColumn}.</li>
+     *   <li>{@code pivotValues} must be non-empty and ≤
+     *       {@link com.example.report.registry.ColumnDefinition#MAX_PIVOT_VALUES}.
+     *       Combined cap with {@code valueCols}:
+     *       {@code pivotValues.size() * aggregations.size()
+     *       <= MAX_PIVOT_OUTPUT_COLUMNS}.</li>
+     *   <li>Each {@link GroupedAggregation#field()} must be in
+     *       {@code visibleColumns}; aggregations targeting the group or
+     *       pivot column are dropped (tautological).</li>
+     *   <li>Agg funcs must be in {@link #ALLOWED_PIVOT_AGG_FUNCS};
+     *       {@code median} / {@code percentilecont} are reserved for a
+     *       future PR.</li>
+     * </ul>
+     *
+     * <p>RLS, filter and sort handling mirror {@link #buildGroupedQuery}.
+     * Pivot value bindings use the named parameter prefix {@code _pivot_<n>}
+     * to avoid colliding with the filter translator's prefixes.
+     */
+    public PivotedBuiltQuery buildPivotedGroupedQuery(
+            ReportDefinition def,
+            YearlySchemaResolver.ResolvedSchemas resolvedSchemas,
+            List<String> visibleColumns,
+            String groupColumn,
+            String pivotColumn,
+            List<PivotValue> pivotValues,
+            List<GroupedAggregation> aggregations,
+            Map<String, Object> agGridFilter,
+            List<Map<String, String>> sortModel,
+            String rlsWhereClause,
+            MapSqlParameterSource rlsParams,
+            int page,
+            int pageSize) {
+
+        Set<String> allowedCols = Set.copyOf(visibleColumns);
+        if (groupColumn == null || !allowedCols.contains(groupColumn)) {
+            throw new IllegalArgumentException(
+                    "groupColumn must be one of the visible columns, got: " + groupColumn);
+        }
+        if (pivotColumn == null || !allowedCols.contains(pivotColumn)) {
+            throw new IllegalArgumentException(
+                    "pivotColumn must be one of the visible columns, got: " + pivotColumn);
+        }
+        if (pivotColumn.equals(groupColumn)) {
+            throw new IllegalArgumentException(
+                    "pivotColumn must differ from groupColumn (got "
+                            + pivotColumn + " for both)");
+        }
+        if (pivotValues == null || pivotValues.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "pivotValues must be non-empty for a pivot query");
+        }
+
+        // Drop aggregations that target the group or pivot column
+        // (tautological) and any field outside the visibility allow-list.
+        List<GroupedAggregation> sanitized = new java.util.ArrayList<>();
+        Set<String> projectedFields = new java.util.LinkedHashSet<>();
+        projectedFields.add(groupColumn);
+        projectedFields.add(pivotColumn);
+        for (GroupedAggregation a : aggregations != null
+                ? aggregations
+                : List.<GroupedAggregation>of()) {
+            if (!allowedCols.contains(a.field())) continue;
+            if (a.field().equals(groupColumn) || a.field().equals(pivotColumn)) {
+                continue;
+            }
+            if (!ALLOWED_PIVOT_AGG_FUNCS.contains(a.func())) {
+                throw new IllegalArgumentException(
+                        "Aggregation func '" + a.func() + "' is not supported "
+                                + "inside a pivot query (allowed: "
+                                + ALLOWED_PIVOT_AGG_FUNCS + ")");
+            }
+            projectedFields.add(a.field());
+            sanitized.add(a);
+        }
+        if (sanitized.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Pivot query requires at least one valid aggregation "
+                            + "outside the group/pivot columns");
+        }
+        long totalOutputColumns = (long) pivotValues.size() * sanitized.size();
+        if (totalOutputColumns > MAX_PIVOT_OUTPUT_COLUMNS) {
+            throw new IllegalArgumentException(
+                    "Pivot output column budget exceeded: pivotValues("
+                            + pivotValues.size() + ") * valueCols("
+                            + sanitized.size() + ") = " + totalOutputColumns
+                            + " > " + MAX_PIVOT_OUTPUT_COLUMNS);
+        }
+
+        String selectCols = projectedFields.stream()
+                .map(c -> "[" + c + "]")
+                .collect(Collectors.joining(", "));
+
+        MapSqlParameterSource params = new MapSqlParameterSource();
+        FilterTranslator.FilterResult filterResult =
+                filterTranslator.translate(agGridFilter, allowedCols);
+        FromClauseResult fromResult = buildFromClause(def, resolvedSchemas,
+                selectCols, rlsWhereClause, rlsParams, filterResult, params);
+
+        StringBuilder sql = new StringBuilder();
+        sql.append("SELECT [").append(groupColumn).append("]");
+        sql.append(", COUNT(*) AS [_rowCount]");
+
+        List<String> pivotResultFields = new ArrayList<>();
+        // Outer iteration: pivot value first, then aggregation. AG Grid's
+        // pivotResultFields contract puts the value buckets adjacent so
+        // column groups read naturally left-to-right.
+        for (int pi = 0; pi < pivotValues.size(); pi++) {
+            PivotValue pv = pivotValues.get(pi);
+            String paramName = "_pivot_" + pi;
+            params.addValue(paramName, pv.value());
+            for (GroupedAggregation a : sanitized) {
+                String alias = pivotAlias(pivotColumn, pv.value(),
+                        a.func(), a.field());
+                pivotResultFields.add(alias);
+                sql.append(", ")
+                        .append(renderPivotAggExpression(a, pivotColumn, paramName))
+                        .append(" AS [").append(alias).append("]");
+            }
+        }
+
+        sql.append(" FROM ").append(fromResult.sql());
+        sql.append(" GROUP BY [").append(groupColumn).append("]");
+
+        // Pivot result aliases participate in client-visible sort just
+        // like regular aggregate aliases — translateGroupedSort already
+        // honours every alias it is told about. Build an allow list and
+        // wire the pivot aliases in alongside the group column.
+        String orderBy = translatePivotedSort(sortModel, groupColumn,
+                pivotResultFields);
+        sql.append(" ORDER BY ").append(orderBy);
+
+        int offset = (page - 1) * pageSize;
+        sql.append(" OFFSET :_offset ROWS FETCH NEXT :_pageSize ROWS ONLY");
+        params.addValue("_offset", offset);
+        params.addValue("_pageSize", pageSize);
+
+        return new PivotedBuiltQuery(sql.toString(), params,
+                fromResult.warnings(), pivotResultFields);
+    }
+
+    /**
+     * PR-0.4b: derive an ORDER BY for a pivoted grouped query. Same
+     * deterministic-paging contract as {@link #translateGroupedSort}
+     * but the allow-list is the group column plus every pivot result
+     * alias (instead of the raw aggregation fields).
+     */
+    private String translatePivotedSort(List<Map<String, String>> sortModel,
+                                          String groupColumn,
+                                          List<String> pivotResultFields) {
+        if (sortModel == null || sortModel.isEmpty()) {
+            return "[" + groupColumn + "] ASC";
+        }
+        Set<String> allowedSortCols = new java.util.HashSet<>();
+        allowedSortCols.add(groupColumn);
+        allowedSortCols.addAll(pivotResultFields);
+        StringBuilder sb = new StringBuilder();
+        boolean groupColumnIncluded = false;
+        for (Map<String, String> entry : sortModel) {
+            String colId = entry.get("colId");
+            String dir = entry.get("sort");
+            if (colId == null || !allowedSortCols.contains(colId)) continue;
+            String direction = "desc".equalsIgnoreCase(dir) ? "DESC" : "ASC";
+            if (sb.length() > 0) sb.append(", ");
+            sb.append("[").append(colId).append("] ").append(direction);
+            if (groupColumn.equals(colId)) {
+                groupColumnIncluded = true;
+            }
+        }
+        if (sb.length() == 0) {
+            return "[" + groupColumn + "] ASC";
+        }
+        if (!groupColumnIncluded) {
+            sb.append(", [").append(groupColumn).append("] ASC");
+        }
+        return sb.toString();
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.example.report.registry;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -56,8 +57,18 @@ public record ColumnDefinition(
         boolean aggregatable,
         String defaultAggFunc,
         Map<String, Object> defaultAggParams,
-        boolean pivotable
+        boolean pivotable,
+        List<PivotValue> pivotValues
 ) {
+    /**
+     * PR-0.4b (Codex thread {@code 019e2695}): pivot value cardinality cap.
+     * Eight concrete buckets is the registry-side fail-closed gate; combined
+     * with the {@code pivotValues * valueCols <= 32} controller-side cap it
+     * keeps the {@code CASE WHEN} aggregate column count bounded so a
+     * single report cannot blow past AG Grid's usable column budget.
+     */
+    public static final int MAX_PIVOT_VALUES = 8;
+
     public ColumnDefinition {
         if (field == null || field.isBlank()) {
             throw new IllegalArgumentException("Column field must not be blank");
@@ -76,6 +87,44 @@ public record ColumnDefinition(
                     ? null
                     : Map.copyOf(defaultAggParams);
         }
+        if (pivotValues != null) {
+            if (pivotValues.isEmpty()) {
+                pivotValues = null;
+            } else {
+                if (pivotValues.size() > MAX_PIVOT_VALUES) {
+                    throw new IllegalArgumentException(
+                            "pivotValues size " + pivotValues.size()
+                                    + " exceeds the per-column cap of "
+                                    + MAX_PIVOT_VALUES);
+                }
+                // Reject duplicate SQL values so the alias contract stays
+                // injective; two registry entries that collapse to the
+                // same `[field] = :value` predicate would produce
+                // duplicate response columns AG Grid cannot disambiguate.
+                java.util.Set<String> seen = new java.util.HashSet<>();
+                for (PivotValue pv : pivotValues) {
+                    if (pv == null) {
+                        throw new IllegalArgumentException(
+                                "pivotValues entry must not be null");
+                    }
+                    if (!seen.add(pv.value())) {
+                        throw new IllegalArgumentException(
+                                "pivotValues entries must have unique value, "
+                                        + "duplicate: " + pv.value());
+                    }
+                }
+                pivotValues = List.copyOf(pivotValues);
+            }
+        }
+        // PR-0.4b registry-time note: `pivotable=true` without
+        // `pivotValues` is preserved as-is at the record layer so PR-0.4a
+        // JSON entries that pre-date the {@code pivotValues} field keep
+        // deserialising. The controller-side pivot dispatcher
+        // ({@code multiLevelPivotRequest} + {@code sanitizePivotRequest})
+        // is the authoritative gate: a request that targets a pivotable
+        // column without an enumerated {@code pivotValues} list fails
+        // closed with {@code PIVOT_NOT_CONFIGURED} rather than letting
+        // dynamic {@code SELECT DISTINCT} discovery sneak in.
         if (defaultAggFunc != null) {
             // Locale.ROOT keeps the Turkish dotless-ı pitfall out of the
             // canonical comparison — "MEDIAN".toLowerCase() under tr_TR
@@ -112,7 +161,7 @@ public record ColumnDefinition(
     public ColumnDefinition(String field, String headerName, String type,
                             Integer width, boolean sensitive) {
         this(field, headerName, type, width, sensitive,
-                false, false, null, null, false);
+                false, false, null, null, false, null);
     }
 
     /**
@@ -126,7 +175,7 @@ public record ColumnDefinition(
                             boolean groupable, boolean aggregatable,
                             String defaultAggFunc) {
         this(field, headerName, type, width, sensitive,
-                groupable, aggregatable, defaultAggFunc, null, false);
+                groupable, aggregatable, defaultAggFunc, null, false, null);
     }
 
     /**
@@ -141,6 +190,28 @@ public record ColumnDefinition(
                             String defaultAggFunc,
                             Map<String, Object> defaultAggParams) {
         this(field, headerName, type, width, sensitive,
-                groupable, aggregatable, defaultAggFunc, defaultAggParams, false);
+                groupable, aggregatable, defaultAggFunc, defaultAggParams, false, null);
+    }
+
+    /**
+     * Backward-compatible 10-arg constructor for PR-0.4a call sites
+     * that predate PR-0.4b's {@code pivotValues} field. Defaults the
+     * new list to {@code null} so existing tests and registry entries
+     * continue to deserialize without modification. Note that this
+     * shortcut path bypasses the {@code pivotable=true → pivotValues
+     * required} invariant: callers that hand-build a pivotable column
+     * via the 10-arg path must follow up with the 11-arg canonical
+     * once they have real values, otherwise the controller will
+     * reject pivot requests at runtime.
+     */
+    public ColumnDefinition(String field, String headerName, String type,
+                            Integer width, boolean sensitive,
+                            boolean groupable, boolean aggregatable,
+                            String defaultAggFunc,
+                            Map<String, Object> defaultAggParams,
+                            boolean pivotable) {
+        this(field, headerName, type, width, sensitive,
+                groupable, aggregatable, defaultAggFunc, defaultAggParams,
+                pivotable, null);
     }
 }

@@ -302,4 +302,171 @@ class ColumnDefinitionJacksonTest {
         assertEquals(viaCtor, viaJson);
         assertNotNull(viaCtor.toString());
     }
+
+    // ── PR-0.4b (Codex 019e2695): pivotValues registry contract ────────
+    //
+    // The registry encodes per-pivot-bucket enumeration directly on the
+    // pivot column. Two JSON shapes are supported: bare-string short form
+    // (`pivotValues: ["A", "B"]`) where the SQL value doubles as the
+    // label, and object form (`{"value": "A", "label": "Aktif"}`) for the
+    // common case where the user-facing label differs from the SQL token.
+    // Both shapes round-trip through Jackson without bespoke serializers.
+
+    @Test
+    void pivotValuesShortFormAccepted() throws Exception {
+        String json = """
+                {
+                  "field": "STATUS",
+                  "headerName": "Status",
+                  "type": "text",
+                  "width": 80,
+                  "sensitive": false,
+                  "pivotable": true,
+                  "pivotValues": ["A", "B"]
+                }
+                """;
+
+        ColumnDefinition cd = mapper.readValue(json, ColumnDefinition.class);
+
+        assertTrue(cd.pivotable());
+        assertNotNull(cd.pivotValues());
+        assertEquals(2, cd.pivotValues().size());
+        // Short form: label collapses to value so registry entries stay terse.
+        assertEquals("A", cd.pivotValues().get(0).value());
+        assertEquals("A", cd.pivotValues().get(0).label());
+        assertEquals("B", cd.pivotValues().get(1).value());
+    }
+
+    @Test
+    void pivotValuesObjectFormAccepted() throws Exception {
+        String json = """
+                {
+                  "field": "STATUS",
+                  "headerName": "Status",
+                  "type": "text",
+                  "width": 80,
+                  "sensitive": false,
+                  "pivotable": true,
+                  "pivotValues": [
+                    {"value": "A", "label": "Aktif"},
+                    {"value": "P", "label": "Pasif"}
+                  ]
+                }
+                """;
+
+        ColumnDefinition cd = mapper.readValue(json, ColumnDefinition.class);
+
+        assertNotNull(cd.pivotValues());
+        assertEquals("A", cd.pivotValues().get(0).value());
+        assertEquals("Aktif", cd.pivotValues().get(0).label());
+        assertEquals("P", cd.pivotValues().get(1).value());
+        assertEquals("Pasif", cd.pivotValues().get(1).label());
+    }
+
+    @Test
+    void pivotValuesMixedFormsAccepted() throws Exception {
+        // Registry can intermix shapes when only some entries need
+        // explicit labels — Jackson resolves per-element via PivotValue's
+        // delegating creator.
+        String json = """
+                {
+                  "field": "STATUS",
+                  "headerName": "Status",
+                  "type": "text",
+                  "width": 80,
+                  "sensitive": false,
+                  "pivotable": true,
+                  "pivotValues": [
+                    "A",
+                    {"value": "P", "label": "Pasif"}
+                  ]
+                }
+                """;
+
+        ColumnDefinition cd = mapper.readValue(json, ColumnDefinition.class);
+
+        assertEquals(2, cd.pivotValues().size());
+        assertEquals("A", cd.pivotValues().get(0).label());
+        assertEquals("Pasif", cd.pivotValues().get(1).label());
+    }
+
+    @Test
+    void pivotValuesDuplicateRejected() {
+        // Two registry entries that collapse to the same SQL value would
+        // produce duplicate alias columns AG Grid cannot disambiguate.
+        // Canonical constructor catches the collision at registry load
+        // time rather than at query time.
+        String json = """
+                {
+                  "field": "STATUS",
+                  "headerName": "Status",
+                  "type": "text",
+                  "width": 80,
+                  "sensitive": false,
+                  "pivotable": true,
+                  "pivotValues": ["A", "A"]
+                }
+                """;
+        assertThrows(Exception.class,
+                () -> mapper.readValue(json, ColumnDefinition.class));
+    }
+
+    @Test
+    void pivotValuesAboveCapRejected() {
+        // 9 > MAX_PIVOT_VALUES(8) → registry-time fail.
+        String json = """
+                {
+                  "field": "STATUS",
+                  "headerName": "Status",
+                  "type": "text",
+                  "width": 80,
+                  "sensitive": false,
+                  "pivotable": true,
+                  "pivotValues": ["a","b","c","d","e","f","g","h","i"]
+                }
+                """;
+        assertThrows(Exception.class,
+                () -> mapper.readValue(json, ColumnDefinition.class));
+    }
+
+    @Test
+    void pivotValuesDefaultsNullWhenMissing() throws Exception {
+        // Legacy entry: pivotable flag present but no pivotValues. PR-0.4a
+        // shipped this exact shape, so PR-0.4b must keep it deserializing
+        // cleanly — runtime pivot dispatch will fall back to the
+        // `PIVOT_NOT_CONFIGURED` 400 path.
+        String json = """
+                {
+                  "field": "STATUS",
+                  "headerName": "Status",
+                  "type": "text",
+                  "width": 80,
+                  "sensitive": false,
+                  "pivotable": true
+                }
+                """;
+        ColumnDefinition cd = mapper.readValue(json, ColumnDefinition.class);
+        assertTrue(cd.pivotable());
+        assertNull(cd.pivotValues());
+    }
+
+    @Test
+    void pivotValuesEmptyArrayCollapsesToNull() throws Exception {
+        // An empty `pivotValues: []` semantically equals "not configured";
+        // canonical constructor collapses to null so equality/serialisation
+        // matches the missing-field shape.
+        String json = """
+                {
+                  "field": "STATUS",
+                  "headerName": "Status",
+                  "type": "text",
+                  "width": 80,
+                  "sensitive": false,
+                  "pivotable": true,
+                  "pivotValues": []
+                }
+                """;
+        ColumnDefinition cd = mapper.readValue(json, ColumnDefinition.class);
+        assertNull(cd.pivotValues());
+    }
 }

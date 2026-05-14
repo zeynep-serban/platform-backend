@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.within;
 
 import com.example.report.registry.AccessConfig;
 import com.example.report.registry.ColumnDefinition;
+import com.example.report.registry.PivotValue;
 import com.example.report.registry.ReportDefinition;
 import java.math.BigDecimal;
 import java.util.Collections;
@@ -658,5 +659,257 @@ class SqlBuilderMssqlIntegrationTest {
         assertThat(rows).hasSize(2);
         assertThat(rows.get(0).get("name")).isEqualTo("alpha");
         assertThat(rows.get(1).get("name")).isEqualTo("alphabet");
+    }
+
+    // ── PR-0.4b: pivot SQL correctness against MSSQL ─────────────
+
+    @Test
+    void buildPivotedGroupedQuery_sumBucketsAggregateOverRealMssql() {
+        ReportDefinition def = scratch(
+                "pvt_sum",
+                List.of(
+                        new ColumnDefinition("category", "Category", "text", 80, false),
+                        new ColumnDefinition("status", "Status", "text", 60, false),
+                        new ColumnDefinition("amount", "Amount", "number", 100, false)),
+                "CREATE TABLE [{schema}].[pvt_sum] ("
+                        + "category NVARCHAR(20) NOT NULL, "
+                        + "status NVARCHAR(20) NOT NULL, "
+                        + "amount DECIMAL(18,2) NOT NULL)",
+                List.of(
+                        "INSERT INTO [{schema}].[pvt_sum] VALUES ('FIN', 'A', 100.00)",
+                        "INSERT INTO [{schema}].[pvt_sum] VALUES ('FIN', 'A', 50.00)",
+                        "INSERT INTO [{schema}].[pvt_sum] VALUES ('FIN', 'P', 30.00)",
+                        "INSERT INTO [{schema}].[pvt_sum] VALUES ('HR',  'A', 200.00)",
+                        "INSERT INTO [{schema}].[pvt_sum] VALUES ('HR',  'P', 25.00)"));
+
+        SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                def, null, List.of("category", "status", "amount"),
+                "category", "status",
+                List.of(new PivotValue("A"), new PivotValue("P")),
+                List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                Collections.emptyMap(),
+                List.of(Map.of("colId", "category", "sort", "asc")),
+                null, null, 1, 50);
+
+        List<Map<String, Object>> rows = jdbc.queryForList(q.sql(), q.params());
+
+        // 2 group buckets emitted in deterministic ASC order.
+        assertThat(rows).hasSize(2);
+        assertThat(rows.get(0).get("category")).isEqualTo("FIN");
+        assertThat(((BigDecimal) rows.get(0).get("pvt__status__A__sum__amount")))
+                .isEqualByComparingTo(new BigDecimal("150.00"));
+        assertThat(((BigDecimal) rows.get(0).get("pvt__status__P__sum__amount")))
+                .isEqualByComparingTo(new BigDecimal("30.00"));
+        assertThat(rows.get(1).get("category")).isEqualTo("HR");
+        assertThat(((BigDecimal) rows.get(1).get("pvt__status__A__sum__amount")))
+                .isEqualByComparingTo(new BigDecimal("200.00"));
+        assertThat(((BigDecimal) rows.get(1).get("pvt__status__P__sum__amount")))
+                .isEqualByComparingTo(new BigDecimal("25.00"));
+    }
+
+    @Test
+    void buildPivotedGroupedQuery_avgDenominatorOmitsOutOfBucketRows() {
+        // Critical correctness invariant (Codex Q5 verdict): AVG over a
+        // pivot must NOT include out-of-bucket rows as zero. With
+        // category=FIN we have status=A rows (100, 50) and status=P
+        // rows (30). The AVG for bucket A must be 75 (mean of 100,50),
+        // NOT (100+50+0)/3 = 50. The renderer's `ELSE NULL` branch is
+        // what keeps the denominator honest.
+        ReportDefinition def = scratch(
+                "pvt_avg",
+                List.of(
+                        new ColumnDefinition("category", "Category", "text", 80, false),
+                        new ColumnDefinition("status", "Status", "text", 60, false),
+                        new ColumnDefinition("amount", "Amount", "number", 100, false)),
+                "CREATE TABLE [{schema}].[pvt_avg] ("
+                        + "category NVARCHAR(20) NOT NULL, "
+                        + "status NVARCHAR(20) NOT NULL, "
+                        + "amount DECIMAL(18,2) NOT NULL)",
+                List.of(
+                        "INSERT INTO [{schema}].[pvt_avg] VALUES ('FIN', 'A', 100.00)",
+                        "INSERT INTO [{schema}].[pvt_avg] VALUES ('FIN', 'A', 50.00)",
+                        "INSERT INTO [{schema}].[pvt_avg] VALUES ('FIN', 'P', 30.00)"));
+
+        SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                def, null, List.of("category", "status", "amount"),
+                "category", "status",
+                List.of(new PivotValue("A"), new PivotValue("P")),
+                List.of(new SqlBuilder.GroupedAggregation("amount", "avg")),
+                Collections.emptyMap(), Collections.emptyList(),
+                null, null, 1, 50);
+
+        List<Map<String, Object>> rows = jdbc.queryForList(q.sql(), q.params());
+        assertThat(rows).hasSize(1);
+        assertThat(((BigDecimal) rows.get(0).get("pvt__status__A__avg__amount")))
+                // 75 = (100 + 50) / 2; "P" rows are NOT pulled into A's
+                // denominator. Tolerance accommodates MSSQL's DECIMAL → AVG
+                // rounding (returns DECIMAL(38,6) here).
+                .isCloseTo(new BigDecimal("75.000000"),
+                        within(new BigDecimal("0.000001")));
+        assertThat(((BigDecimal) rows.get(0).get("pvt__status__P__avg__amount")))
+                .isCloseTo(new BigDecimal("30.000000"),
+                        within(new BigDecimal("0.000001")));
+    }
+
+    @Test
+    void buildPivotedGroupedQuery_countOmitsOutOfBucketNullsOnRealMssql() {
+        // COUNT(CASE WHEN p THEN field END) — out-of-bucket rows collapse
+        // to NULL and MSSQL's COUNT drops them. The legacy `COUNT([field])`
+        // semantic (non-null count) is preserved.
+        ReportDefinition def = scratch(
+                "pvt_count",
+                List.of(
+                        new ColumnDefinition("category", "Category", "text", 80, false),
+                        new ColumnDefinition("status", "Status", "text", 60, false),
+                        new ColumnDefinition("amount", "Amount", "number", 100, false)),
+                "CREATE TABLE [{schema}].[pvt_count] ("
+                        + "category NVARCHAR(20) NOT NULL, "
+                        + "status NVARCHAR(20) NOT NULL, "
+                        + "amount DECIMAL(18,2) NOT NULL)",
+                List.of(
+                        "INSERT INTO [{schema}].[pvt_count] VALUES ('FIN', 'A', 100.00)",
+                        "INSERT INTO [{schema}].[pvt_count] VALUES ('FIN', 'A', 50.00)",
+                        "INSERT INTO [{schema}].[pvt_count] VALUES ('FIN', 'P', 30.00)"));
+
+        SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                def, null, List.of("category", "status", "amount"),
+                "category", "status",
+                List.of(new PivotValue("A"), new PivotValue("P")),
+                List.of(new SqlBuilder.GroupedAggregation("amount", "count")),
+                Collections.emptyMap(), Collections.emptyList(),
+                null, null, 1, 50);
+
+        List<Map<String, Object>> rows = jdbc.queryForList(q.sql(), q.params());
+        assertThat(rows).hasSize(1);
+        // 2 rows in status=A bucket → count = 2; not 3 (would include the P row).
+        assertThat(rows.get(0).get("pvt__status__A__count__amount")).isEqualTo(2);
+        assertThat(rows.get(0).get("pvt__status__P__count__amount")).isEqualTo(1);
+    }
+
+    @Test
+    void buildPivotedGroupedQuery_rlsScopeKeepsOtherTenantsOutOfBuckets() {
+        // RLS clause runs inside the FROM-clause WHERE, BEFORE pivot
+        // aggregation. The other tenant's rows must not leak into the
+        // scoped tenant's pivot buckets.
+        ReportDefinition def = scratch(
+                "pvt_rls",
+                List.of(
+                        new ColumnDefinition("owner_id", "Owner", "number", 50, false),
+                        new ColumnDefinition("category", "Category", "text", 80, false),
+                        new ColumnDefinition("status", "Status", "text", 60, false),
+                        new ColumnDefinition("amount", "Amount", "number", 100, false)),
+                "CREATE TABLE [{schema}].[pvt_rls] ("
+                        + "owner_id INT NOT NULL, "
+                        + "category NVARCHAR(20) NOT NULL, "
+                        + "status NVARCHAR(20) NOT NULL, "
+                        + "amount DECIMAL(18,2) NOT NULL)",
+                List.of(
+                        "INSERT INTO [{schema}].[pvt_rls] VALUES (100, 'FIN', 'A', 10.00)",
+                        "INSERT INTO [{schema}].[pvt_rls] VALUES (100, 'FIN', 'P', 20.00)",
+                        // owner 200's row would be massive enough to dwarf
+                        // owner 100's bucket; RLS MUST keep it out.
+                        "INSERT INTO [{schema}].[pvt_rls] VALUES (200, 'FIN', 'A', 9999.00)",
+                        "INSERT INTO [{schema}].[pvt_rls] VALUES (200, 'FIN', 'P', 8888.00)"));
+
+        // Owner 100 scope.
+        org.springframework.jdbc.core.namedparam.MapSqlParameterSource rlsParams =
+                new org.springframework.jdbc.core.namedparam.MapSqlParameterSource();
+        rlsParams.addValue("_rls_owner", 100);
+        String rlsWhere = "[owner_id] = :_rls_owner";
+
+        SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                def, null,
+                List.of("owner_id", "category", "status", "amount"),
+                "category", "status",
+                List.of(new PivotValue("A"), new PivotValue("P")),
+                List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                Collections.emptyMap(), Collections.emptyList(),
+                rlsWhere, rlsParams, 1, 50);
+
+        List<Map<String, Object>> rows = jdbc.queryForList(q.sql(), q.params());
+        assertThat(rows).hasSize(1);
+        assertThat(((BigDecimal) rows.get(0).get("pvt__status__A__sum__amount")))
+                // owner 200's 9999 row stayed OUT of the bucket aggregation.
+                .isEqualByComparingTo(new BigDecimal("10.00"));
+        assertThat(((BigDecimal) rows.get(0).get("pvt__status__P__sum__amount")))
+                .isEqualByComparingTo(new BigDecimal("20.00"));
+    }
+
+    @Test
+    void buildPivotedGroupedQuery_filterModelComposesWithPivot() {
+        // User-supplied filterModel runs alongside RLS in the FROM
+        // clause, BEFORE the pivot aggregation. The pivot buckets must
+        // see only the filtered rowset.
+        ReportDefinition def = scratch(
+                "pvt_filter",
+                List.of(
+                        new ColumnDefinition("region", "Region", "text", 60, false),
+                        new ColumnDefinition("category", "Category", "text", 80, false),
+                        new ColumnDefinition("status", "Status", "text", 60, false),
+                        new ColumnDefinition("amount", "Amount", "number", 100, false)),
+                "CREATE TABLE [{schema}].[pvt_filter] ("
+                        + "region NVARCHAR(20) NOT NULL, "
+                        + "category NVARCHAR(20) NOT NULL, "
+                        + "status NVARCHAR(20) NOT NULL, "
+                        + "amount DECIMAL(18,2) NOT NULL)",
+                List.of(
+                        "INSERT INTO [{schema}].[pvt_filter] VALUES ('IST', 'FIN', 'A', 100.00)",
+                        "INSERT INTO [{schema}].[pvt_filter] VALUES ('IST', 'FIN', 'P', 50.00)",
+                        "INSERT INTO [{schema}].[pvt_filter] VALUES ('ANK', 'FIN', 'A', 999.00)"));
+
+        SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                def, null,
+                List.of("region", "category", "status", "amount"),
+                "category", "status",
+                List.of(new PivotValue("A"), new PivotValue("P")),
+                List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                Map.of("region", Map.of("type", "equals", "filter", "IST")),
+                Collections.emptyList(),
+                null, null, 1, 50);
+
+        List<Map<String, Object>> rows = jdbc.queryForList(q.sql(), q.params());
+        assertThat(rows).hasSize(1);
+        assertThat(((BigDecimal) rows.get(0).get("pvt__status__A__sum__amount")))
+                // ANK's 999 must NOT leak into the bucket; filter ran
+                // before pivot aggregation.
+                .isEqualByComparingTo(new BigDecimal("100.00"));
+        assertThat(((BigDecimal) rows.get(0).get("pvt__status__P__sum__amount")))
+                .isEqualByComparingTo(new BigDecimal("50.00"));
+    }
+
+    @Test
+    void buildPivotedGroupedQuery_emptyBucketSumProducesZero() {
+        // SUM uses `ELSE 0` so an empty bucket reads as 0 rather than
+        // NULL. Finance grids prefer the zero cell so column totals
+        // line up cleanly.
+        ReportDefinition def = scratch(
+                "pvt_empty",
+                List.of(
+                        new ColumnDefinition("category", "Category", "text", 80, false),
+                        new ColumnDefinition("status", "Status", "text", 60, false),
+                        new ColumnDefinition("amount", "Amount", "number", 100, false)),
+                "CREATE TABLE [{schema}].[pvt_empty] ("
+                        + "category NVARCHAR(20) NOT NULL, "
+                        + "status NVARCHAR(20) NOT NULL, "
+                        + "amount DECIMAL(18,2) NOT NULL)",
+                // Only one bucket populated; pivot value "P" is empty.
+                List.of("INSERT INTO [{schema}].[pvt_empty] VALUES ('FIN', 'A', 100.00)"));
+
+        SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                def, null, List.of("category", "status", "amount"),
+                "category", "status",
+                List.of(new PivotValue("A"), new PivotValue("P")),
+                List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                Collections.emptyMap(), Collections.emptyList(),
+                null, null, 1, 50);
+
+        List<Map<String, Object>> rows = jdbc.queryForList(q.sql(), q.params());
+        assertThat(rows).hasSize(1);
+        assertThat(((BigDecimal) rows.get(0).get("pvt__status__A__sum__amount")))
+                .isEqualByComparingTo(new BigDecimal("100.00"));
+        assertThat(((BigDecimal) rows.get(0).get("pvt__status__P__sum__amount")))
+                // SUM(CASE … ELSE 0 END) over an empty bucket evaluates
+                // to 0, not NULL — the legacy finance convention.
+                .isEqualByComparingTo(BigDecimal.ZERO);
     }
 }

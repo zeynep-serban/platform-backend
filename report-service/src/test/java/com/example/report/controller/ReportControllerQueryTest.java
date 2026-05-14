@@ -1669,6 +1669,282 @@ class ReportControllerQueryTest {
         }
     }
 
+    // ── PR-0.4b: single-level pivot dispatch ────────────────────
+
+    @Nested
+    class PivotDispatch {
+
+        private ReportDefinition pivotReport() {
+            return new ReportDefinition(
+                    "fin-pivot", "1", "Pivot", "desc", "fin",
+                    "TXN", "dbo", "static", null, null,
+                    List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("status", "Status", "text",
+                                    100, false, false, false, null, null, true,
+                                    List.of(new com.example.report.registry.PivotValue("A"),
+                                            new com.example.report.registry.PivotValue("P"))),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "sum")),
+                    null, null,
+                    new AccessConfig("REPORT_VIEW", null, null, null));
+        }
+
+        private ReportDefinition pivotReportNoValues() {
+            // Mirrors the pre-PR-0.4b registry shape (pivotable=true,
+            // pivotValues=null). Dispatch must short-circuit with the
+            // `PIVOT_NOT_CONFIGURED` 400 rather than calling the SQL
+            // builder.
+            return new ReportDefinition(
+                    "fin-pivot-stub", "1", "Pivot Stub", "desc", "fin",
+                    "TXN", "dbo", "static", null, null,
+                    List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("status", "Status", "text",
+                                    100, false, false, false, null, null, true),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "sum")),
+                    null, null,
+                    new AccessConfig("REPORT_VIEW", null, null, null));
+        }
+
+        @Test
+        void wellFormedPivotRequest_routedToExecutePivotedGroupedQuery() {
+            stubAuthz(true, List.of());
+            ReportDefinition def = pivotReport();
+            when(registry.get("fin-pivot")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+            when(queryEngine.executePivotedGroupedQuery(
+                    any(), any(), eq("category"), eq("status"),
+                    any(), any(), any(), any(), anyInt(), anyInt()))
+                    .thenReturn(new QueryEngine.PagedData(
+                            List.of(Map.of("category", "x",
+                                    "pvt__status__A__sum__amount", 100)),
+                            1L, 1, 50, List.of(),
+                            List.of("pvt__status__A__sum__amount",
+                                    "pvt__status__P__sum__amount")));
+
+            var pivot = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum")),
+                    List.of(new ColumnVO("status", "Status", "status", null)),
+                    true, null, null, null);
+
+            var response = controller.queryReport("fin-pivot", pivot, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+            verify(queryEngine).executePivotedGroupedQuery(
+                    any(), any(), eq("category"), eq("status"),
+                    any(), any(), any(), any(), eq(1), eq(50));
+            // Pivot result fields surface on the response envelope.
+            PagedResultDto<?> body = assertInstanceOf(PagedResultDto.class, response.getBody());
+            assertEquals(List.of(
+                    "pvt__status__A__sum__amount",
+                    "pvt__status__P__sum__amount"), body.pivotResultFields());
+        }
+
+        @Test
+        void pivotRequestWithoutPivotValues_returns400PivotNotConfigured() {
+            stubAuthz(true, List.of());
+            ReportDefinition def = pivotReportNoValues();
+            when(registry.get("fin-pivot-stub")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+
+            var pivot = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum")),
+                    List.of(new ColumnVO("status", "Status", "status", null)),
+                    true, null, null, null);
+
+            var response = controller.queryReport("fin-pivot-stub", pivot, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            ReportQueryErrorDto error = assertInstanceOf(
+                    ReportQueryErrorDto.class, response.getBody());
+            assertEquals("PIVOT_NOT_CONFIGURED", error.code());
+            verify(queryEngine, never()).executePivotedGroupedQuery(
+                    any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), anyInt());
+        }
+
+        @Test
+        void pivotRequestWithGroupKeys_returns400GroupingNotSupported() {
+            // PR-0.4b cap: groupKeys must be empty (top-level only).
+            // Expanded pivot drill-down is reserved for PR-0.4e.
+            stubAuthz(true, List.of());
+            ReportDefinition def = pivotReport();
+            when(registry.get("fin-pivot")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+
+            var pivot = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum")),
+                    List.of(new ColumnVO("status", "Status", "status", null)),
+                    true,
+                    List.of("Finance"),
+                    null, null);
+
+            var response = controller.queryReport("fin-pivot", pivot, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            ReportQueryErrorDto error = assertInstanceOf(
+                    ReportQueryErrorDto.class, response.getBody());
+            assertEquals("GROUPING_NOT_SUPPORTED", error.code());
+        }
+
+        @Test
+        void pivotRequestWithTwoPivotCols_returns400GroupingNotSupported() {
+            // PR-0.4b cap: exactly one pivot column.
+            stubAuthz(true, List.of());
+            ReportDefinition def = pivotReport();
+            when(registry.get("fin-pivot")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+
+            var pivot = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum")),
+                    List.of(new ColumnVO("status", "Status", "status", null),
+                            new ColumnVO("category", "Category", "category", null)),
+                    true, null, null, null);
+
+            var response = controller.queryReport("fin-pivot", pivot, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            ReportQueryErrorDto error = assertInstanceOf(
+                    ReportQueryErrorDto.class, response.getBody());
+            assertEquals("GROUPING_NOT_SUPPORTED", error.code());
+        }
+
+        @Test
+        void pivotRequestWithMedianAggFunc_returns400InvalidAggregation() {
+            stubAuthz(true, List.of());
+            ReportDefinition def = pivotReport();
+            when(registry.get("fin-pivot")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+
+            var pivot = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "median")),
+                    List.of(new ColumnVO("status", "Status", "status", null)),
+                    true, null, null, null);
+
+            var response = controller.queryReport("fin-pivot", pivot, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            ReportQueryErrorDto error = assertInstanceOf(
+                    ReportQueryErrorDto.class, response.getBody());
+            assertEquals("INVALID_AGGREGATION_REQUEST", error.code());
+        }
+
+        @Test
+        void pivotOnNonPivotableColumn_returns400GroupingNotSupported() {
+            // Pivot on `category` while it's only `groupable=true` (not
+            // pivotable=true) must fall through to the rejection path.
+            stubAuthz(true, List.of());
+            ReportDefinition def = pivotReport();
+            when(registry.get("fin-pivot")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+
+            var pivot = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("status", "Status", "status", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum")),
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    true, null, null, null);
+
+            var response = controller.queryReport("fin-pivot", pivot, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            ReportQueryErrorDto error = assertInstanceOf(
+                    ReportQueryErrorDto.class, response.getBody());
+            assertEquals("GROUPING_NOT_SUPPORTED", error.code());
+        }
+    }
+
+    @Nested
+    class MetadataPivotCapabilities {
+
+        @Test
+        void serverSidePivotingDerivedFromPivotableColumnsWithValues() {
+            stubAuthz(true, List.of());
+            ReportDefinition def = new ReportDefinition(
+                    "fin-pivot", "1", "Pivot", "desc", "fin",
+                    "TXN", "dbo", "static", null, null,
+                    List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("status", "Status", "text",
+                                    100, false, false, false, null, null, true,
+                                    List.of(new com.example.report.registry.PivotValue("A"))),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "sum")),
+                    null, null,
+                    new AccessConfig("REPORT_VIEW", null, null, null));
+            when(registry.get("fin-pivot")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+
+            var response = controller.getMetadata("fin-pivot", testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+            ReportMetadataDto body = response.getBody();
+            assertNotNull(body);
+            ReportCapabilitiesDto caps = body.capabilities();
+            assertTrue(caps.serverSidePivoting(),
+                    "serverSidePivoting must derive true when at least one "
+                            + "visible column is pivotable + has populated pivotValues");
+            assertEquals(List.of("status"), caps.pivotableFields());
+        }
+
+        @Test
+        void serverSidePivotingStaysFalseWhenPivotValuesMissing() {
+            // PR-0.4a-era report (pivotable=true, no pivotValues) must
+            // not flip the capability flag — runtime dispatch would
+            // otherwise route a pivot request into the SQL builder that
+            // immediately throws PIVOT_NOT_CONFIGURED.
+            stubAuthz(true, List.of());
+            ReportDefinition def = new ReportDefinition(
+                    "fin-pivot-stub", "1", "Pivot Stub", "desc", "fin",
+                    "TXN", "dbo", "static", null, null,
+                    List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("status", "Status", "text",
+                                    100, false, false, false, null, null, true),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "sum")),
+                    null, null,
+                    new AccessConfig("REPORT_VIEW", null, null, null));
+            when(registry.get("fin-pivot-stub")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+
+            var response = controller.getMetadata("fin-pivot-stub", testJwt("admin"));
+
+            ReportMetadataDto body = response.getBody();
+            assertNotNull(body);
+            assertFalse(body.capabilities().serverSidePivoting(),
+                    "serverSidePivoting must stay false when no column carries "
+                            + "a populated pivotValues list");
+            assertEquals(List.of("status"), body.capabilities().pivotableFields(),
+                    "pivotableFields still surfaces the registry allowlist so "
+                            + "the frontend can plan UI even before backend "
+                            + "pivot is configured");
+        }
+    }
+
     // ---- helpers ---------------------------------------------------------
 
     private void stubAuthz(boolean superAdmin, List<String> permissions) {

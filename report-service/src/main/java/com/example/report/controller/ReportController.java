@@ -207,20 +207,29 @@ public class ReportController {
                 .map(ColumnDefinition::field)
                 .toList();
         // PR-0.4a (Codex 019e2695 hybrid pivot design): pivot capability
-        // derivation. `serverSidePivoting` and `clientPivotAllowed` stay
-        // false-by-default until a report explicitly opts in via its
-        // registry entry — backend pivot SQL is not yet wired in
-        // SqlBuilder (lands in PR-0.4b). For now we surface the
-        // pivotableFields list so the frontend can already plan AG Grid's
-        // `enablePivot` per-column gating; the capability flags will flip
-        // to true on a per-report basis as the SSRM pivot path matures.
+        // derivation. `pivotableFields` is the registry-allowlisted column
+        // list; the frontend uses it for per-column AG Grid `enablePivot`
+        // gating regardless of mode.
+        //
+        // PR-0.4b (same Codex thread): `serverSidePivoting` flips to true
+        // when at least one visible column declares both `pivotable=true`
+        // and a non-empty `pivotValues` list. Registry-driven discovery is
+        // the only sanctioned pivot value source — controller-side dynamic
+        // discovery would defeat the RLS+filter composition the SQL builder
+        // already enforces. `clientPivotAllowed` continues to require an
+        // explicit registry opt-in down the road (PR-0.4d), so it stays
+        // false here.
         List<String> pivotable = visibleCols.stream()
                 .filter(ColumnDefinition::pivotable)
                 .map(ColumnDefinition::field)
                 .toList();
+        boolean serverSidePivoting = visibleCols.stream()
+                .anyMatch(c -> c.pivotable()
+                        && c.pivotValues() != null
+                        && !c.pivotValues().isEmpty());
         ReportCapabilitiesDto capabilities = new ReportCapabilitiesDto(
                 !groupable.isEmpty(), groupable, aggregatable,
-                /* serverSidePivoting */ false,
+                serverSidePivoting,
                 /* clientPivotAllowed */ false,
                 pivotable);
 
@@ -305,13 +314,16 @@ public class ReportController {
                 ? request
                 : new ReportQueryRequestDto(null, null, null, null, null, null, null, null, null);
 
-        // PR-0.3 capability dispatcher. Three buckets:
+        // PR-0.3 capability dispatcher. Four buckets:
         // 1. Multi-level GROUP BY (1..N rowGroupCols + 0..N groupKeys
         //    where groupKeys.size ≤ rowGroupCols.size) → grouped path
         //    when level < N, leaf-flat path when level == N.
-        // 2. Pivot / pivotMode → still a structured 400 because PR-0.4
-        //    hasn't shipped yet.
-        // 3. Flat request → delegate to the legacy executeQuery path.
+        // 2. PR-0.4b single-level pivot (pivotMode=true + exactly one
+        //    pivotCol + at least one rowGroupCol + zero groupKeys) →
+        //    pivoted grouped path.
+        // 3. Other pivot / multi-pivot / pivot-with-expanded-groupKeys →
+        //    structured 400 (deferred to PR-0.4e).
+        // 4. Flat request → delegate to the legacy executeQuery path.
         List<ColumnDefinition> visibleCols = columnFilter.getVisibleColumnDefinitions(def, scopedAuthz);
         Set<String> groupableFields = visibleCols.stream()
                 .filter(ColumnDefinition::groupable)
@@ -321,15 +333,27 @@ public class ReportController {
                 .filter(ColumnDefinition::aggregatable)
                 .map(ColumnDefinition::field)
                 .collect(java.util.stream.Collectors.toSet());
+        Set<String> pivotableFields = visibleCols.stream()
+                .filter(ColumnDefinition::pivotable)
+                .map(ColumnDefinition::field)
+                .collect(java.util.stream.Collectors.toSet());
 
         boolean wantsMultiLevelGroup = multiLevelGroupRequest(safeRequest, groupableFields);
-        if (safeRequest.requestsGrouping() && !wantsMultiLevelGroup) {
+        boolean wantsSingleLevelPivot = !wantsMultiLevelGroup
+                && singleLevelPivotRequest(safeRequest, groupableFields, pivotableFields);
+        if (safeRequest.requestsGrouping()
+                && !wantsMultiLevelGroup
+                && !wantsSingleLevelPivot) {
             return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
                     "GROUPING_NOT_SUPPORTED",
                     "Server-side pivot / pivotMode not yet enabled for this "
                             + "report; row-grouping requires every rowGroupCols "
                             + "field to be marked groupable=true and groupKeys "
-                            + "depth must not exceed the rowGroupCols path."));
+                            + "depth must not exceed the rowGroupCols path. "
+                            + "PR-0.4b single-level pivot additionally requires "
+                            + "exactly one pivotCol marked pivotable=true with "
+                            + "a registry-declared pivotValues list and "
+                            + "groupKeys=[]."));
         }
 
         // Pagination: same fail-closed translation as the flat path. The
@@ -346,7 +370,82 @@ public class ReportController {
         int pageSize = paging[1];
 
         QueryEngine.PagedData result;
-        if (wantsMultiLevelGroup) {
+        if (wantsSingleLevelPivot) {
+            // PR-0.4b single-level pivot dispatch. The classifier above
+            // already ensures pivotCols.size == 1, rowGroupCols.size >= 1,
+            // groupKeys.isEmpty (top-level only), and the pivotable
+            // column is in the visibility allow-list. We still re-derive
+            // pivotValues from the registry here so the SQL builder gets
+            // the exact (label-aware) list rather than re-parsing it
+            // from request payload (Codex Q2 absorb — dynamic discovery
+            // intentionally rejected).
+            String groupColumn = safeRequest.rowGroupCols().get(0).field();
+            String pivotColumn = safeRequest.pivotCols().get(0).field();
+            ColumnDefinition pivotColDef = visibleCols.stream()
+                    .filter(c -> pivotColumn.equals(c.field()))
+                    .findFirst()
+                    .orElse(null);
+            if (pivotColDef == null
+                    || pivotColDef.pivotValues() == null
+                    || pivotColDef.pivotValues().isEmpty()) {
+                return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
+                        "PIVOT_NOT_CONFIGURED",
+                        "Pivot column '" + pivotColumn + "' has no registry-"
+                                + "declared pivotValues; PR-0.4b requires the "
+                                + "value enumeration to be pre-declared so the "
+                                + "backend can bind every CASE WHEN literal as "
+                                + "a named SQL parameter."));
+            }
+            List<SqlBuilder.GroupedAggregation> aggregations;
+            try {
+                aggregations = sanitizeAggregations(
+                        safeRequest.valueCols(), aggregatableFields, visibleCols);
+            } catch (IllegalArgumentException iae) {
+                return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
+                        "INVALID_AGGREGATION_REQUEST", iae.getMessage()));
+            }
+            // PR-0.4b agg subset enforcement: median + percentilecont
+            // belong to PR-0.4e (the percentile family needs a window
+            // wrapping shape that PR-0.4b's CASE-WHEN renderer can't
+            // express). Reject early so the SQL builder never has to
+            // unwind a partial pivot SQL.
+            for (SqlBuilder.GroupedAggregation a : aggregations) {
+                if ("median".equals(a.func()) || "percentilecont".equals(a.func())) {
+                    return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
+                            "INVALID_AGGREGATION_REQUEST",
+                            a.func() + " aggregation is not yet supported "
+                                    + "inside a pivot query (PR-0.4b excludes "
+                                    + "the percentile family; that work is "
+                                    + "deferred to a follow-up PR)."));
+                }
+            }
+            // pivotValues * valueCols budget cap — matches the SQL builder's
+            // hard ceiling so we can surface a structured 400 rather than
+            // letting the builder throw an opaque IAE.
+            long totalOutputColumns =
+                    (long) pivotColDef.pivotValues().size() * aggregations.size();
+            if (totalOutputColumns > SqlBuilder.MAX_PIVOT_OUTPUT_COLUMNS) {
+                return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
+                        "PIVOT_BUDGET_EXCEEDED",
+                        "Pivot output column budget exceeded: pivotValues("
+                                + pivotColDef.pivotValues().size()
+                                + ") * valueCols(" + aggregations.size()
+                                + ") = " + totalOutputColumns + " > "
+                                + SqlBuilder.MAX_PIVOT_OUTPUT_COLUMNS));
+            }
+            try {
+                result = queryEngine.executePivotedGroupedQuery(
+                        def, scopedAuthz,
+                        groupColumn, pivotColumn, pivotColDef.pivotValues(),
+                        aggregations,
+                        safeRequest.filterModel(),
+                        safeRequest.sortModel(),
+                        page, pageSize);
+            } catch (IllegalArgumentException iae) {
+                return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
+                        "INVALID_PIVOT_REQUEST", iae.getMessage()));
+            }
+        } else if (wantsMultiLevelGroup) {
             // PR-0.3 multi-level dispatch. Validate valueCols upfront so
             // a leaf-path request with malformed aggregation metadata
             // also fails closed (Codex iter-1 absorb — invalid valueCols
@@ -420,10 +519,14 @@ public class ReportController {
 
         // Codex 019e0c99 iter-3 §C: degradation header propagation
         // (multi-level grouped path uses same warning list as flat path).
+        // PR-0.4b: pivot-aware response carries `pivotResultFields` so
+        // AG Grid SSRM can register the secondary columns it needs to
+        // render the pivot output buckets.
         return ResponseEntity.ok()
                 .headers(com.example.report.query.DegradationHeaders.of(result.warnings()))
                 .body(new PagedResultDto<>(
-                        result.items(), result.total(), result.page(), result.pageSize()));
+                        result.items(), result.total(), result.page(), result.pageSize(),
+                        result.pivotResultFields()));
     }
 
     /** PR-0.3 hardening: cap recursion depth so a malicious payload
@@ -462,6 +565,11 @@ public class ReportController {
         if (req == null) return false;
         if (req.rowGroupCols() == null || req.rowGroupCols().isEmpty()) return false;
         if (req.rowGroupCols().size() > MAX_ROW_GROUP_DEPTH) return false;
+        // PR-0.4b: pivot requests are now classified by
+        // {@link #singleLevelPivotRequest} so they no longer auto-fail
+        // the grouped path. The dispatcher in {@link #queryReport}
+        // checks the pivot classifier first and only falls back to the
+        // grouped path when pivotCols / pivotMode are absent.
         if (req.pivotCols() != null && !req.pivotCols().isEmpty()) return false;
         if (Boolean.TRUE.equals(req.pivotMode())) return false;
         // groupKeys.size > rowGroupCols.size is malformed — the client
@@ -477,6 +585,50 @@ public class ReportController {
             if (!groupableFields.contains(rgc.field())) return false;
             if (!seenFields.add(rgc.field())) return false; // duplicate path entry
         }
+        return true;
+    }
+
+    /**
+     * PR-0.4b (Codex thread {@code 019e2695}) classifier: returns true iff
+     * the request expresses a supported single-level pivot shape:
+     *
+     * <ul>
+     *   <li>{@code pivotMode == true}.</li>
+     *   <li>{@code pivotCols.size() == 1} (Codex Q1 verdict — exactly
+     *       one pivot column for PR-0.4b; multi-pivot is reserved for a
+     *       follow-up PR).</li>
+     *   <li>The pivot column is registered as {@code pivotable=true}.</li>
+     *   <li>{@code rowGroupCols.size() == 1} and the column is
+     *       {@code groupable=true}. PR-0.4b supports single-level pivot
+     *       only; multi-level expansion stays in PR-0.4e.</li>
+     *   <li>{@code groupKeys.isEmpty()} — top-level only, no ancestor
+     *       expansion. Drill-down pivot is deferred to PR-0.4e.</li>
+     * </ul>
+     *
+     * <p>The registry-time {@code pivotValues} validation (non-empty +
+     * cardinality cap) happens in {@link #queryReport} so the classifier
+     * stays pure (no registry lookups). A pivot request that satisfies
+     * the shape contract but lacks a registry {@code pivotValues} list
+     * gets a structured {@code PIVOT_NOT_CONFIGURED} 400 from the
+     * dispatch path rather than silently degrading to grouped output.
+     */
+    private static boolean singleLevelPivotRequest(ReportQueryRequestDto req,
+                                                    Set<String> groupableFields,
+                                                    Set<String> pivotableFields) {
+        if (req == null) return false;
+        if (!Boolean.TRUE.equals(req.pivotMode())) return false;
+        if (req.pivotCols() == null || req.pivotCols().size() != 1) return false;
+        if (req.rowGroupCols() == null || req.rowGroupCols().size() != 1) return false;
+        // PR-0.4b: groupKeys must be empty. Any expansion past the top
+        // level is a follow-up PR concern.
+        if (req.groupKeys() != null && !req.groupKeys().isEmpty()) return false;
+        var pivotCol = req.pivotCols().get(0);
+        if (pivotCol == null || pivotCol.field() == null) return false;
+        if (!pivotableFields.contains(pivotCol.field())) return false;
+        var rgc = req.rowGroupCols().get(0);
+        if (rgc == null || rgc.field() == null) return false;
+        if (!groupableFields.contains(rgc.field())) return false;
+        if (pivotCol.field().equals(rgc.field())) return false; // tautological pivot
         return true;
     }
 

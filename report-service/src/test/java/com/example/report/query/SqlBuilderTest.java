@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.report.registry.AccessConfig;
 import com.example.report.registry.ColumnDefinition;
+import com.example.report.registry.PivotValue;
 import com.example.report.registry.ReportDefinition;
 import java.util.Collections;
 import java.util.List;
@@ -1065,6 +1066,328 @@ class SqlBuilderTest {
             assertThat(fragment).contains("WHERE 1 = 0");
             // Null branch → no warning enqueued (no tenantId to attach).
             assertThat(warnings).isEmpty();
+        }
+    }
+
+    // ── buildPivotedGroupedQuery (PR-0.4b) ───────────────────────
+
+    @Nested
+    class BuildPivotedGroupedQuery {
+
+        private ReportDefinition pivotDef() {
+            // 4-column report: group dimension + pivot dimension + 2 value
+            // columns the pivot bucketises. Mirrors the canary shape the
+            // controller validates against the registry at runtime.
+            return new ReportDefinition(
+                    "pivot-report", "v1", "Pivot", "desc", "cat",
+                    "TXN", "dbo", "static", null, null,
+                    List.of(
+                            new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("status", "Status", "text", 80, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false),
+                            new ColumnDefinition("qty", "Qty", "number", 80, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+        }
+
+        private static final List<String> PIVOT_COLS =
+                List.of("category", "status", "amount", "qty");
+
+        @Test
+        void renderEmitsRowCountAndPivotAliasesInDeterministicOrder() {
+            ReportDefinition def = pivotDef();
+            SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                    def, null, PIVOT_COLS,
+                    "category", "status",
+                    List.of(new PivotValue("A", "Aktif"),
+                            new PivotValue("P", "Pasif")),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            // Outer iteration is pivot-first, agg-second so adjacent
+            // result columns belong to the same bucket.
+            assertThat(q.pivotResultFields()).containsExactly(
+                    "pvt__status__A__sum__amount",
+                    "pvt__status__P__sum__amount");
+            assertThat(q.sql())
+                    .contains("SELECT [category]")
+                    .contains("COUNT(*) AS [_rowCount]")
+                    .contains("SUM(CASE WHEN [status] = :_pivot_0 THEN [amount] ELSE 0 END)")
+                    .contains("AS [pvt__status__A__sum__amount]")
+                    .contains("SUM(CASE WHEN [status] = :_pivot_1 THEN [amount] ELSE 0 END)")
+                    .contains("AS [pvt__status__P__sum__amount]")
+                    .contains("GROUP BY [category]")
+                    .contains("ORDER BY [category] ASC");
+            // Pivot literals MUST bind as named params; no raw quoted
+            // literal in the generated SQL.
+            assertThat(q.sql()).doesNotContain("= 'A'");
+            assertThat(q.sql()).doesNotContain("= 'P'");
+            assertThat(q.params().getValue("_pivot_0")).isEqualTo("A");
+            assertThat(q.params().getValue("_pivot_1")).isEqualTo("P");
+        }
+
+        @Test
+        void avgUsesNoElseSoOutOfBucketRowsDoNotBiasDenominator() {
+            // AVG with `ELSE 0` would drag every out-of-bucket row into
+            // the denominator and pull the average towards zero. The
+            // renderer omits the ELSE branch so MSSQL evaluates AVG
+            // over non-null rows only.
+            ReportDefinition def = pivotDef();
+            SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                    def, null, PIVOT_COLS,
+                    "category", "status",
+                    List.of(new PivotValue("A")),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "avg")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("AVG(CASE WHEN [status] = :_pivot_0 THEN [amount] END)")
+                    // No ELSE branch under AVG.
+                    .doesNotContain("AVG(CASE WHEN [status] = :_pivot_0 THEN [amount] ELSE");
+        }
+
+        @Test
+        void countOmitsElseSoNullsExcluded() {
+            // count(field) translates to COUNT(field) — pivot variant
+            // keeps the legacy "non-null count" semantic by omitting
+            // the ELSE branch so out-of-bucket rows fall to NULL.
+            ReportDefinition def = pivotDef();
+            SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                    def, null, PIVOT_COLS,
+                    "category", "status",
+                    List.of(new PivotValue("A")),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "count")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("COUNT(CASE WHEN [status] = :_pivot_0 THEN [amount] END)")
+                    .doesNotContain("ELSE 0");
+        }
+
+        @Test
+        void distinctCountWrapsCaseInsideDistinct() {
+            ReportDefinition def = pivotDef();
+            SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                    def, null, PIVOT_COLS,
+                    "category", "status",
+                    List.of(new PivotValue("A")),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "distinctcount")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("COUNT(DISTINCT CASE WHEN [status] = :_pivot_0 THEN [amount] END)");
+        }
+
+        @Test
+        void multipleValueColsProduceCartesianAliases() {
+            // pivotValues × valueCols product surfaces every combination.
+            ReportDefinition def = pivotDef();
+            SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                    def, null, PIVOT_COLS,
+                    "category", "status",
+                    List.of(new PivotValue("A"), new PivotValue("P")),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum"),
+                            new SqlBuilder.GroupedAggregation("qty", "avg")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.pivotResultFields()).containsExactly(
+                    "pvt__status__A__sum__amount",
+                    "pvt__status__A__avg__qty",
+                    "pvt__status__P__sum__amount",
+                    "pvt__status__P__avg__qty");
+        }
+
+        @Test
+        void unicodePivotValueProducesSafeAlias() {
+            // Workcube enums can ship Turkish characters / dashes.
+            // Sanitisation must keep the SQL alias identifier-safe
+            // while the underlying CASE WHEN literal stays untouched
+            // (bound as a named param).
+            ReportDefinition def = pivotDef();
+            SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                    def, null, PIVOT_COLS,
+                    "category", "status",
+                    List.of(new PivotValue("İş-Yeri", "İş Yeri")),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            String alias = q.pivotResultFields().get(0);
+            assertThat(alias).startsWith("pvt__status__");
+            assertThat(alias).endsWith("__sum__amount");
+            // Non-ASCII codepoints collapse but the alias remains
+            // syntactically a valid SQL identifier (alpha + underscore).
+            assertThat(alias).matches("pvt__status__[a-zA-Z0-9_]+__sum__amount");
+            // The bound param keeps the original SQL value byte-for-byte.
+            assertThat(q.params().getValue("_pivot_0")).isEqualTo("İş-Yeri");
+        }
+
+        @Test
+        void pivotColumnEqualToGroupColumnRejected() {
+            ReportDefinition def = pivotDef();
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildPivotedGroupedQuery(
+                            def, null, PIVOT_COLS,
+                            "category", "category",
+                            List.of(new PivotValue("A")),
+                            List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                            Collections.emptyMap(), Collections.emptyList(),
+                            null, null, 1, 50));
+        }
+
+        @Test
+        void unknownPivotColumnRejected() {
+            ReportDefinition def = pivotDef();
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildPivotedGroupedQuery(
+                            def, null, PIVOT_COLS,
+                            "category", "ghost",
+                            List.of(new PivotValue("A")),
+                            List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                            Collections.emptyMap(), Collections.emptyList(),
+                            null, null, 1, 50));
+        }
+
+        @Test
+        void emptyPivotValuesRejected() {
+            ReportDefinition def = pivotDef();
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildPivotedGroupedQuery(
+                            def, null, PIVOT_COLS,
+                            "category", "status",
+                            List.of(),
+                            List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                            Collections.emptyMap(), Collections.emptyList(),
+                            null, null, 1, 50));
+        }
+
+        @Test
+        void outputColumnBudgetExceededRejected() {
+            // pivotValues(8) * valueCols(5) = 40 > MAX_PIVOT_OUTPUT_COLUMNS(32).
+            ReportDefinition def = new ReportDefinition(
+                    "wide", "v1", "Wide", "desc", "cat",
+                    "T", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("status", "Status", "text", 80, false),
+                            new ColumnDefinition("v1", "v1", "number", 80, false),
+                            new ColumnDefinition("v2", "v2", "number", 80, false),
+                            new ColumnDefinition("v3", "v3", "number", 80, false),
+                            new ColumnDefinition("v4", "v4", "number", 80, false),
+                            new ColumnDefinition("v5", "v5", "number", 80, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+            List<PivotValue> eightValues = List.of(
+                    new PivotValue("a"), new PivotValue("b"),
+                    new PivotValue("c"), new PivotValue("d"),
+                    new PivotValue("e"), new PivotValue("f"),
+                    new PivotValue("g"), new PivotValue("h"));
+            List<SqlBuilder.GroupedAggregation> fiveAggs = List.of(
+                    new SqlBuilder.GroupedAggregation("v1", "sum"),
+                    new SqlBuilder.GroupedAggregation("v2", "sum"),
+                    new SqlBuilder.GroupedAggregation("v3", "sum"),
+                    new SqlBuilder.GroupedAggregation("v4", "sum"),
+                    new SqlBuilder.GroupedAggregation("v5", "sum"));
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildPivotedGroupedQuery(
+                            def, null,
+                            List.of("category", "status", "v1", "v2", "v3", "v4", "v5"),
+                            "category", "status",
+                            eightValues, fiveAggs,
+                            Collections.emptyMap(), Collections.emptyList(),
+                            null, null, 1, 50));
+        }
+
+        @Test
+        void medianAggregationInsidePivotRejected() {
+            ReportDefinition def = pivotDef();
+            // GroupedAggregation accepts median (window path), but pivot
+            // builder rejects it because PERCENTILE_CONT cannot be
+            // composed inside a CASE WHEN bucket without a wrapper SQL
+            // PR-0.4b intentionally postpones.
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildPivotedGroupedQuery(
+                            def, null, PIVOT_COLS,
+                            "category", "status",
+                            List.of(new PivotValue("A")),
+                            List.of(new SqlBuilder.GroupedAggregation("amount", "median")),
+                            Collections.emptyMap(), Collections.emptyList(),
+                            null, null, 1, 50));
+        }
+
+        @Test
+        void aggregationOnPivotColumnDroppedAsTautological() {
+            // Pivoting on a value column would re-emit its own bucket
+            // membership as a numeric aggregate; the builder drops the
+            // entry rather than producing ambiguous SQL.
+            ReportDefinition def = pivotDef();
+            // Pivoting "status" while aggregating "status" would loop
+            // status into both sides — controller would reject upstream
+            // (status is not aggregatable), so we exercise the builder
+            // defence-in-depth path by passing it directly.
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildPivotedGroupedQuery(
+                            def, null, PIVOT_COLS,
+                            "category", "status",
+                            List.of(new PivotValue("A")),
+                            // Only aggregation targets pivot column → after
+                            // drop the sanitized list is empty → builder
+                            // throws "requires at least one valid agg".
+                            List.of(new SqlBuilder.GroupedAggregation("status", "count")),
+                            Collections.emptyMap(), Collections.emptyList(),
+                            null, null, 1, 50));
+        }
+
+        @Test
+        void filterModelPredicatePushedDownAlongsidePivot() {
+            ReportDefinition def = pivotDef();
+            Map<String, Object> filterModel = Map.of(
+                    "category", Map.of("type", "equals", "filter", "x"));
+            SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                    def, null, PIVOT_COLS,
+                    "category", "status",
+                    List.of(new PivotValue("A")),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    filterModel, Collections.emptyList(),
+                    null, null, 1, 50);
+
+            // Filter clause lands inside the FROM clause WHERE block,
+            // not on the outer pivot expression — RLS+filter must run
+            // BEFORE the pivot aggregation.
+            assertThat(q.sql())
+                    .contains("WHERE 1=1")
+                    .contains("[category] =");
+            // Pivot literal is still bound to the named param.
+            assertThat(q.params().getValue("_pivot_0")).isEqualTo("A");
+        }
+
+        @Test
+        void sortOnPivotResultFieldHonored() {
+            ReportDefinition def = pivotDef();
+            SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedQuery(
+                    def, null, PIVOT_COLS,
+                    "category", "status",
+                    List.of(new PivotValue("A")),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(),
+                    List.of(Map.of("colId", "pvt__status__A__sum__amount", "sort", "desc")),
+                    null, null, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("ORDER BY [pvt__status__A__sum__amount] DESC")
+                    // Stable tie-breaker on the group column for
+                    // deterministic OFFSET/FETCH paging.
+                    .contains(", [category] ASC");
         }
     }
 }

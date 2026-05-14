@@ -43,24 +43,96 @@ public class QueryEngine {
     }
 
     /**
+     * PR-0.4b (Codex thread {@code 019e2695}): execute a single-level
+     * pivoted GROUP BY query. SQL shape and contract are documented on
+     * {@link SqlBuilder#buildPivotedGroupedQuery}.
+     *
+     * <p>The returned {@link PagedData#pivotResultFields()} carries the
+     * ordered alias list AG Grid SSRM expects on its {@code
+     * pivotResultFields} response field. {@code total} is the count of
+     * distinct group buckets (same semantic as {@link #executeGroupedQuery}).
+     */
+    public PagedData executePivotedGroupedQuery(
+            ReportDefinition def,
+            AuthzMeResponse authz,
+            String groupColumn,
+            String pivotColumn,
+            List<com.example.report.registry.PivotValue> pivotValues,
+            List<SqlBuilder.GroupedAggregation> aggregations,
+            Map<String, Object> agGridFilter,
+            List<Map<String, String>> sortModel,
+            int page,
+            int pageSize) {
+        List<String> visibleColumns = columnFilter.getVisibleColumns(def, authz);
+        RowFilterInjector.RlsResult rls = rowFilterInjector.buildRlsClause(def, authz);
+
+        YearlySchemaResolver.ResolvedSchemas schemas =
+                resolveSchemas(def, authz, agGridFilter);
+
+        SqlBuilder.PivotedBuiltQuery dataQuery = sqlBuilder.buildPivotedGroupedQuery(
+                def, schemas, visibleColumns,
+                groupColumn, pivotColumn, pivotValues, aggregations,
+                agGridFilter, sortModel,
+                rls.whereClause(), rls.params(), page, pageSize);
+
+        log.debug("Pivoted report query [{} GROUP BY {} PIVOT {}]: {}",
+                def.key(), groupColumn, pivotColumn, dataQuery.sql());
+
+        List<Map<String, Object>> items =
+                jdbc.queryForList(dataQuery.sql(), dataQuery.params());
+
+        long total = -1;
+        try {
+            SqlBuilder.BuiltQuery countQuery = sqlBuilder.buildGroupedCountQuery(
+                    def, schemas, visibleColumns, groupColumn, agGridFilter,
+                    rls.whereClause(), rls.params());
+            Long count = jdbc.queryForObject(countQuery.sql(), countQuery.params(), Long.class);
+            total = count != null ? count : -1;
+        } catch (Exception e) {
+            log.warn("Pivoted count query failed for report {} (groupBy={}, pivot={}): {}",
+                    def.key(), groupColumn, pivotColumn, e.getMessage());
+        }
+
+        return new PagedData(items, total, page, pageSize,
+                dataQuery.warnings(), dataQuery.pivotResultFields());
+    }
+
+    /**
      * Codex 019e0c99 iter-3 §C absorb: warnings ride along the result so
      * controllers can lift them onto response headers (e.g.
-     * {@code X-Report-Degraded}). Backward-compat constructor lets pre-existing
-     * callers stay (warnings default to empty).
+     * {@code X-Report-Degraded}). Backward-compat constructors let
+     * pre-existing callers stay (warnings + pivotResultFields default
+     * to empty).
+     *
+     * <p>PR-0.4b (Codex thread {@code 019e2695}): {@code pivotResultFields}
+     * carries the ordered alias list emitted by
+     * {@link SqlBuilder#buildPivotedGroupedQuery}. Non-pivot execution
+     * paths default the list to empty so {@link PagedData} stays the
+     * single response envelope for grouped, flat, and pivoted queries.
      */
     public record PagedData(
             List<Map<String, Object>> items,
             long total,
             int page,
             int pageSize,
-            List<DegradationWarning> warnings) {
+            List<DegradationWarning> warnings,
+            List<String> pivotResultFields) {
 
         public PagedData(List<Map<String, Object>> items, long total, int page, int pageSize) {
-            this(items, total, page, pageSize, List.of());
+            this(items, total, page, pageSize, List.of(), List.of());
+        }
+
+        public PagedData(List<Map<String, Object>> items, long total,
+                          int page, int pageSize,
+                          List<DegradationWarning> warnings) {
+            this(items, total, page, pageSize, warnings, List.of());
         }
 
         public PagedData {
             warnings = warnings == null ? List.of() : List.copyOf(warnings);
+            pivotResultFields = pivotResultFields == null
+                    ? List.of()
+                    : List.copyOf(pivotResultFields);
         }
     }
 

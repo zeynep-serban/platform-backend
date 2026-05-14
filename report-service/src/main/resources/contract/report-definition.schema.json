@@ -162,6 +162,39 @@
             }
           },
           "additionalProperties": false
+        },
+        "pivotValues": {
+          "description": "PR-0.4b (Codex 019e2695): registry-declared pivot bucket enumeration. Each entry materialises into a backend `CASE WHEN [field] = :value` aggregate; SQL literals bind as named parameters so the predicate stays parametric. Required when pivotable=true and the report enables server-side pivot. Maximum 8 entries — combined cap with valueCols ensures `pivotValues * valueCols <= 32` column budget.",
+          "type": ["array", "null"],
+          "maxItems": 8,
+          "items": {
+            "oneOf": [
+              {
+                "description": "Short form: SQL value doubles as user-facing label.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              {
+                "description": "Object form: explicit SQL value + display label split.",
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["value"],
+                "properties": {
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                }
+              }
+            ]
+          }
         }
       }
     },
