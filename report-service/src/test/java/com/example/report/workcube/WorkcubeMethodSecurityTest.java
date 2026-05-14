@@ -62,8 +62,14 @@ class WorkcubeMethodSecurityTest {
         }
 
         @Bean
-        WorkcubeReportController workcubeReportController(WorkcubeReportRepository repo) {
-            return new WorkcubeReportController(repo);
+        WorkcubeReportExecutionService workcubeReportExecutionService() {
+            return mock(WorkcubeReportExecutionService.class);
+        }
+
+        @Bean
+        WorkcubeReportController workcubeReportController(WorkcubeReportRepository repo,
+                                                          WorkcubeReportExecutionService service) {
+            return new WorkcubeReportController(repo, service);
         }
     }
 
@@ -76,9 +82,15 @@ class WorkcubeMethodSecurityTest {
     @Autowired
     private WorkcubeReportRepository repo;
 
+    @Autowired
+    private WorkcubeReportExecutionService executionService;
+
     @BeforeEach
     void clearContext() {
         SecurityContextHolder.clearContext();
+        // Reset bean mocks shared across tests (singleton scope in
+        // @ContextConfiguration; previous test interactions leak otherwise)
+        org.mockito.Mockito.reset(permissionResolver, repo, executionService);
     }
 
     @AfterEach
@@ -123,6 +135,98 @@ class WorkcubeMethodSecurityTest {
 
         ResponseEntity<?> response = controller.listViews();
         assertThat(response.getStatusCode().value()).isEqualTo(200);
+    }
+
+    // ---- Adım 11.3 new endpoint method-security coverage (Codex iter-30) ----
+
+    @Test
+    void reportData_denies_403_whenNonAdmin() {
+        Jwt jwt = jwt("user2");
+        SecurityContextHolder.getContext().setAuthentication(new JwtAuthenticationToken(jwt));
+
+        AuthzMeResponse nonAdmin = new AuthzMeResponse();
+        nonAdmin.setSuperAdmin(false);
+        when(permissionResolver.getAuthzMe(any())).thenReturn(nonAdmin);
+
+        assertThatThrownBy(() -> controller.reportData("workcube-inv", 1, 50, null, null, null, jwt))
+                .isInstanceOf(AccessDeniedException.class);
+    }
+
+    @Test
+    void reportData_allows_andDelegatesToService_whenSuperAdmin() {
+        Jwt jwt = jwt("admin2");
+        SecurityContextHolder.getContext().setAuthentication(new JwtAuthenticationToken(jwt));
+
+        AuthzMeResponse admin = new AuthzMeResponse();
+        admin.setSuperAdmin(true);
+        when(permissionResolver.getAuthzMe(any())).thenReturn(admin);
+        when(executionService.executeData(any(), org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(), any(), any(), any(), any()))
+                .thenReturn(new com.example.report.dto.PagedResultDto<Map<String, Object>>(
+                        List.of(), 0L, 1, 50));
+
+        ResponseEntity<?> response = controller.reportData(
+                "workcube-inv", 1, 50, null, null, null, jwt);
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+    }
+
+    @Test
+    void reportData_workcubeSecurityException_propagatesToHandler() {
+        // Codex iter-31 absorb: prove WorkcubeQuerySecurityException
+        // (thrown by adapter via service) bubbles out of controller
+        // unchanged so @RestControllerAdvice WorkcubeQueryExceptionHandler
+        // can map it to 403 workcube_query_security_violation. Controller
+        // must NOT swallow this exception (only DataAccessResourceFailureException
+        // is caught for degraded mode).
+        Jwt jwt = jwt("admin3");
+        SecurityContextHolder.getContext().setAuthentication(new JwtAuthenticationToken(jwt));
+
+        AuthzMeResponse admin = new AuthzMeResponse();
+        admin.setSuperAdmin(true);
+        when(permissionResolver.getAuthzMe(any())).thenReturn(admin);
+        when(executionService.executeData(any(), org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(), any(), any(), any(), any()))
+                .thenThrow(new WorkcubeQuerySecurityException("workcube-inv",
+                        "rendered SQL contains rogue table"));
+
+        assertThatThrownBy(() -> controller.reportData("workcube-inv", 1, 50, null, null, null, jwt))
+                .isInstanceOf(WorkcubeQuerySecurityException.class);
+    }
+
+    @Test
+    void reportData_mssqlUnavailable_returns503() {
+        // Codex iter-31 absorb: DataAccessResourceFailureException ->
+        // controller's degraded() path -> 503 with mssql_unavailable body
+        Jwt jwt = jwt("admin4");
+        SecurityContextHolder.getContext().setAuthentication(new JwtAuthenticationToken(jwt));
+
+        AuthzMeResponse admin = new AuthzMeResponse();
+        admin.setSuperAdmin(true);
+        when(permissionResolver.getAuthzMe(any())).thenReturn(admin);
+        when(executionService.executeData(any(), org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(), any(), any(), any(), any()))
+                .thenThrow(new org.springframework.dao.DataAccessResourceFailureException(
+                        "MSSQL connection lost"));
+
+        ResponseEntity<?> response = controller.reportData(
+                "workcube-inv", 1, 50, null, null, null, jwt);
+        assertThat(response.getStatusCode().value()).isEqualTo(503);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertThat(body).containsEntry("error", "mssql_unavailable");
+    }
+
+    @Test
+    void reportCount_denies_403_whenNonAdmin() {
+        Jwt jwt = jwt("user3");
+        SecurityContextHolder.getContext().setAuthentication(new JwtAuthenticationToken(jwt));
+
+        AuthzMeResponse nonAdmin = new AuthzMeResponse();
+        nonAdmin.setSuperAdmin(false);
+        when(permissionResolver.getAuthzMe(any())).thenReturn(nonAdmin);
+
+        assertThatThrownBy(() -> controller.reportCount("workcube-inv", null, null, jwt))
+                .isInstanceOf(AccessDeniedException.class);
     }
 
     private Jwt jwt(String sub) {

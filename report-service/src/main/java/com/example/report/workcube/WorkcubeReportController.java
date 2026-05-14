@@ -1,17 +1,24 @@
 package com.example.report.workcube;
 
+import com.example.report.authz.CompanyHeaderScopeNarrower;
+import com.example.report.dto.PagedResultDto;
 import java.util.HashMap;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.lang.Nullable;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -48,9 +55,12 @@ public class WorkcubeReportController {
     private static final Logger log = LoggerFactory.getLogger(WorkcubeReportController.class);
 
     private final WorkcubeReportRepository repo;
+    private final WorkcubeReportExecutionService executionService;
 
-    public WorkcubeReportController(WorkcubeReportRepository repo) {
+    public WorkcubeReportController(WorkcubeReportRepository repo,
+                                    @Nullable WorkcubeReportExecutionService executionService) {
         this.repo = repo;
+        this.executionService = executionService;
     }
 
     /**
@@ -67,7 +77,7 @@ public class WorkcubeReportController {
     @GetMapping(value = "/views", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> listViews() {
         try {
-            return ResponseEntity.ok(repo.listAllowedViews());
+            return ResponseEntity.ok().headers(deprecationHeaders()).body(repo.listAllowedViews());
         } catch (DataAccessResourceFailureException ex) {
             return degraded("listViews", ex);
         }
@@ -102,7 +112,7 @@ public class WorkcubeReportController {
         }
         try {
             java.util.List<Map<String, Object>> rows = repo.queryView(key, filters, limit);
-            return ResponseEntity.ok(Map.of(
+            return ResponseEntity.ok().headers(deprecationHeaders()).body(Map.of(
                 "key", key,
                 "limit", limit,
                 "rowCount", rows.size(),
@@ -128,9 +138,71 @@ public class WorkcubeReportController {
         }
         try {
             long count = repo.countRows(key);
-            return ResponseEntity.ok(Map.of("key", key, "count", count));
+            return ResponseEntity.ok().headers(deprecationHeaders())
+                    .body(Map.of("key", key, "count", count));
         } catch (DataAccessResourceFailureException ex) {
             return degraded("countView", ex);
+        }
+    }
+
+    /**
+     * Legacy {@code /views/*} endpoint deprecation signal (Codex iter-29
+     * absorb). Successor endpoint surface is {@code /reports/{key}/data}
+     * + {@code /count}. {@code Sunset} date pinned to Adım 11.5 prod
+     * cutover scope (TBD).
+     */
+    private HttpHeaders deprecationHeaders() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.add("Deprecation", "true");
+        headers.add("Link", "</api/v1/workcube/reports>; rel=\"successor-version\"");
+        return headers;
+    }
+
+    // ---- Adım 11.3: adapter-backed report endpoints (Codex iter-29 absorb) ----
+
+    /**
+     * Adapter-backed report execution endpoint (Adım 11.3).
+     *
+     * <p>Path: {@code GET /api/v1/workcube/reports/{key}/data}
+     *
+     * <p>Pipeline: registry → permission resolver → company narrower →
+     * {@link WorkcubeQueryAdapter#executeData} → {@link PagedResultDto}.
+     *
+     * <p>Interim {@code @PreAuthorize} class-level gate still applies:
+     * non-admin → 403 (Adım 1.5 gate; Adım 11.4 removes it).
+     */
+    @GetMapping(value = "/reports/{key}/data", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> reportData(
+            @PathVariable("key") String key,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "50") int pageSize,
+            @RequestParam(required = false) String sort,
+            @RequestParam(required = false) String advancedFilter,
+            @RequestHeader(value = CompanyHeaderScopeNarrower.HEADER_NAME, required = false) String companyHeader,
+            @AuthenticationPrincipal Jwt jwt) {
+        try {
+            PagedResultDto<Map<String, Object>> result = executionService.executeData(
+                    key, page, pageSize, sort, advancedFilter, companyHeader, jwt);
+            return ResponseEntity.ok(result);
+        } catch (DataAccessResourceFailureException ex) {
+            return degraded("reportData", ex);
+        }
+    }
+
+    /**
+     * Adapter-backed count endpoint (Adım 11.3).
+     */
+    @GetMapping(value = "/reports/{key}/count", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> reportCount(
+            @PathVariable("key") String key,
+            @RequestParam(required = false) String advancedFilter,
+            @RequestHeader(value = CompanyHeaderScopeNarrower.HEADER_NAME, required = false) String companyHeader,
+            @AuthenticationPrincipal Jwt jwt) {
+        try {
+            long count = executionService.executeCount(key, advancedFilter, companyHeader, jwt);
+            return ResponseEntity.ok(Map.of("key", key, "count", count));
+        } catch (DataAccessResourceFailureException ex) {
+            return degraded("reportCount", ex);
         }
     }
 
