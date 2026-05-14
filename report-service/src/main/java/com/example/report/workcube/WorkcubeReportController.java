@@ -9,6 +9,7 @@ import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -33,13 +34,15 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>Degraded mode (ADR-0005): MSSQL unreachable → 503 Service Unavailable
  * (PG endpoint'leri etkilenmez, ayrı health indicator).
  *
- * <p>Auth: Mevcut Spring Security chain (JWT required) zaten /api/** üzerinde aktif —
- * bu controller'ın özel bir yetki rule'u yok, çünkü authz alttaki PermissionResolver
- * üzerinden gelecek (faz 19.MSSQL.B'de attribute'lu erişim eklenecek).
+ * <p>Auth: Interim admin-only via {@link WorkcubeAccessGuard#isInterimAdmin(org.springframework.security.core.Authentication)}
+ * (plan §7 Adım 1.5, Codex thread {@code 019e258f} iter-4 A-prime).
+ * Non-admin authenticated user → 403 FORBIDDEN; no-auth → 401 (Spring Security chain).
+ * TODO(Adım-11): replaced by WorkcubeQueryAdapter full authz/RLS/allowlist gate.
  */
 @RestController
 @RequestMapping("/api/v1/workcube")
 @ConditionalOnBean(name = "workcubeMssqlDataSource")
+@PreAuthorize("@workcubeAccessGuard.isInterimAdmin(authentication)")
 public class WorkcubeReportController {
 
     private static final Logger log = LoggerFactory.getLogger(WorkcubeReportController.class);
