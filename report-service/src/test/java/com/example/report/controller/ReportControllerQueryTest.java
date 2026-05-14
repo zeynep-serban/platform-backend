@@ -787,7 +787,10 @@ class ReportControllerQueryTest {
 
         @Test
         void valueColsInvalidAggFunc_returns400Structured() {
-            // "median" is not in ALLOWED_AGG_FUNCS → fail closed.
+            // Codex 019e2695 iter-5 absorb: PR #6a accepts `median`,
+            // so the negative test now references a permanently
+            // invalid token. Roadmap functions (percentile, weightedavg)
+            // will become valid in later PRs and must not be used here.
             stubAuthz(true, List.of());
             when(registry.get("any")).thenReturn(Optional.of(report("any")));
             when(columnFilter.getVisibleColumnDefinitions(any(), any()))
@@ -800,7 +803,7 @@ class ReportControllerQueryTest {
             var dto = new ReportQueryRequestDto(
                     0, 50,
                     List.of(new ColumnVO("category", "Category", "category", null)),
-                    List.of(new ColumnVO("amount", "Amount", "amount", "median")),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "garbage_xyz")),
                     null, false, null, null, null);
 
             var response = controller.queryReport("any", dto, null, testJwt("admin"));
@@ -809,6 +812,37 @@ class ReportControllerQueryTest {
             ReportQueryErrorDto error =
                     assertInstanceOf(ReportQueryErrorDto.class, response.getBody());
             assertEquals("INVALID_AGGREGATION_REQUEST", error.code());
+        }
+
+        @Test
+        void medianAggOnNonNumericColumn_returns400Structured() {
+            // PR #6a contract: median is only valid on `type=number`
+            // columns. Targeting it at a text column must yield a
+            // structured 400 rather than a SQL Server runtime error.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("name", "Name", "text",
+                                    120, false, false, true, null)));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("name", "Name", "name", "median")),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            ReportQueryErrorDto error =
+                    assertInstanceOf(ReportQueryErrorDto.class, response.getBody());
+            assertEquals("INVALID_AGGREGATION_REQUEST", error.code());
+            assertTrue(error.message().contains("median"),
+                    "error message should mention 'median' so the client "
+                            + "can surface why the aggregation was rejected");
         }
 
         @Test

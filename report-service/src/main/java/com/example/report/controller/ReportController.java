@@ -629,7 +629,29 @@ public class ReportController {
             // GroupedAggregation constructor validates against
             // ALLOWED_AGG_FUNCS and throws IllegalArgumentException
             // — propagated unchanged so the caller turns it into a 400.
-            out.add(new SqlBuilder.GroupedAggregation(vc.field(), func));
+            SqlBuilder.GroupedAggregation agg =
+                    new SqlBuilder.GroupedAggregation(vc.field(), func);
+
+            // PR #6a (Codex thread 019e2695): median is only valid on
+            // numeric columns. SQL Server PERCENTILE_CONT requires a
+            // numeric ordering column; running it on a text/date field
+            // would either fail at execution or coerce silently. We
+            // catch the mismatch here so the client sees a structured
+            // 400 INVALID_AGGREGATION_REQUEST rather than a database
+            // error or a misleading empty result.
+            if ("median".equals(agg.func())) {
+                ColumnDefinition cd = byField.get(vc.field());
+                if (cd == null || cd.type() == null
+                        || !"number".equalsIgnoreCase(cd.type())) {
+                    throw new IllegalArgumentException(
+                            "median aggregation is only valid on numeric "
+                                    + "columns; got field '" + vc.field()
+                                    + "' with type '"
+                                    + (cd != null ? cd.type() : "?") + "'");
+                }
+            }
+
+            out.add(agg);
         }
         return out;
     }

@@ -341,6 +341,83 @@ class SqlBuilderMssqlIntegrationTest {
         assertThat(sdpQ.sql()).contains("STDEVP([amount])");
     }
 
+    /**
+     * PR #6a (Codex 019e2695) median execution proof against a real
+     * MSSQL 2022 instance. Three sub-cases share a single scratch
+     * table:
+     *
+     * <ul>
+     *   <li>Odd group (3 rows: 3, 6, 9) → median = 6 — exact value.</li>
+     *   <li>Even group (4 rows: 1, 2, 3, 4) → median = 2.5 —
+     *       interpolated midpoint of the two middle values, the
+     *       canonical PERCENTILE_CONT semantic.</li>
+     *   <li>Group with a NULL row → PERCENTILE_CONT ignores the NULL
+     *       in the percentile calculation, but the outer COUNT(*)
+     *       still counts every row including the NULL.</li>
+     * </ul>
+     *
+     * <p>MSSQL PERCENTILE_CONT returns {@code float(53)}, so the
+     * assertions use {@code within(0.0001)} to absorb the float
+     * round-trip without losing the median's semantic precision.
+     */
+    @Test
+    void buildGroupedQuery_medianAggregation_overRealMssql() {
+        ReportDefinition def = scratch(
+                "tx_median",
+                List.of(
+                        new ColumnDefinition("category", "Cat", "text", 100, false),
+                        new ColumnDefinition("amount", "Amount", "number", 100, false)),
+                "CREATE TABLE [{schema}].[tx_median] "
+                        + "(category NVARCHAR(20) NOT NULL, "
+                        + "amount DECIMAL(18,2) NULL)",
+                List.of(
+                        // Odd group → median = 6
+                        "INSERT INTO [{schema}].[tx_median] VALUES ('ODD', 3.00)",
+                        "INSERT INTO [{schema}].[tx_median] VALUES ('ODD', 6.00)",
+                        "INSERT INTO [{schema}].[tx_median] VALUES ('ODD', 9.00)",
+                        // Even group → median = 2.5
+                        "INSERT INTO [{schema}].[tx_median] VALUES ('EVEN', 1.00)",
+                        "INSERT INTO [{schema}].[tx_median] VALUES ('EVEN', 2.00)",
+                        "INSERT INTO [{schema}].[tx_median] VALUES ('EVEN', 3.00)",
+                        "INSERT INTO [{schema}].[tx_median] VALUES ('EVEN', 4.00)",
+                        // NULL row in NULLY group → PERCENTILE_CONT skips
+                        // null; remaining 10, 20 → median = 15
+                        "INSERT INTO [{schema}].[tx_median] VALUES ('NULLY', 10.00)",
+                        "INSERT INTO [{schema}].[tx_median] VALUES ('NULLY', 20.00)",
+                        "INSERT INTO [{schema}].[tx_median] VALUES ('NULLY', NULL)"));
+
+        SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                def, null, List.of("category", "amount"),
+                "category",
+                List.of(new SqlBuilder.GroupedAggregation("amount", "median")),
+                Collections.emptyMap(),
+                List.of(Map.of("colId", "category", "sort", "asc")),
+                null, null, 1, 50);
+
+        List<Map<String, Object>> rows = jdbc.queryForList(q.sql(), q.params());
+        assertThat(rows).hasSize(3);
+
+        // The outer SELECT exposes the median under the external
+        // alias [amount] — no [amount_median] suffix.
+        Map<String, Object> evenRow = rows.stream()
+                .filter(r -> "EVEN".equals(r.get("category"))).findFirst().orElseThrow();
+        Map<String, Object> oddRow = rows.stream()
+                .filter(r -> "ODD".equals(r.get("category"))).findFirst().orElseThrow();
+        Map<String, Object> nullyRow = rows.stream()
+                .filter(r -> "NULLY".equals(r.get("category"))).findFirst().orElseThrow();
+
+        assertThat(((Number) evenRow.get("amount")).doubleValue())
+                .isCloseTo(2.5, within(0.0001));
+        assertThat(((Number) oddRow.get("amount")).doubleValue())
+                .isCloseTo(6.0, within(0.0001));
+        // NULLY group has 3 rows total (one is NULL) — PERCENTILE_CONT
+        // ignores the null in median calc but _rowCount still counts it.
+        assertThat(((Number) nullyRow.get("amount")).doubleValue())
+                .isCloseTo(15.0, within(0.0001));
+        assertThat(((Number) nullyRow.get("_rowCount")).intValue())
+                .isEqualTo(3);
+    }
+
     @Test
     void buildGroupedCountQuery_returnsBucketCount_overRealMssql() {
         ReportDefinition def = scratch(

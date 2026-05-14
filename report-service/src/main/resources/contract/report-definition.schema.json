@@ -143,9 +143,9 @@
           "type": "boolean"
         },
         "defaultAggFunc": {
-          "description": "PR-0.2 + PR-0.4z: default aggregation function (sum/avg/min/max/count/stddev/stddevp/distinctcount). null → sum for numeric, count otherwise. median/percentile/weightedAvg deferred to PR #6a/#6b/PR-0.4.",
+          "description": "PR-0.2 + PR-0.4z + PR #6a: default aggregation function (sum/avg/min/max/count/stddev/stddevp/distinctcount/median). null → sum for numeric, count otherwise. percentile/weightedAvg deferred to PR #6b / PR-0.4.",
           "type": ["string", "null"],
-          "enum": ["sum", "avg", "min", "max", "count", "stddev", "stddevp", "distinctcount", null]
+          "enum": ["sum", "avg", "min", "max", "count", "stddev", "stddevp", "distinctcount", "median", null]
         }
       }
     },

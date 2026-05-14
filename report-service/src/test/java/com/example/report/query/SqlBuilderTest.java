@@ -580,10 +580,31 @@ class SqlBuilderTest {
         }
 
         @Test
-        void invalidAggregationFunctionRejected() {
+        void invalidAggregationFunctionRejected_unknownToken() {
+            // Codex 019e2695 iter-5 absorb: PR #6a accepts `median`, so
+            // the negative case here must reference a permanently
+            // invalid token rather than a roadmap function. Same
+            // discipline applies to `percentile` (PR #6b) and
+            // `weightedavg` (PR-0.4) — they belong in positive tests
+            // once those PRs land.
             org.junit.jupiter.api.Assertions.assertThrows(
                     IllegalArgumentException.class,
-                    () -> new SqlBuilder.GroupedAggregation("col", "median"));
+                    () -> new SqlBuilder.GroupedAggregation("col", "garbage_xyz"));
+        }
+
+        @Test
+        void medianAggregationFunctionAccepted() {
+            SqlBuilder.GroupedAggregation a =
+                    new SqlBuilder.GroupedAggregation("amount", "median");
+            assertThat(a.func()).isEqualTo("median");
+            assertThat(a.field()).isEqualTo("amount");
+        }
+
+        @Test
+        void medianAggregationFunctionNormalizedToLowerCase() {
+            SqlBuilder.GroupedAggregation a =
+                    new SqlBuilder.GroupedAggregation("amount", "MEDIAN");
+            assertThat(a.func()).isEqualTo("median");
         }
 
         @Test
@@ -593,10 +614,12 @@ class SqlBuilderTest {
                     () -> new SqlBuilder.GroupedAggregation("", "sum"));
         }
 
-        // ── PR-0.4z extended aggregate funcs (Codex thread 019e2695) ─────
-        // distinctcount → COUNT(DISTINCT [col]); stddev → STDEV([col]);
-        // stddevp → STDEVP([col]). median + percentile remain rejected;
-        // they ship in PR #6a/#6b with their own query-shape decisions.
+        // ── Extended aggregate funcs (Codex thread 019e2695) ─────────────
+        // PR-0.4z: distinctcount → COUNT(DISTINCT [col]); stddev → STDEV;
+        // stddevp → STDEVP.
+        // PR #6a: median → PERCENTILE_CONT window + outer MAX collapse.
+        // percentile (PR #6b, aggParams contract) and weightedAvg
+        // (PR-0.4) remain on the roadmap and stay rejected here.
 
         @Test
         void appliesStddevAggregation() {
@@ -699,6 +722,133 @@ class SqlBuilderTest {
                     .contains("WHERE 1=1 AND [OWNER_ID] IN (:_rlsIds)");
             assertThat(q.params().getValue("_rlsIds"))
                     .isEqualTo(List.of(1L, 2L));
+        }
+
+        @Test
+        void appliesMedianAggregation_emitsPercentileContWindowAndOuterMaxCollapse() {
+            // Codex 019e2695 PR #6a contract: median renders as an
+            // inner-subquery PERCENTILE_CONT window aliased as
+            // [__median_<field>], with the outer SELECT collapsing
+            // bucket rows via MAX(__median_<field>) AS [<field>].
+            // External alias stays [<field>] so the SSRM response
+            // shape matches the simple-aggregate contract.
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "median")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            // Inner subquery: PERCENTILE_CONT window aliased canonically.
+            assertThat(q.sql())
+                    .contains("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY [amount])")
+                    .contains("OVER (PARTITION BY [category])")
+                    .contains("AS [__median_amount]");
+            // Outer SELECT: MAX collapse + external alias [amount].
+            assertThat(q.sql())
+                    .contains("MAX([__median_amount]) AS [amount]");
+            // Subquery wrapper.
+            assertThat(q.sql())
+                    .contains("FROM (")
+                    .contains(") AS _med")
+                    .contains("GROUP BY [category]");
+            // Codex 019e2695 iter-6: defensive assertion that median
+            // does NOT travel through the simple-aggregate render path.
+            // `MEDIAN([col])` would be invalid T-SQL — the inner
+            // subquery + outer MAX collapse is the only valid shape.
+            assertThat(q.sql()).doesNotContain("MEDIAN([");
+        }
+
+        @Test
+        void medianAggregationMixedWithSum_keepsBothOnTheSameOuterSelect() {
+            // Different fields: SUM on `amount`, MEDIAN on `cost`.
+            // The simple SUM stays on the existing render path and the
+            // median piggybacks the inner subquery wrapper.
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false),
+                            new ColumnDefinition("cost", "Cost", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount", "cost"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum"),
+                            new SqlBuilder.GroupedAggregation("cost", "median")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    null, null, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("SUM([amount]) AS [amount]")
+                    .contains("MAX([__median_cost]) AS [cost]")
+                    .contains("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY [cost])");
+        }
+
+        @Test
+        void medianAggregation_preservesRlsClauseInsideInnerSubquery() {
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            MapSqlParameterSource rlsParams = new MapSqlParameterSource()
+                    .addValue("_rlsIds", List.of(1L, 2L));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "median")),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    "[OWNER_ID] IN (:_rlsIds)", rlsParams, 1, 50);
+
+            // RLS clause must land inside the FROM-clause filter, which
+            // is captured by the inner subquery alongside the
+            // PERCENTILE_CONT window.
+            assertThat(q.sql())
+                    .contains("WHERE 1=1 AND [OWNER_ID] IN (:_rlsIds)")
+                    .contains("PERCENTILE_CONT(0.5)")
+                    .contains("MAX([__median_amount]) AS [amount]");
+            assertThat(q.params().getValue("_rlsIds"))
+                    .isEqualTo(List.of(1L, 2L));
+        }
+
+        @Test
+        void medianAggregation_sortOnMedianFieldGetsTieBreaker() {
+            // PR #2 tie-breaker discipline composes with PR #6a median:
+            // sorting on the median alias must still append the group
+            // column as the deterministic ASC tail.
+            ReportDefinition def = new ReportDefinition(
+                    "test-report", "v1", "Test", "desc", "cat",
+                    "ORDERS", "dbo", "static", null, null,
+                    List.of(new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+
+            SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                    def, null, List.of("category", "amount"),
+                    "category",
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "median")),
+                    Collections.emptyMap(),
+                    List.of(Map.of("colId", "amount", "sort", "desc")),
+                    null, null, 1, 50);
+
+            assertThat(q.sql())
+                    .contains("ORDER BY [amount] DESC, [category] ASC OFFSET");
         }
 
         @Test

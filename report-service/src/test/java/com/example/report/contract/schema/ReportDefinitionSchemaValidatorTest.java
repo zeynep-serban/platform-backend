@@ -212,10 +212,12 @@ class ReportDefinitionSchemaValidatorTest {
     }
 
     @Test
-    void validate_medianDefaultAggFunc_rejectedBySchemaGate() {
-        // median ships in PR #6a (ROW_NUMBER vs window decision pending).
-        // Schema gate must keep rejecting it until that PR lands so a
-        // half-implemented JSON entry cannot sneak past contract gate.
+    void validate_medianDefaultAggFunc_passesSchemaGate() {
+        // PR #6a (Codex 019e2695): median is now a valid registry
+        // token; schema gate must let it through. The numeric-column
+        // constraint is enforced at the controller sanitizeAggregations
+        // layer rather than the JSON schema gate (cross-field rules
+        // would be too heavy to express in the schema).
         String json = "{\"contractVersion\":1,\"key\":\"r-median\",\"version\":\"1.0\","
                 + "\"title\":\"Med\",\"category\":\"Finans\","
                 + "\"source\":\"TBL\",\"sourceSchema\":\"workcube_mikrolink_1\","
@@ -229,6 +231,30 @@ class ReportDefinitionSchemaValidatorTest {
                 + "\"defaultAggFunc\":\"median\"}]}";
 
         List<ContractViolation> violations = validator.validate(json, "r-median.json");
+
+        assertThat(violations).isEmpty();
+    }
+
+    @Test
+    void validate_garbageDefaultAggFunc_rejectedBySchemaGate() {
+        // Codex 019e2695 iter-5 absorb: the negative schema test now
+        // uses a permanently invalid token rather than `median`
+        // (now valid in PR #6a) or roadmap tokens like `percentile`
+        // (PR #6b) and `weightedavg` (PR-0.4) that will become valid
+        // in upcoming PRs.
+        String json = "{\"contractVersion\":1,\"key\":\"r-garbage\",\"version\":\"1.0\","
+                + "\"title\":\"Garbage\",\"category\":\"Finans\","
+                + "\"source\":\"TBL\",\"sourceSchema\":\"workcube_mikrolink_1\","
+                + "\"schemaMode\":\"static\","
+                + "\"tenantBoundary\":{\"mode\":\"schema\",\"scopeType\":\"tenant\","
+                + "\"schemaResolver\":\"sourceSchemaLiteral\","
+                + "\"schemaPattern\":\"workcube_mikrolink_{tenantId}\","
+                + "\"reason\":\"Tenant-scoped via literal schema name suffix\"},"
+                + "\"columns\":[{\"field\":\"AMOUNT\",\"headerName\":\"Amount\","
+                + "\"type\":\"number\",\"aggregatable\":true,"
+                + "\"defaultAggFunc\":\"garbage_xyz\"}]}";
+
+        List<ContractViolation> violations = validator.validate(json, "r-garbage.json");
 
         assertThat(violations).anyMatch(v ->
                 "REPORT_SCHEMA_INVALID".equals(v.ruleId())
