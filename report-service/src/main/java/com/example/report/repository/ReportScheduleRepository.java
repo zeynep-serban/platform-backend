@@ -62,6 +62,24 @@ public class ReportScheduleRepository {
         ) > 0;
     }
 
+    /**
+     * Lookup the {@code report_key} owning a given schedule (used by
+     * {@code ScheduleController} authorization helpers to resolve the per-report
+     * scope check when the URL has only the {@code scheduleId}).
+     */
+    public Optional<String> findReportKeyById(String scheduleId) {
+        try {
+            String result = jdbc.queryForObject(
+                    "SELECT report_key FROM report_schedules WHERE id = :id::uuid",
+                    new MapSqlParameterSource("id", scheduleId),
+                    String.class
+            );
+            return Optional.ofNullable(result);
+        } catch (org.springframework.dao.EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
     private MapSqlParameterSource buildParams(Map<String, Object> schedule) {
         MapSqlParameterSource params = new MapSqlParameterSource();
         params.addValue("reportKey", schedule.get("reportKey"));

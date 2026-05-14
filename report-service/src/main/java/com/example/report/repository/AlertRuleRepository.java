@@ -79,6 +79,24 @@ public class AlertRuleRepository {
         ) > 0;
     }
 
+    /**
+     * Lookup the {@code report_key} owning a given alert rule (used by
+     * {@code AlertController} authorization helpers to resolve the per-report
+     * scope check when the URL has only the {@code ruleId}).
+     */
+    public Optional<String> findReportKeyById(String ruleId) {
+        try {
+            String result = jdbc.queryForObject(
+                    "SELECT report_key FROM alert_rules WHERE id = :id::uuid",
+                    new MapSqlParameterSource("id", ruleId),
+                    String.class
+            );
+            return Optional.ofNullable(result);
+        } catch (org.springframework.dao.EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
     private Map<String, Object> mapRow(ResultSet rs, int rowNum) throws SQLException {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("id", rs.getString("id"));
