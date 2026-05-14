@@ -11,6 +11,7 @@ import com.example.report.query.QueryEngine;
 import com.example.report.query.SqlBuilder;
 import com.example.report.registry.ReportDefinition;
 import com.example.report.registry.ReportRegistry;
+import com.example.report.security.JwtClaimExtractor;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
@@ -95,8 +96,7 @@ public class ReportExportController {
         SqlBuilder.BuiltQuery exportQuery = queryEngine.buildExportQuery(def, scopedAuthz, agGridFilter, sortModel);
         List<String> visibleColumns = queryEngine.getVisibleColumns(def, scopedAuthz);
 
-        String email = jwt != null ? jwt.getClaimAsString("email") : null;
-        String userId = jwt != null ? (email != null ? email : jwt.getSubject()) : authz.getUserId();
+        String userId = jwt != null ? JwtClaimExtractor.extractAuditUsername(jwt) : authz.getUserId();
         auditClient.logReportExport(key, authz.getUserId(), userId, format);
 
         // Codex 019e0c99 iter-3 §C: export path also propagates degradation

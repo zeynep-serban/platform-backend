@@ -20,6 +20,7 @@ import com.example.report.registry.ColumnDefinition;
 import com.example.report.registry.ReportDefinition;
 import com.example.report.registry.ReportRegistry;
 import com.example.report.repository.CustomReportRepository;
+import com.example.report.security.JwtClaimExtractor;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
@@ -119,10 +120,10 @@ public class ReportController {
         AuthzMeResponse authz = permissionClient.getAuthzMe(jwt);
         requireReportManage(authz, jwt, "CREATE");
 
-        String username = jwt != null ? jwt.getClaimAsString("preferred_username") : "system";
+        String username = JwtClaimExtractor.extractPreferredUsername(jwt);
         body.put("createdBy", username);
         Map<String, Object> saved = customReportRepository.save(body);
-        auditClient.logReportAccess("custom:" + saved.get("key"), authz.getUserId(), extractEmail(jwt));
+        auditClient.logReportAccess("custom:" + saved.get("key"), authz.getUserId(), JwtClaimExtractor.extractAuditUsername(jwt));
         return ResponseEntity.status(201).body(saved);
     }
 
@@ -134,7 +135,7 @@ public class ReportController {
         AuthzMeResponse authz = permissionClient.getAuthzMe(jwt);
         requireReportManageOrOwner(authz, jwt, key, "UPDATE");
 
-        String username = jwt != null ? jwt.getClaimAsString("preferred_username") : "system";
+        String username = JwtClaimExtractor.extractPreferredUsername(jwt);
         body.put("createdBy", username);
         Map<String, Object> updated = customReportRepository.update(key, body);
         return ResponseEntity.ok(updated);
@@ -149,7 +150,7 @@ public class ReportController {
 
         boolean deleted = customReportRepository.softDelete(key);
         if (deleted) {
-            auditClient.logReportAccessDenied("custom:" + key, authz.getUserId(), extractEmail(jwt), "SOFT_DELETED");
+            auditClient.logReportAccessDenied("custom:" + key, authz.getUserId(), JwtClaimExtractor.extractAuditUsername(jwt), "SOFT_DELETED");
         }
         return deleted ? ResponseEntity.noContent().build() : ResponseEntity.notFound().build();
     }
@@ -239,7 +240,7 @@ public class ReportController {
 
         QueryEngine.PagedData result = queryEngine.executeQuery(def, scopedAuthz, agGridFilter, sortModel, page, pageSize);
 
-        auditClient.logReportAccess(key, authz.getUserId(), extractEmail(jwt));
+        auditClient.logReportAccess(key, authz.getUserId(), JwtClaimExtractor.extractAuditUsername(jwt));
 
         // Codex 019e0c99 iter-3 §C: surface degradation warnings as
         // X-Report-Degraded header (dedupe by code).
@@ -397,7 +398,7 @@ public class ReportController {
                     page, pageSize);
         }
 
-        auditClient.logReportAccess(key, authz.getUserId(), extractEmail(jwt));
+        auditClient.logReportAccess(key, authz.getUserId(), JwtClaimExtractor.extractAuditUsername(jwt));
 
         // Codex 019e0c99 iter-3 §C: degradation header propagation
         // (multi-level grouped path uses same warning list as flat path).
@@ -680,7 +681,7 @@ public class ReportController {
         if (result != ReportAccessEvaluator.AccessResult.ALLOWED) {
             auditClient.logReportAccessDenied(def.key(),
                     authz != null ? authz.getUserId() : "unknown",
-                    extractEmail(jwt),
+                    JwtClaimExtractor.extractAuditUsername(jwt),
                     result.name());
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, result.name());
         }
@@ -693,7 +694,7 @@ public class ReportController {
         if (authz == null || (!authz.isSuperAdmin() && !authz.hasPermission("REPORT_VIEW"))) {
             auditClient.logReportAccessDenied("custom:*",
                     authz != null ? authz.getUserId() : "unknown",
-                    extractEmail(jwt), "DENIED_NO_REPORT_VIEW");
+                    JwtClaimExtractor.extractAuditUsername(jwt), "DENIED_NO_REPORT_VIEW");
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "DENIED_NO_REPORT_VIEW");
         }
     }
@@ -702,7 +703,7 @@ public class ReportController {
         if (authz == null || (!authz.isSuperAdmin() && !authz.hasPermission("REPORT_MANAGE"))) {
             auditClient.logReportAccessDenied("custom:" + action,
                     authz != null ? authz.getUserId() : "unknown",
-                    extractEmail(jwt), "DENIED_NO_REPORT_MANAGE");
+                    JwtClaimExtractor.extractAuditUsername(jwt), "DENIED_NO_REPORT_MANAGE");
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "DENIED_NO_REPORT_MANAGE");
         }
     }
@@ -724,7 +725,7 @@ public class ReportController {
         }
         auditClient.logReportAccessDenied("custom:" + key + ":" + action,
                 authz != null ? authz.getUserId() : "unknown",
-                extractEmail(jwt), "DENIED_NOT_OWNER_OR_MANAGE");
+                JwtClaimExtractor.extractAuditUsername(jwt), "DENIED_NOT_OWNER_OR_MANAGE");
         throw new ResponseStatusException(HttpStatus.FORBIDDEN, "DENIED_NOT_OWNER_OR_MANAGE");
     }
 
@@ -773,9 +774,4 @@ public class ReportController {
         }
     }
 
-    private String extractEmail(Jwt jwt) {
-        if (jwt == null) return "anonymous";
-        String email = jwt.getClaimAsString("email");
-        return email != null ? email : jwt.getSubject();
-    }
 }

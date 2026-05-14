@@ -17,6 +17,7 @@ import com.example.report.schema.SchemaTruthLookupContext;
 import com.example.report.schema.SchemaTruthLookupPolicy;
 import com.example.report.schema.SchemaTruthResult;
 import com.example.report.schema.SchemaTruthService;
+import com.example.report.security.JwtClaimExtractor;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -212,17 +213,11 @@ public class ReportSchemaContextController {
         if (result != ReportAccessEvaluator.AccessResult.ALLOWED) {
             auditClient.logReportAccessDenied(def.key(),
                     authz != null ? authz.getUserId() : "unknown",
-                    extractEmail(jwt),
+                    JwtClaimExtractor.extractAuditUsername(jwt),
                     result.name());
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, result.name());
         }
         return authz;
-    }
-
-    private String extractEmail(Jwt jwt) {
-        if (jwt == null) return null;
-        Object email = jwt.getClaims().get("email");
-        return email != null ? email.toString() : null;
     }
 
     /**
