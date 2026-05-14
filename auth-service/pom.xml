@@ -113,7 +113,21 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- WireMock for HTTP-level integration tests (Session 47 closure:
+             impersonation broker chain via WireMock stubs for KC + user-service
+             + permission-service). Codex 019e2022 strategy AGREE'd. -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <version>3.5.4</version>
+            <scope>test</scope>
+        </dependency>
 
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
 
         <dependency>
     <groupId>org.springframework.boot</groupId>
