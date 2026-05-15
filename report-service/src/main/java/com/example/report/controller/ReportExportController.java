@@ -151,7 +151,7 @@ public class ReportExportController {
      * live query path's error envelope.
      */
     @PostMapping("/{key}/export")
-    public ResponseEntity<?> exportReportPost(
+    public ResponseEntity<StreamingResponseBody> exportReportPost(
             @PathVariable String key,
             @RequestBody(required = false) ReportExportRequestDto requestBody,
             @RequestHeader(value = CompanyHeaderScopeNarrower.HEADER_NAME, required = false) String companyHeader,
@@ -373,8 +373,37 @@ public class ReportExportController {
                 req.sortModel());
     }
 
-    private ResponseEntity<ReportQueryErrorDto> badRequest(String code, String message) {
-        return ResponseEntity.badRequest().body(new ReportQueryErrorDto(code, message));
+    /**
+     * PR-0.5b post-deploy fix (Codex thread 019e2cd7, live cluster smoke
+     * 2026-05-15 19:25): wrap structured 400s in a
+     * {@link StreamingResponseBody} so the method signature can stay
+     * {@code ResponseEntity<StreamingResponseBody>} (single type → no
+     * generic-erasure converter resolution failure for the happy-path
+     * binary body).
+     *
+     * <p>The original {@code ResponseEntity<?>} happy-path body bound
+     * to {@code StreamingResponseBody} at runtime, but Spring's
+     * {@code HttpEntityMethodProcessor} resolves converter at the
+     * erased {@code Object} class — no message converter matches the
+     * lambda type at {@code application/vnd.openxmlformats…} content
+     * type, so the request 500s with
+     * {@code HttpMessageNotWritableException}.
+     *
+     * <p>The FE Blob → JSON parser doesn't care that the body
+     * arrived through a {@link StreamingResponseBody} indirection
+     * (the wire bytes are still the canonical
+     * {@code {"code":"...","message":"..."}} envelope), so this is
+     * a server-side serialisation fix only — FE contract unchanged.
+     */
+    private ResponseEntity<StreamingResponseBody> badRequest(String code, String message) {
+        ReportQueryErrorDto err = new ReportQueryErrorDto(code, message);
+        StreamingResponseBody body = out -> {
+            byte[] bytes = objectMapper.writeValueAsBytes(err);
+            out.write(bytes);
+        };
+        return ResponseEntity.badRequest()
+                .header("Content-Type", "application/json; charset=UTF-8")
+                .body(body);
     }
 
     /**

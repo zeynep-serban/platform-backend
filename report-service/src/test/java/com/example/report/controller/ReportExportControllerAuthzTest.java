@@ -17,6 +17,7 @@ import com.example.report.registry.ColumnDefinition;
 import com.example.report.registry.ReportDefinition;
 import com.example.report.registry.ReportRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.ByteArrayOutputStream;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -161,7 +162,7 @@ class ReportExportControllerAuthzTest {
         var response = controller.exportReportPost("any", dto, null, testJwt("admin"));
 
         assertEquals(400, response.getStatusCode().value());
-        var err = (com.example.report.dto.ReportQueryErrorDto) response.getBody();
+        var err = readErrorBody(response);
         assertEquals("PIVOT_NOT_CONFIGURED", err.code());
     }
 
@@ -183,7 +184,7 @@ class ReportExportControllerAuthzTest {
         var response = controller.exportReportPost("any", dto, null, testJwt("admin"));
 
         assertEquals(400, response.getStatusCode().value());
-        var err = (com.example.report.dto.ReportQueryErrorDto) response.getBody();
+        var err = readErrorBody(response);
         assertEquals("INVALID_AGGREGATION_REQUEST", err.code());
     }
 
@@ -206,7 +207,7 @@ class ReportExportControllerAuthzTest {
         var response = controller.exportReportPost("any", dto, null, testJwt("admin"));
 
         assertEquals(400, response.getStatusCode().value());
-        var err = (com.example.report.dto.ReportQueryErrorDto) response.getBody();
+        var err = readErrorBody(response);
         assertEquals("INVALID_AGGREGATION_REQUEST", err.code());
     }
 
@@ -231,7 +232,7 @@ class ReportExportControllerAuthzTest {
         var response = controller.exportReportPost("any", dto, null, testJwt("admin"));
 
         assertEquals(400, response.getStatusCode().value());
-        var err = (com.example.report.dto.ReportQueryErrorDto) response.getBody();
+        var err = readErrorBody(response);
         assertEquals("GROUPING_NOT_SUPPORTED", err.code());
     }
 
@@ -254,7 +255,7 @@ class ReportExportControllerAuthzTest {
         var response = controller.exportReportPost("any", dto, null, testJwt("admin"));
 
         assertEquals(400, response.getStatusCode().value());
-        var err = (com.example.report.dto.ReportQueryErrorDto) response.getBody();
+        var err = readErrorBody(response);
         assertEquals("GROUPING_NOT_SUPPORTED", err.code());
     }
 
@@ -368,5 +369,40 @@ class ReportExportControllerAuthzTest {
                 .issuedAt(Instant.now())
                 .expiresAt(Instant.now().plusSeconds(3600))
                 .build();
+    }
+
+    /**
+     * PR-0.5b post-deploy fix (Codex 019e2cd7, live cluster smoke
+     * 2026-05-15 19:25): export endpoint now streams the structured
+     * 400 envelope through a {@link
+     * org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody}
+     * to keep the return type singular (
+     * {@code ResponseEntity<StreamingResponseBody>}) — the
+     * {@code ResponseEntity<?>} variant tripped Spring's
+     * {@code HttpMessageNotWritableException} at the xlsx
+     * content-type because the generic-erased body class had no
+     * matching converter. Tests now materialise the streamed body
+     * and parse it as JSON before asserting on
+     * {@link com.example.report.dto.ReportQueryErrorDto}.
+     */
+    private static com.example.report.dto.ReportQueryErrorDto readErrorBody(
+            org.springframework.http.ResponseEntity<?> response) {
+        Object body = response.getBody();
+        if (body instanceof org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody srb) {
+            try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                srb.writeTo(baos);
+                return new ObjectMapper().readValue(
+                        baos.toByteArray(),
+                        com.example.report.dto.ReportQueryErrorDto.class);
+            } catch (Exception e) {
+                throw new AssertionError("Failed to read streamed error body", e);
+            }
+        }
+        if (body instanceof com.example.report.dto.ReportQueryErrorDto dto) {
+            return dto;
+        }
+        throw new AssertionError(
+                "Expected ReportQueryErrorDto or StreamingResponseBody but got: "
+                        + (body == null ? "null" : body.getClass().getName()));
     }
 }
