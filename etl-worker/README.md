@@ -15,8 +15,10 @@ subsequent PRs.
 | Slice | Scope | Status |
 |---|---|---|
 | PR-1 | `SchemaServiceClient` + contract models + tests + CI gate | ✅ merged ([#205](https://github.com/Halildeu/platform-backend/pull/205)) |
-| PR-2a | Config / CLI / client wiring (`SCHEMA_SERVICE_URL`, internal key env, schema/scope args, typed exit behaviour) | this PR |
-| PR-2b | Runner orchestration (retry, audit, resume, DB lifecycle) | pending |
+| PR-2a | Config / CLI / client wiring (`SCHEMA_SERVICE_URL`, internal key env, schema args, typed exit behaviour, console script) | ✅ merged ([#206](https://github.com/Halildeu/platform-backend/pull/206)) |
+| PR-2b1 | Runner **retry foundation** (`run` subcommand, bounded backoff, injectable sleeper) | this PR |
+| PR-2b2 | Audit log + checkpoint / resume | pending |
+| PR-2b3 | reports_db writer stub interface + DB lifecycle boundaries | pending |
 | PR-3 | Dockerfile + K8s Job manifest + test cluster wiring | pending |
 | PR-4 | Live smoke against testai schema-service + reports DB writes | pending (operator gate) |
 
@@ -63,6 +65,43 @@ Error output: one-line human-readable message on stderr + sysexits-style exit co
 > schema-service target-shape PR (`version` → `contract_version`,
 > `tables` Map → list, `dataType` → `type`, plus
 > `allowlist_name` / `allowlist_version` emission).
+
+## PR-2b1 — `run` subcommand (retry foundation)
+
+```
+$ etl-worker run --help
+usage: etl-worker run [-h] [--schema SCHEMA] [--timeout TIMEOUT]
+                     [--retry-attempts RETRY_ATTEMPTS]
+                     [--retry-initial-seconds RETRY_INITIAL_SECONDS]
+                     [--retry-multiplier RETRY_MULTIPLIER]
+                     [--retry-cap-seconds RETRY_CAP_SECONDS]
+```
+
+`run` is `fetch-snapshot` with bounded retry / backoff. Transient
+upstream failures (5xx + transport outages →
+`SchemaServiceUnavailable`) are retried up to `--retry-attempts`
+(default `3`) with exponential backoff capped at `--retry-cap-seconds`
+(default `30s`). **Malformed** (4xx / parse) and **contract version
+mismatch** errors are *not* retried — the retry loop never hides a
+contract bug behind N attempts.
+
+Success output adds an `attempts` field so operators see retry
+activity:
+
+```json
+{"contract_version":"1","allowlist_name":"ReportingAllowlist","allowlist_version":"V1","table_count":42,"column_count":312,"attempts":2}
+```
+
+Exit codes reuse the PR-2a matrix; `EX_TEMPFAIL` (`75`) signals
+"retry budget exhausted, caller may schedule a fresh job".
+
+**Out of PR-2b1 scope** (lands in subsequent slices):
+
+- Audit log persistence — PR-2b2
+- Checkpoint file + resume — PR-2b2
+- reports_db writer interface — PR-2b3
+- Dockerfile + K8s Job — PR-3
+- Live smoke against testai — PR-4
 
 ## Target contract — *not* the current schema-service response
 
@@ -160,13 +199,18 @@ etl-worker/
 ├── etl_worker/
 │   ├── __init__.py
 │   ├── __main__.py              # `python -m etl_worker` entry point
-│   ├── cli.py                   # argparse CLI + exit-code contract
+│   ├── cli.py                   # argparse CLI + exit-code contract (fetch-snapshot + run)
 │   ├── config.py                # Config.from_env() + ConfigError
 │   ├── contracts.py             # SchemaSnapshot / TableSpec / ColumnSpec dataclasses
+│   ├── retry.py                 # RetryPolicy + Sleeper Protocol + call_with_retry
+│   ├── runner.py                # run_fetch (retry foundation; audit/resume in PR-2b2)
 │   └── schema_service_client.py # SchemaServiceClient + typed exceptions
 └── tests/
-    ├── test_cli.py              # 16 CLI cases (override precedence + exit-code matrix)
-    ├── test_config.py           # 23 Config.from_env validation cases
+    ├── test_cli.py              # CLI fetch-snapshot baseline
+    ├── test_cli_run.py          # CLI run subcommand + retry exit-code matrix
+    ├── test_config.py           # Config.from_env validation
+    ├── test_retry.py            # RetryPolicy + call_with_retry behaviour
+    ├── test_runner.py           # run_fetch retry/terminal classification
     └── test_schema_service_client.py
 ```
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections.abc import Mapping, Sequence
@@ -29,6 +30,8 @@ from typing import Protocol, TextIO
 
 from .config import Config, ConfigError
 from .contracts import SchemaSnapshot
+from .retry import RetryPolicy, Sleeper, SystemSleeper
+from .runner import RunResult, run_fetch
 from .schema_service_client import (
     SchemaContractVersionMismatch,
     SchemaServiceClient,
@@ -112,8 +115,9 @@ def _build_parser() -> _NonExitingParser:
     parser = _NonExitingParser(
         prog="etl-worker",
         description=(
-            "Workcube reporting ETL worker. Adım 12 PR-2a — config / CLI "
-            "wiring for the schema-service contract consumer."
+            "Workcube reporting ETL worker. Adım 12 schema-service "
+            "contract consumer (PR-2a CLI + PR-2b1 runner retry "
+            "foundation)."
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -146,19 +150,115 @@ def _build_parser() -> _NonExitingParser:
             "seconds)."
         ),
     )
+
+    run = sub.add_parser(
+        "run",
+        help=(
+            "Run a single ETL fetch cycle with bounded retry / backoff "
+            "(PR-2b1 retry foundation; audit + resume + DB writes are "
+            "out of scope until PR-2b2 / PR-2b3)."
+        ),
+        description=(
+            "Like fetch-snapshot but with retry semantics: transient 5xx "
+            "/ transport outages are retried up to --retry-attempts "
+            "times with exponential backoff capped at --retry-cap-seconds. "
+            "Malformed (4xx / parse) and contract-version-mismatch "
+            "failures are NOT retried. The stdout JSON summary adds an "
+            "`attempts` field so operators can see retry activity."
+        ),
+    )
+    run.add_argument(
+        "--schema",
+        default=None,
+        help=(
+            "Override SCHEMA_SERVICE_SCHEMA. Forwarded to schema-service "
+            "as the ?schema= query parameter."
+        ),
+    )
+    run.add_argument(
+        "--timeout",
+        type=_parse_cli_timeout,
+        default=None,
+        help=(
+            "Override SCHEMA_SERVICE_TIMEOUT_SECONDS (positive float, "
+            "seconds)."
+        ),
+    )
+    run.add_argument(
+        "--retry-attempts",
+        type=_parse_positive_int,
+        default=3,
+        help="Total attempts (>=1, default 3). 1 disables retry.",
+    )
+    run.add_argument(
+        "--retry-initial-seconds",
+        type=_parse_non_negative_float,
+        default=1.0,
+        help="Initial backoff delay in seconds (default 1.0).",
+    )
+    run.add_argument(
+        "--retry-multiplier",
+        type=_parse_multiplier_float,
+        default=2.0,
+        help="Exponential growth factor (>=1.0, default 2.0).",
+    )
+    run.add_argument(
+        "--retry-cap-seconds",
+        type=_parse_non_negative_float,
+        default=30.0,
+        help=(
+            "Upper bound on any single sleep delay (default 30.0). "
+            "Must be >= --retry-initial-seconds."
+        ),
+    )
     return parser
 
 
 def _parse_cli_timeout(raw: str) -> float:
-    """argparse type-converter that funnels through the same contract as env parsing."""
+    """argparse type-converter that funnels through the same contract as env parsing.
+
+    Like :func:`config._parse_timeout`, ``nan`` / ``inf`` are rejected
+    via :func:`math.isfinite` so a malformed numeric flag cannot
+    silently pass and later be misclassified as an upstream failure.
+    """
     try:
         value = float(raw)
     except (TypeError, ValueError) as exc:
         raise argparse.ArgumentTypeError(
-            "--timeout must be a positive number"
+            "--timeout must be a positive finite number"
         ) from exc
-    if value <= 0:
-        raise argparse.ArgumentTypeError("--timeout must be a positive number")
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError("--timeout must be a positive finite number")
+    return value
+
+
+def _parse_positive_int(raw: str) -> int:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return value
+
+
+def _parse_non_negative_float(raw: str) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative finite number") from exc
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative finite number")
+    return value
+
+
+def _parse_multiplier_float(raw: str) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("must be a finite number >= 1.0") from exc
+    if not math.isfinite(value) or value < 1.0:
+        raise argparse.ArgumentTypeError("must be a finite number >= 1.0")
     return value
 
 
@@ -169,12 +269,17 @@ def main(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     client_factory: _ClientFactory = _default_client_factory,
+    sleeper: Sleeper | None = None,
 ) -> int:
     """Resolve config, parse CLI, fetch a snapshot, emit the JSON summary.
 
     All side-effecting inputs (``argv`` / ``env`` / ``stdout`` /
-    ``stderr`` / ``client_factory``) are injectable so the CLI is
-    hermetic under pytest.
+    ``stderr`` / ``client_factory`` / ``sleeper``) are injectable so
+    the CLI is hermetic under pytest.
+
+    ``sleeper`` only matters for the ``run`` subcommand; it defaults to
+    :class:`~etl_worker.retry.SystemSleeper` in production, and tests
+    pass a deterministic fake so retry tests never actually block.
 
     Returns
     -------
@@ -221,8 +326,24 @@ def main(
         internal_api_key=config.schema_service_internal_api_key,
     )
 
+    if args.command == "fetch-snapshot":
+        return _handle_fetch_snapshot(client, schema_override, out, err)
+    if args.command == "run":
+        return _handle_run(client, schema_override, args, sleeper, out, err)
+    # ``argparse`` with ``required=True`` should make this branch
+    # unreachable; treat any other command as a usage failure.
+    print(f"etl-worker: usage: unknown command '{args.command}'", file=err)
+    return EX_USAGE
+
+
+def _handle_fetch_snapshot(
+    client: SchemaServiceClient,
+    schema: str | None,
+    out: TextIO,
+    err: TextIO,
+) -> int:
     try:
-        snapshot = client.fetch_snapshot(schema=schema_override)
+        snapshot = client.fetch_snapshot(schema=schema)
     except SchemaServiceUnavailable as exc:
         print(f"etl-worker: upstream unavailable: {exc}", file=err)
         return EX_TEMPFAIL
@@ -234,6 +355,55 @@ def main(
         return EX_SOFTWARE
 
     summary = _summarise(snapshot)
+    print(json.dumps(summary, separators=(",", ":")), file=out)
+    return EX_OK
+
+
+def _handle_run(
+    client: SchemaServiceClient,
+    schema: str | None,
+    args: argparse.Namespace,
+    sleeper: Sleeper | None,
+    out: TextIO,
+    err: TextIO,
+) -> int:
+    try:
+        policy = RetryPolicy(
+            max_attempts=args.retry_attempts,
+            initial_seconds=args.retry_initial_seconds,
+            multiplier=args.retry_multiplier,
+            cap_seconds=args.retry_cap_seconds,
+        )
+    except ValueError as exc:
+        # Inter-field validation (e.g. cap < initial) — surface as
+        # usage error so the caller can fix the invocation.
+        print(f"etl-worker: usage: retry policy: {exc}", file=err)
+        return EX_USAGE
+
+    active_sleeper: Sleeper = sleeper if sleeper is not None else SystemSleeper()
+    try:
+        result: RunResult = run_fetch(
+            client=client,
+            schema=schema,
+            policy=policy,
+            sleeper=active_sleeper,
+        )
+    except SchemaServiceUnavailable as exc:
+        print(
+            f"etl-worker: upstream unavailable after {args.retry_attempts} "
+            f"attempts: {exc}",
+            file=err,
+        )
+        return EX_TEMPFAIL
+    except SchemaContractVersionMismatch as exc:
+        print(f"etl-worker: contract version mismatch: {exc}", file=err)
+        return EX_PROTOCOL
+    except SchemaServiceMalformedResponse as exc:
+        print(f"etl-worker: malformed response: {exc}", file=err)
+        return EX_SOFTWARE
+
+    summary = dict(result.summary)
+    summary["attempts"] = result.attempts
     print(json.dumps(summary, separators=(",", ":")), file=out)
     return EX_OK
 

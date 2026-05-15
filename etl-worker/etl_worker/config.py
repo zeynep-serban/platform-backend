@@ -36,6 +36,7 @@ without leaking secret-bearing values to stderr.
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -159,18 +160,24 @@ def _validate_url(raw: str) -> str:
 
 
 def _parse_timeout(raw: str | None) -> float:
-    """Parse ``SCHEMA_SERVICE_TIMEOUT_SECONDS`` (positive float)."""
+    """Parse ``SCHEMA_SERVICE_TIMEOUT_SECONDS`` (positive finite float).
+
+    ``nan`` and ``inf`` are rejected via :func:`math.isfinite`. Plain
+    comparisons (``value <= 0``) are false for NaN, so without the
+    finite check a ``nan`` env value would silently pass validation
+    and then break the retry / timeout contract downstream.
+    """
     if raw is None or raw.strip() == "":
         return DEFAULT_TIMEOUT_SECONDS
     try:
         value = float(raw)
     except (TypeError, ValueError) as exc:
         raise ConfigError(
-            "SCHEMA_SERVICE_TIMEOUT_SECONDS must be a positive number"
+            "SCHEMA_SERVICE_TIMEOUT_SECONDS must be a positive finite number"
         ) from exc
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise ConfigError(
-            "SCHEMA_SERVICE_TIMEOUT_SECONDS must be a positive number"
+            "SCHEMA_SERVICE_TIMEOUT_SECONDS must be a positive finite number"
         )
     return value
 

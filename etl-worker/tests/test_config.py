@@ -151,8 +151,20 @@ def test_from_env_traps_malformed_url_parse_errors(malformed_url: str) -> None:
     ["abc", "0", "-1", "-5.5"],
 )
 def test_from_env_rejects_invalid_timeout(bad_timeout: str) -> None:
-    with pytest.raises(ConfigError, match="must be a positive number"):
+    with pytest.raises(ConfigError, match="must be a positive finite number"):
         Config.from_env(_env(SCHEMA_SERVICE_TIMEOUT_SECONDS=bad_timeout))
+
+
+@pytest.mark.parametrize(
+    "non_finite_timeout",
+    ["nan", "NaN", "inf", "Infinity", "-inf"],
+)
+def test_from_env_rejects_non_finite_timeout(non_finite_timeout: str) -> None:
+    """Codex 019e2a5c REVISE absorb: ``nan`` / ``inf`` slip past ``value <= 0``
+    comparisons because NaN comparisons are always false. ``math.isfinite``
+    closes the gap so retry/timeout config cannot be silently corrupted."""
+    with pytest.raises(ConfigError, match="must be a positive finite number"):
+        Config.from_env(_env(SCHEMA_SERVICE_TIMEOUT_SECONDS=non_finite_timeout))
 
 
 # ---- contract version validation ------------------------------------------

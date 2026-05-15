@@ -12,6 +12,8 @@ future ADR moves this to a standalone repo (``Halildeu/etl-worker``),
 
 from .config import Config, ConfigError
 from .contracts import ColumnSpec, SchemaSnapshot, TableSpec
+from .retry import RetryPolicy, Sleeper, SystemSleeper, call_with_retry
+from .runner import RunResult, run_fetch
 from .schema_service_client import (
     SchemaContractVersionMismatch,
     SchemaServiceClient,
@@ -23,10 +25,16 @@ __all__ = [
     "ColumnSpec",
     "Config",
     "ConfigError",
+    "RetryPolicy",
+    "RunResult",
     "SchemaContractVersionMismatch",
     "SchemaServiceClient",
     "SchemaServiceMalformedResponse",
     "SchemaServiceUnavailable",
     "SchemaSnapshot",
+    "Sleeper",
+    "SystemSleeper",
     "TableSpec",
+    "call_with_retry",
+    "run_fetch",
 ]
