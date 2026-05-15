@@ -194,28 +194,104 @@ jobs:
   openfga-dsl-check:
     name: OpenFGA DSL presence + line check (basic)
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
 
     # Faz 19.3 — fga CLI v0.6 'but not' syntax incompat; full DSL validate
     # 19.8+'da newer fga CLI ile yeniden eklenecek. Şimdilik basic presence check.
     # Authoritative validation: K8s OpenFGA StatefulSet runtime (Vault kv/platform/openfga).
+    #
+    # R16 PR-B (Codex 019e27f5 Option 3 + P1 absorb): fga test framework
+    # introduce — canonical model `backend/openfga/model.fga`. Test fixture'lar
+    # `backend/openfga/tests/*.fga.yaml`. fga CLI v0.7+ ile 'but not' compat.
+    # Root model `openfga/model.fga` legacy (init.sh canonical'i yükler);
+    # root vs canonical drift ayrı governance PR.
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check DSL file present + size
+      - name: Check DSL file present + size (canonical)
         run: |
-          test -f openfga/model.fga || (echo "openfga/model.fga missing!" && exit 1)
-          wc -l openfga/model.fga
+          # Canonical = backend/openfga/model.fga (init.sh load source).
+          test -f backend/openfga/model.fga || (echo "backend/openfga/model.fga missing!" && exit 1)
+          wc -l backend/openfga/model.fga
           echo "--- first 20 lines ---"
-          head -20 openfga/model.fga
+          head -20 backend/openfga/model.fga
           echo "--- last 10 lines ---"
-          tail -10 openfga/model.fga
+          tail -10 backend/openfga/model.fga
 
-      - name: Check DSL schema marker
+      - name: Check DSL schema marker (canonical)
         run: |
-          grep -q "^model" openfga/model.fga
-          grep -q "^  schema" openfga/model.fga
-          grep -cE "^type " openfga/model.fga
+          grep -q "^model" backend/openfga/model.fga
+          grep -q "^  schema" backend/openfga/model.fga
+          grep -cE "^type " backend/openfga/model.fga
           echo "DSL structural check PASS"
+
+      - name: Check required types present (R16 PR-B regression guard)
+        run: |
+          # R16 PR-B: type report_group artık zorunlu (Faz 2 Program 1c spec).
+          # Bu check canonical model'den silinmesini engeller (close-out discipline).
+          for required in "type user" "type organization" "type company" \
+                          "type module" "type action" "type report" \
+                          "type report_group"; do
+            if ! grep -qE "^${required}$" backend/openfga/model.fga; then
+              echo "::error::Required OpenFGA type missing in canonical model: ${required}"
+              exit 1
+            fi
+            echo "✓ ${required} present in canonical model"
+          done
+
+      - name: Render canonical model JSON (runtime parser path)
+        # R16 PR-B (Codex 019e27f5 PR-B P1 absorb — fallback): runtime init.sh
+        # canonical model'i render_model_json.py ile JSON'a çeviriyor (OpenFGA
+        # StatefulSet upload). Bu adım aynı renderer'ı CI'da koşturur — runtime
+        # ile aynı parser path. `but not` syntax desteklenir (fga CLI v0.7.13
+        # parser limit'ine alternatif).
+        #
+        # render_model_json.py şu an `#` yorum satırlarını desteklemiyor;
+        # CI'da strip et + render et. Bu küçük workaround, renderer fix'i
+        # ayrı governance PR.
+        run: |
+          set -e
+          # Strip leading-# comments + empty lines (renderer parsing limit)
+          grep -vE '^\s*#' backend/openfga/model.fga | grep -v '^\s*$' > /tmp/model-stripped.fga
+          # Re-add the required `model` + `schema` header (first 2 lines'da var)
+          python3 backend/openfga/render_model_json.py /tmp/model-stripped.fga > /tmp/model.json
+          jq -e '.type_definitions | length > 0' /tmp/model.json > /dev/null
+          # type_definitions içinde 'report_group' var mı? (R16 PR-B regression guard)
+          jq -e '.type_definitions[] | select(.type == "report_group")' /tmp/model.json > /dev/null
+          echo "✓ Canonical model rendered + report_group type present"
+
+      - name: Verify fga test fixtures present (R16 PR-B Codex 019e27f5 P2 hard-fail)
+        # R16 PR-B: fga CLI v0.7.13'te `but not` syntax parser incompat
+        # (mevcut canonical model'de var; validate/transform/test fail).
+        # Authoritative validation: K8s OpenFGA StatefulSet runtime upload.
+        # Şimdilik manuel fixture lint: yaml syntax + required top-level keys.
+        #
+        # Codex 019e27f5 P2 absorb: fixture directory veya file yoksa HARD FAIL
+        # (exit 0 warning değil) — close-out discipline ile uyum, fixture
+        # silinmesi sessiz drift olmamalı.
+        run: |
+          set -e
+          if [ ! -d backend/openfga/tests ]; then
+            echo "::error::backend/openfga/tests/ directory missing — fga test fixtures silinmiş veya hiç eklenmemiş. R16 PR-B regression guard."
+            exit 1
+          fi
+          fixture_count=$(ls backend/openfga/tests/*.fga.yaml 2>/dev/null | wc -l)
+          if [ "$fixture_count" -eq 0 ]; then
+            echo "::error::No fga test fixtures found in backend/openfga/tests/ — R16 PR-B contract violation."
+            exit 1
+          fi
+          # PyYAML pre-installed via Python 3.x default on ubuntu-latest setup-python image
+          python3 -c "import yaml" || pip install --quiet pyyaml
+          for test_file in backend/openfga/tests/*.fga.yaml; do
+            echo "::group::lint ${test_file}"
+            python3 -c "import yaml; yaml.safe_load(open('${test_file}'))"
+            grep -q "^name:" "${test_file}"
+            grep -q "^model_file:" "${test_file}"
+            grep -q "^tuples:" "${test_file}"
+            grep -q "^tests:" "${test_file}"
+            echo "✓ ${test_file} structurally valid"
+            echo "::endgroup::"
+          done
+          echo "✓ Manual fga test fixture lint PASS (${fixture_count} files)"

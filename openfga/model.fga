@@ -56,3 +56,15 @@ type report
     define can_edit: [user] but not blocked
     define can_view: [user] or can_edit but not blocked
     define blocked: [user]
+
+# DEPRECATED ROOT MODEL — Faz 19.4 sonrası backend/openfga/model.fga canonical.
+# Bu dosya geçmiş bağlam için tutulur; runtime yüklenen model
+# backend/openfga/model.fga (init.sh referans).
+#
+# R16 PR-B (Codex 019e27f5 P1 absorb): type report_group sadece canonical
+# (backend/openfga/model.fga) içine eklendi. fga test framework de canonical
+# model üstünde koşar (backend/openfga/tests/*.fga.yaml).
+#
+# Root vs canonical drift: yapısal farklar mevcut (admin/manager hierarchy
+# legacy vs explicit-scope viewer). Bu drift ayrı governance PR'da
+# unify/deprecate edilecek; bu PR'da scope dışı.

@@ -59,3 +59,18 @@ type report
     define can_edit: [user] but not blocked
     define can_view: [user] or can_edit but not blocked
     define blocked: [user]
+
+# R16 PR-B (Codex 019e27f5 Option 3) — report_group authz contract repair.
+# Faz 2 Program 1c spec'te yazılı ama model'e eklenmedi; bu PR ile ekleniyor.
+# ReportDefinition.access.reportGroup ("FINANCE_REPORTS", "HR_REPORTS",
+# "SALES_REPORTS", "ANALYTICS_REPORTS") → bu type üzerinden authz check.
+#
+# Runtime'da permission-service `TupleSyncService` key-aware mapping
+# yapacak (PR-B-2): PermissionType.REPORT + key in REPORT_GROUP_KEYS ise
+# object type `report_group`; aksi halde `report`. /authz/me.reports
+# map'i `report_group:<KEY>#can_view` listObjects ile dolar.
+type report_group
+  relations
+    define can_edit: [user] but not blocked
+    define can_view: [user] or can_edit but not blocked
+    define blocked: [user]

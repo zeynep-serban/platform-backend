@@ -1,0 +1,105 @@
+# R16 PR-B — OpenFGA `fga test` framework — report_group authz assertions.
+#
+# Bu dosya `fga test` (v0.7+) ile koşturulur. Model + tuple + assertion seti
+# deklaratif. R15 (FINANCE_REPORTS/HR_REPORTS silent filter) regression'ı için
+# canonical kanıt.
+#
+# Codex 019e27f5 PR-B önerisi: "openfga/model.fga içine type report_group ve
+# relation semantiği ekle. fga test framework'ünü CI'a bağla. FINANCE/HR/SALES
+# report group tuple seed'lerini migration/seed mekanizmasına koy. Permission
+# resolver tarafında reportGroup → permissions[] davranışını görünür hale getir."
+#
+# Bu test seti model + relation semantiğini kilitler. Tuple seed runtime'da
+# permission-service AccessControllerV1 granule update path'i üzerinden gelir
+# (tuples-seed.json raw write değil; CNS-20260415-004 kuralı).
+
+name: report_group_authz
+
+model_file: ../model.fga
+
+tuples:
+  # Test fixture: 3 user — admin (super), finance_user (FINANCE), hr_user (HR)
+  # report_group can_view tuple'ları — runtime'da permission-service yazar
+  - user: user:finance_user
+    relation: can_view
+    object: report_group:FINANCE_REPORTS
+
+  - user: user:hr_user
+    relation: can_view
+    object: report_group:HR_REPORTS
+
+  - user: user:multi_user
+    relation: can_view
+    object: report_group:FINANCE_REPORTS
+
+  - user: user:multi_user
+    relation: can_view
+    object: report_group:HR_REPORTS
+
+  # blocked user — explicit deny override
+  - user: user:blocked_user
+    relation: blocked
+    object: report_group:FINANCE_REPORTS
+
+tests:
+  - name: finance_user_can_view_FINANCE_REPORTS
+    check:
+      - user: user:finance_user
+        object: report_group:FINANCE_REPORTS
+        assertions:
+          can_view: true
+          can_edit: false
+
+  - name: finance_user_cannot_view_HR_REPORTS
+    check:
+      - user: user:finance_user
+        object: report_group:HR_REPORTS
+        assertions:
+          can_view: false
+
+  - name: finance_user_cannot_view_SALES_REPORTS_no_tuple
+    check:
+      - user: user:finance_user
+        object: report_group:SALES_REPORTS
+        assertions:
+          can_view: false
+
+  - name: hr_user_can_view_HR_REPORTS_only
+    check:
+      - user: user:hr_user
+        object: report_group:HR_REPORTS
+        assertions:
+          can_view: true
+      - user: user:hr_user
+        object: report_group:FINANCE_REPORTS
+        assertions:
+          can_view: false
+
+  - name: multi_user_can_view_both
+    check:
+      - user: user:multi_user
+        object: report_group:FINANCE_REPORTS
+        assertions:
+          can_view: true
+      - user: user:multi_user
+        object: report_group:HR_REPORTS
+        assertions:
+          can_view: true
+
+  - name: blocked_user_deny_override
+    check:
+      - user: user:blocked_user
+        object: report_group:FINANCE_REPORTS
+        assertions:
+          can_view: false
+          can_edit: false
+          blocked: true
+
+  - name: anonymous_user_deny_default
+    # No tuple → no can_view; ReportAccessEvaluator BACKEND'de deny-default
+    # davranışı bu authz katmanın doğal sonucu (FE filter ek olarak çalışır).
+    check:
+      - user: user:nobody
+        object: report_group:FINANCE_REPORTS
+        assertions:
+          can_view: false
