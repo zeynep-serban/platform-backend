@@ -119,23 +119,33 @@ public class QueryEngine {
             int pageSize,
             List<DegradationWarning> warnings,
             List<String> pivotResultFields,
-            List<PivotResultColumn> pivotResultColumns) {
+            List<PivotResultColumn> pivotResultColumns,
+            Map<String, Object> grandTotalRow) {
 
         public PagedData(List<Map<String, Object>> items, long total, int page, int pageSize) {
-            this(items, total, page, pageSize, List.of(), List.of(), List.of());
+            this(items, total, page, pageSize, List.of(), List.of(), List.of(), null);
         }
 
         public PagedData(List<Map<String, Object>> items, long total,
                           int page, int pageSize,
                           List<DegradationWarning> warnings) {
-            this(items, total, page, pageSize, warnings, List.of(), List.of());
+            this(items, total, page, pageSize, warnings, List.of(), List.of(), null);
         }
 
         public PagedData(List<Map<String, Object>> items, long total,
                           int page, int pageSize,
                           List<DegradationWarning> warnings,
                           List<String> pivotResultFields) {
-            this(items, total, page, pageSize, warnings, pivotResultFields, List.of());
+            this(items, total, page, pageSize, warnings, pivotResultFields, List.of(), null);
+        }
+
+        public PagedData(List<Map<String, Object>> items, long total,
+                          int page, int pageSize,
+                          List<DegradationWarning> warnings,
+                          List<String> pivotResultFields,
+                          List<PivotResultColumn> pivotResultColumns) {
+            this(items, total, page, pageSize, warnings, pivotResultFields,
+                    pivotResultColumns, null);
         }
 
         public PagedData {
@@ -146,6 +156,38 @@ public class QueryEngine {
             pivotResultColumns = pivotResultColumns == null
                     ? List.of()
                     : List.copyOf(pivotResultColumns);
+            // PR-0.5a (Codex thread 019e2c61): grand total row stays
+            // nullable so the @JsonInclude(NON_EMPTY) DTO path can
+            // omit the field entirely on the dominant non-grouped /
+            // child-store request shapes. Defensive immutability —
+            // copy on construction so a later caller mutation can't
+            // poison the response.
+            //
+            // Codex iter post-impl §High (thread 019e2c61): JDBC
+            // aggregate rows legitimately carry NULL values (empty
+            // filter set → SUM/AVG/STDEV null; weightedavg denominator
+            // zero → null; percentile over empty set → null). Map.copyOf
+            // rejects null values → NPE in canonical constructor would
+            // break the dominant grouped flow. Use null-preserving
+            // immutable wrapper instead.
+            grandTotalRow = immutableNullableValueMap(grandTotalRow);
+        }
+
+        /**
+         * Null-preserving immutable view: {@link Map#copyOf} rejects
+         * null values, but JDBC aggregate rows legitimately carry
+         * nulls (empty filter set, weightedavg denominator zero,
+         * percentile over empty set, etc.). We need an immutable
+         * wrapper that tolerates nulls so the canonical constructor
+         * cannot NPE on grand-total responses. Empty maps collapse
+         * to {@code null} so the {@code @JsonInclude(NON_NULL)} DTO
+         * path can omit the field entirely.
+         */
+        private static Map<String, Object> immutableNullableValueMap(Map<String, Object> in) {
+            if (in == null || in.isEmpty()) {
+                return null;
+            }
+            return java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(in));
         }
     }
 
@@ -221,6 +263,42 @@ public class QueryEngine {
         }
 
         return new PagedData(items, total, page, pageSize, dataQuery.warnings());
+    }
+
+    /**
+     * PR-0.5a (2026-05-15, Codex thread {@code 019e2c61}): emit a
+     * single grand-total aggregation row over the RLS+filter-narrowed
+     * source set. Called by the controller in addition to
+     * {@link #executeGroupedQuery} only on root SSRM store requests
+     * (currentLevel==0, non-pivot, non-empty aggregations). Returns
+     * {@code null} on any failure path so the dominant grouped flow
+     * keeps rendering even if the grand total fails transiently.
+     */
+    public Map<String, Object> executeGrandTotalRow(
+            ReportDefinition def,
+            AuthzMeResponse authz,
+            List<SqlBuilder.GroupedAggregation> aggregations,
+            Map<String, Object> agGridFilter) {
+        if (aggregations == null || aggregations.isEmpty()) {
+            return null;
+        }
+        try {
+            List<String> visibleColumns = columnFilter.getVisibleColumns(def, authz);
+            RowFilterInjector.RlsResult rls = rowFilterInjector.buildRlsClause(def, authz);
+            YearlySchemaResolver.ResolvedSchemas schemas =
+                    resolveSchemas(def, authz, agGridFilter);
+
+            SqlBuilder.BuiltQuery grandQuery = sqlBuilder.buildGrandTotalQuery(
+                    def, schemas, visibleColumns, aggregations,
+                    agGridFilter, rls.whereClause(), rls.params());
+            log.debug("Grand-total report query [{}]: {}", def.key(), grandQuery.sql());
+            List<Map<String, Object>> rows =
+                    jdbc.queryForList(grandQuery.sql(), grandQuery.params());
+            return rows.isEmpty() ? null : rows.get(0);
+        } catch (Exception e) {
+            log.warn("Grand-total query failed for report {}: {}", def.key(), e.getMessage());
+            return null;
+        }
     }
 
     public SqlBuilder.BuiltQuery buildExportQuery(ReportDefinition def,

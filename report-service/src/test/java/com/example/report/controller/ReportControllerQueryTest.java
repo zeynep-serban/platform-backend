@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -1497,6 +1498,161 @@ class ReportControllerQueryTest {
             assertEquals(400, response.getStatusCode().value());
             assertEquals("GROUPING_NOT_SUPPORTED",
                     assertInstanceOf(ReportQueryErrorDto.class, response.getBody()).code());
+        }
+    }
+
+    /**
+     * PR-0.5a (Codex thread 019e2c61 post-impl §High): the grand-total
+     * dispatch path. Root grouped SSRM request with non-empty
+     * aggregations triggers an extra {@code executeGrandTotalRow}
+     * call; the resulting Map can legitimately carry null values
+     * (empty filter set, weightedavg denominator zero, percentile
+     * over empty set). The controller must not NPE on this case and
+     * the response envelope must surface the row faithfully so the
+     * frontend pinnedBottomRowData renders.
+     */
+    @Nested
+    class GrandTotalRowDispatch {
+
+        @Test
+        void rootGroupedRequest_callsExecuteGrandTotalRow_andSurfacesRow() {
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "sum")));
+            when(queryEngine.executeGroupedQuery(
+                    any(), any(), eq("category"), any(), any(), any(), eq(1), eq(50)))
+                    .thenReturn(new QueryEngine.PagedData(
+                            List.of(Map.of("category", "FIN", "_rowCount", 42L,
+                                    "amount", 1234.56)),
+                            1L, 1, 50));
+            // Codex post-impl §High: grand total row may carry null
+            // aggregate values. Use LinkedHashMap (allows null values)
+            // — Map.of would reject the null entry up-front.
+            java.util.LinkedHashMap<String, Object> grandTotalRow =
+                    new java.util.LinkedHashMap<>();
+            grandTotalRow.put("amount", 9999.99);
+            grandTotalRow.put("median_amount", null);
+            when(queryEngine.executeGrandTotalRow(any(), any(), any(), any()))
+                    .thenReturn(grandTotalRow);
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum")),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+            PagedResultDto<?> body = assertInstanceOf(PagedResultDto.class, response.getBody());
+            assertNotNull(body.grandTotalRow(),
+                    "root grouped request with aggregations must surface grandTotalRow");
+            assertEquals(9999.99, body.grandTotalRow().get("amount"));
+            // Null aggregate value must survive the Map.copyOf-replacement
+            // immutable wrapper (Codex §High regression coverage).
+            assertNull(body.grandTotalRow().get("median_amount"));
+            verify(queryEngine).executeGrandTotalRow(any(), any(), any(), any());
+        }
+
+        @Test
+        void rootGroupedRequest_grandTotalReturnsNull_responseOmitsField() {
+            // executeGrandTotalRow may return null on internal failure
+            // (degradation) — the dominant grouped flow must keep
+            // rendering and the response must omit grandTotalRow so the
+            // frontend hides the pinned-bottom row gracefully.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "sum")));
+            when(queryEngine.executeGroupedQuery(
+                    any(), any(), eq("category"), any(), any(), any(), eq(1), eq(50)))
+                    .thenReturn(new QueryEngine.PagedData(
+                            List.of(Map.of("category", "FIN", "_rowCount", 42L,
+                                    "amount", 1234.56)),
+                            1L, 1, 50));
+            when(queryEngine.executeGrandTotalRow(any(), any(), any(), any()))
+                    .thenReturn(null);
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum")),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+            PagedResultDto<?> body = assertInstanceOf(PagedResultDto.class, response.getBody());
+            assertNull(body.grandTotalRow(),
+                    "null grand total → response omits the field; dominant "
+                            + "grouped flow keeps rendering");
+        }
+
+        @Test
+        void childStoreRequest_doesNotCallExecuteGrandTotalRow() {
+            // Codex plan-time AGREE: grand total is root-only. A child
+            // store request (groupKeys non-empty) must NOT trigger a
+            // grand total query so the global pinned-bottom row is
+            // emitted exactly once per SSRM session.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("region", "Region", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("amount", "Amount", "number",
+                                    120, false, false, true, "sum")));
+            when(queryEngine.executeGroupedQuery(any(), any(), eq("region"),
+                    any(), any(), any(), eq(1), eq(50)))
+                    .thenReturn(new QueryEngine.PagedData(List.of(), 0L, 1, 50));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null),
+                            new ColumnVO("region", "Region", "region", null)),
+                    List.of(new ColumnVO("amount", "Amount", "amount", "sum")),
+                    null, false, List.of("FIN"), null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+            verify(queryEngine, never())
+                    .executeGrandTotalRow(any(), any(), any(), any());
+        }
+
+        @Test
+        void flatRequest_doesNotCallExecuteGrandTotalRow() {
+            // No rowGroupCols → flat path → no grand total dispatch.
+            stubAuthz(true, List.of());
+            when(registry.get("any")).thenReturn(Optional.of(report("any")));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null)));
+            when(queryEngine.executeQuery(any(), any(), any(), any(),
+                    eq(1), eq(50)))
+                    .thenReturn(new QueryEngine.PagedData(List.of(), 0L, 1, 50));
+
+            var dto = new ReportQueryRequestDto(
+                    0, 50,
+                    null, null, null, false, null, null, null);
+
+            var response = controller.queryReport("any", dto, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+            verify(queryEngine, never())
+                    .executeGrandTotalRow(any(), any(), any(), any());
         }
     }
 

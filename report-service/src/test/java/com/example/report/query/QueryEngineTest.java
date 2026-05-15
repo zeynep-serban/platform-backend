@@ -182,4 +182,68 @@ class QueryEngineTest {
             verify(columnFilter).getVisibleColumns(any(), any());
         }
     }
+
+    // PR-0.5a (Codex thread 019e2c61 post-impl §High): JDBC aggregate
+    // rows legitimately carry NULL values (empty filter set →
+    // SUM/AVG/STDEV null; weightedavg denominator zero → null;
+    // percentile over empty set → null). Map.copyOf rejects null
+    // values → NPE in canonical constructor would have broken the
+    // dominant grouped flow. The null-preserving immutable wrapper
+    // must tolerate these.
+    @Nested
+    @DisplayName("PagedData.grandTotalRow null-value tolerance")
+    class GrandTotalRowNullTolerance {
+
+        @Test
+        @DisplayName("accepts a map with null aggregate values without NPE")
+        void acceptsNullValueMap() {
+            java.util.LinkedHashMap<String, Object> aggRow = new java.util.LinkedHashMap<>();
+            aggRow.put("amount", null);     // empty filter → SUM is null
+            aggRow.put("qty", 42L);
+            aggRow.put("median_price", null); // PERCENTILE over empty set
+            aggRow.put("weighted", null);     // weightedavg denom null
+
+            QueryEngine.PagedData result = new QueryEngine.PagedData(
+                    List.of(), 0L, 1, 50, List.of(), List.of(), List.of(), aggRow);
+
+            assertNotNull(result.grandTotalRow());
+            assertEquals(4, result.grandTotalRow().size());
+            assertNull(result.grandTotalRow().get("amount"));
+            assertEquals(42L, result.grandTotalRow().get("qty"));
+            assertNull(result.grandTotalRow().get("median_price"));
+            assertNull(result.grandTotalRow().get("weighted"));
+        }
+
+        @Test
+        @DisplayName("empty map collapses to null so @JsonInclude omits the field")
+        void emptyMapCollapsesToNull() {
+            QueryEngine.PagedData result = new QueryEngine.PagedData(
+                    List.of(), 0L, 1, 50, List.of(), List.of(), List.of(),
+                    new java.util.LinkedHashMap<>());
+
+            assertNull(result.grandTotalRow());
+        }
+
+        @Test
+        @DisplayName("immutable view rejects post-construction mutation")
+        void immutableViewRejectsMutation() {
+            java.util.LinkedHashMap<String, Object> aggRow = new java.util.LinkedHashMap<>();
+            aggRow.put("amount", 100.0);
+
+            QueryEngine.PagedData result = new QueryEngine.PagedData(
+                    List.of(), 0L, 1, 50, List.of(), List.of(), List.of(), aggRow);
+
+            assertThrows(UnsupportedOperationException.class,
+                    () -> result.grandTotalRow().put("evil", "injection"));
+        }
+
+        @Test
+        @DisplayName("null input stays null (no NPE)")
+        void nullInputStaysNull() {
+            QueryEngine.PagedData result = new QueryEngine.PagedData(
+                    List.of(), 0L, 1, 50, List.of(), List.of(), List.of(), null);
+
+            assertNull(result.grandTotalRow());
+        }
+    }
 }

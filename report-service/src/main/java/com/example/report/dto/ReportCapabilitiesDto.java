@@ -41,7 +41,8 @@ public record ReportCapabilitiesDto(
         List<String> aggregatableFields,
         boolean serverSidePivoting,
         boolean clientPivotAllowed,
-        List<String> pivotableFields) {
+        List<String> pivotableFields,
+        boolean supportsGrandTotal) {
 
     /**
      * PR-0.4a (Codex 019e2695 hybrid pivot design): per-report pivot
@@ -102,7 +103,7 @@ public record ReportCapabilitiesDto(
      * to compile.
      */
     public ReportCapabilitiesDto(boolean serverSideGrouping) {
-        this(serverSideGrouping, List.of(), List.of(), false, false, List.of());
+        this(serverSideGrouping, List.of(), List.of(), false, false, List.of(), false);
     }
 
     /**
@@ -116,6 +117,22 @@ public record ReportCapabilitiesDto(
                                   List<String> groupableFields,
                                   List<String> aggregatableFields) {
         this(serverSideGrouping, groupableFields, aggregatableFields,
-                false, false, List.of());
+                false, false, List.of(), false);
+    }
+
+    /**
+     * Backward-compatible 6-arg constructor for PR-0.4a call sites that
+     * predate PR-0.5a's {@code supportsGrandTotal} flag. Defaults the
+     * new flag to {@code false} so reports without a grand-total
+     * capability declaration stay opted out.
+     */
+    public ReportCapabilitiesDto(boolean serverSideGrouping,
+                                  List<String> groupableFields,
+                                  List<String> aggregatableFields,
+                                  boolean serverSidePivoting,
+                                  boolean clientPivotAllowed,
+                                  List<String> pivotableFields) {
+        this(serverSideGrouping, groupableFields, aggregatableFields,
+                serverSidePivoting, clientPivotAllowed, pivotableFields, false);
     }
 }

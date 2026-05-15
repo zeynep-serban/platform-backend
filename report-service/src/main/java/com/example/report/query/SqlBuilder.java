@@ -715,6 +715,160 @@ public class SqlBuilder {
         return new BuiltQuery(sql.toString(), params, fromResult.warnings());
     }
 
+    /**
+     * PR-0.5a (2026-05-15, Codex thread {@code 019e2c61}): non-pivot
+     * grouped root-level grand total. Emits one row of aggregations
+     * over the entire RLS+filter-narrowed source set — no
+     * {@code GROUP BY}, no {@code OFFSET/FETCH}. The controller layer
+     * gates this query on {@code currentLevel == 0 && !pivotMode &&
+     * !valueCols.isEmpty()} so the SSRM frontend receives the global
+     * row only on the root request; expanded child stores keep their
+     * bucket-level aggregations as before.
+     *
+     * <p>Aggregate semantics match the grouped path:
+     * <ul>
+     *   <li>{@code sum, avg, min, max, count, distinctcount, stddev,
+     *       stddevp}: native MSSQL aggregate over the full rowset.</li>
+     *   <li>{@code median, percentilecont}: PERCENTILE_CONT window
+     *       function partitioned over the whole set with an outer
+     *       MAX collapse (same wrapper {@link #buildGroupedQuery}
+     *       uses for the bucket version).</li>
+     *   <li>{@code weightedavg}: null-safe ratio
+     *       {@code SUM(value * weight) / NULLIF(SUM(CASE WHEN
+     *       value IS NOT NULL AND weight IS NOT NULL THEN weight
+     *       END), 0)} — weight column projected through the FROM
+     *       clause (PR-0.4c projection contract).</li>
+     * </ul>
+     *
+     * <p>The result is a single-row {@code BuiltQuery}; the calling
+     * QueryEngine materialises it as a {@code Map<String, Object>}
+     * keyed by the aggregation alias (same field naming as the
+     * grouped path so AG Grid's {@code pinnedBottomRowData} can be
+     * rendered with the existing {@code colDef.field} bindings).
+     */
+    public BuiltQuery buildGrandTotalQuery(
+            ReportDefinition def,
+            YearlySchemaResolver.ResolvedSchemas resolvedSchemas,
+            List<String> visibleColumns,
+            List<GroupedAggregation> aggregations,
+            Map<String, Object> agGridFilter,
+            String rlsWhereClause,
+            MapSqlParameterSource rlsParams) {
+        Set<String> allowedCols = Set.copyOf(visibleColumns);
+        if (aggregations == null || aggregations.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "buildGrandTotalQuery requires at least one aggregation");
+        }
+
+        // Sanitize aggregations — same defensive filter as the
+        // grouped path: drop entries that target non-visible columns
+        // so a malicious payload can't surface hidden columns through
+        // the grand-total envelope.
+        List<GroupedAggregation> sanitized = new java.util.ArrayList<>();
+        Set<String> projected = new java.util.LinkedHashSet<>();
+        for (GroupedAggregation a : aggregations) {
+            if (!allowedCols.contains(a.field())) continue;
+            projected.add(a.field());
+            // PR-0.4c: weightedavg requires the weight column in the
+            // FROM-clause projection so the outer SUM can resolve it.
+            // Validate visibility + distinctness defensively (controller
+            // already enforces this in sanitizeAggregations, but the
+            // grand-total path runs through the same builder logic).
+            if ("weightedavg".equals(a.func())) {
+                Object weightRef = a.params() != null ? a.params().get("weightField") : null;
+                if (!(weightRef instanceof String weight) || weight.isBlank()) {
+                    throw new IllegalArgumentException(
+                            "weightedavg aggregation requires params.weightField on field '"
+                                    + a.field() + "'");
+                }
+                if (!allowedCols.contains(weight)) {
+                    throw new IllegalArgumentException(
+                            "weightedavg params.weightField must be one of the visible "
+                                    + "columns, got: " + weight);
+                }
+                if (weight.equals(a.field())) {
+                    throw new IllegalArgumentException(
+                            "weightedavg params.weightField must differ from value field, "
+                                    + "got: " + weight + " for both on '" + a.field() + "'");
+                }
+                projected.add(weight);
+            }
+            sanitized.add(a);
+        }
+        if (sanitized.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "buildGrandTotalQuery: every aggregation referenced a non-visible "
+                            + "column; nothing to emit");
+        }
+
+        String selectCols = projected.stream()
+                .map(c -> "[" + c + "]")
+                .collect(Collectors.joining(", "));
+
+        MapSqlParameterSource params = new MapSqlParameterSource();
+        FilterTranslator.FilterResult filterResult =
+                filterTranslator.translate(agGridFilter, allowedCols);
+        FromClauseResult fromResult = buildFromClause(def, resolvedSchemas,
+                selectCols, rlsWhereClause, rlsParams, filterResult, params);
+
+        // Check whether the request mixes median/percentilecont with
+        // standard aggregations — same wrapper shape as buildGroupedQuery.
+        boolean hasPercentileWindow = false;
+        for (GroupedAggregation a : sanitized) {
+            if (isPercentileWindowAgg(a)) {
+                hasPercentileWindow = true;
+                break;
+            }
+        }
+
+        StringBuilder sql = new StringBuilder();
+        if (!hasPercentileWindow) {
+            // Plain aggregate: SELECT SUM([amount]) AS [amount], …
+            sql.append("SELECT ");
+            for (int i = 0; i < sanitized.size(); i++) {
+                if (i > 0) sql.append(", ");
+                GroupedAggregation a = sanitized.get(i);
+                sql.append(renderAggExpression(a))
+                        .append(" AS [").append(a.field()).append("]");
+            }
+            sql.append(" FROM ").append(fromResult.sql());
+        } else {
+            // Mixed agg with percentile window: wrap inner SELECT with
+            // PERCENTILE_CONT OVER () (no PARTITION BY — global).
+            // Outer projection collapses with MAX so the single output
+            // row stays deterministic.
+            sql.append("SELECT ");
+            for (int i = 0; i < sanitized.size(); i++) {
+                if (i > 0) sql.append(", ");
+                GroupedAggregation a = sanitized.get(i);
+                if (isPercentileWindowAgg(a)) {
+                    sql.append("MAX([").append(internalPctAlias(a)).append("])")
+                            .append(" AS [").append(a.field()).append("]");
+                } else {
+                    sql.append(renderAggExpression(a))
+                            .append(" AS [").append(a.field()).append("]");
+                }
+            }
+            sql.append(" FROM (");
+            sql.append("SELECT ").append(selectCols);
+            for (GroupedAggregation a : sanitized) {
+                if (isPercentileWindowAgg(a)) {
+                    sql.append(", PERCENTILE_CONT(")
+                            .append(percentileLiteral(a))
+                            .append(") WITHIN GROUP (ORDER BY [")
+                            .append(a.field()).append("])")
+                            // No PARTITION BY → window over the whole set.
+                            .append(" OVER ()")
+                            .append(" AS [").append(internalPctAlias(a)).append("]");
+                }
+            }
+            sql.append(" FROM ").append(fromResult.sql());
+            sql.append(") AS _gt_inner");
+        }
+
+        return new BuiltQuery(sql.toString(), params, fromResult.warnings());
+    }
+
     // ── Pivot queries (PR-0.4b single-level pivot) ──────────────────────
 
     /**

@@ -227,11 +227,18 @@ public class ReportController {
                 .anyMatch(c -> c.pivotable()
                         && c.pivotValues() != null
                         && !c.pivotValues().isEmpty());
+        // PR-0.5a (Codex thread 019e2c61): grand-total capability flag.
+        // True iff the report supports grouping (at least one groupable
+        // column) AND has at least one aggregatable column — pivot
+        // mode is excluded at request time, not via metadata, since
+        // pivot is a runtime toggle not a registry shape.
+        boolean supportsGrandTotal = !groupable.isEmpty() && !aggregatable.isEmpty();
         ReportCapabilitiesDto capabilities = new ReportCapabilitiesDto(
                 !groupable.isEmpty(), groupable, aggregatable,
                 serverSidePivoting,
                 /* clientPivotAllowed */ false,
-                pivotable);
+                pivotable,
+                supportsGrandTotal);
 
         return ResponseEntity.ok(new ReportMetadataDto(
                 def.key(), def.title(), def.description(), def.category(),
@@ -512,6 +519,25 @@ public class ReportController {
                     return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
                             "INVALID_GROUPING_REQUEST", iae.getMessage()));
                 }
+                // PR-0.5a (Codex thread 019e2c61): grand-total row only
+                // on the root SSRM store request (currentLevel == 0).
+                // Child stores leave the global pinned-bottom row
+                // unchanged. Pivot mode + flat path are already
+                // excluded by the surrounding dispatcher branches.
+                if (currentLevel == 0 && !aggregations.isEmpty()) {
+                    Map<String, Object> grandTotalRow =
+                            queryEngine.executeGrandTotalRow(
+                                    def, scopedAuthz, aggregations, mergedFilter);
+                    if (grandTotalRow != null) {
+                        result = new QueryEngine.PagedData(
+                                result.items(), result.total(),
+                                result.page(), result.pageSize(),
+                                result.warnings(),
+                                result.pivotResultFields(),
+                                result.pivotResultColumns(),
+                                grandTotalRow);
+                    }
+                }
             } else {
                 // Leaf rows: groupKeys depth == rowGroupCols depth →
                 // emit raw rows filtered by every ancestor key. Reuses
@@ -554,7 +580,8 @@ public class ReportController {
                 .body(new PagedResultDto<>(
                         result.items(), result.total(), result.page(), result.pageSize(),
                         result.pivotResultFields(),
-                        pivotColumnsDto));
+                        pivotColumnsDto,
+                        result.grandTotalRow()));
     }
 
     /** PR-0.3 hardening: cap recursion depth so a malicious payload

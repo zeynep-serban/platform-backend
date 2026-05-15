@@ -1716,4 +1716,118 @@ class SqlBuilderTest {
                     .contains(", [category] ASC");
         }
     }
+
+    // ── PR-0.5a: buildGrandTotalQuery ────────────────────────────
+
+    @Nested
+    class BuildGrandTotalQuery {
+
+        private ReportDefinition totalDef() {
+            return new ReportDefinition(
+                    "total-report", "v1", "Total", "desc", "cat",
+                    "TXN", "dbo", "static", null, null,
+                    List.of(
+                            new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false),
+                            new ColumnDefinition("qty", "Qty", "number", 100, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+        }
+
+        @Test
+        void emitsAggregateExpressionsWithoutGroupBy() {
+            // Core PR-0.5a contract: no GROUP BY, no OFFSET/FETCH,
+            // single-row aggregate over the full filtered rowset.
+            SqlBuilder.BuiltQuery q = builder.buildGrandTotalQuery(
+                    totalDef(), null, List.of("category", "amount", "qty"),
+                    List.of(
+                            new SqlBuilder.GroupedAggregation("amount", "sum"),
+                            new SqlBuilder.GroupedAggregation("qty", "avg")),
+                    Collections.emptyMap(),
+                    null, null);
+
+            assertThat(q.sql())
+                    .contains("SUM([amount]) AS [amount]")
+                    .contains("AVG([qty]) AS [qty]")
+                    .contains("[dbo].[TXN]")
+                    .doesNotContain("GROUP BY")
+                    .doesNotContain("OFFSET")
+                    .doesNotContain("FETCH NEXT");
+        }
+
+        @Test
+        void wrapsPercentileWindowAggsInInnerSelect() {
+            // median / percentilecont go through PERCENTILE_CONT
+            // window function with OVER () (no PARTITION BY) — global
+            // grand total semantic. Outer MAX collapses the window
+            // result to a single deterministic row.
+            SqlBuilder.BuiltQuery q = builder.buildGrandTotalQuery(
+                    totalDef(), null, List.of("category", "amount", "qty"),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "median")),
+                    Collections.emptyMap(),
+                    null, null);
+
+            assertThat(q.sql())
+                    .contains("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY [amount])")
+                    .contains("OVER ()")
+                    .contains("MAX([__median_amount]) AS [amount]")
+                    .doesNotContain("PARTITION BY")
+                    .doesNotContain("GROUP BY");
+        }
+
+        @Test
+        void weightedavgProjectsWeightFieldIntoFromClause() {
+            // PR-0.4c projection contract: weightField must reach the
+            // FROM clause SELECT so the outer SUM([value] * [weight])
+            // can resolve it. Grand total path inherits the same
+            // contract.
+            SqlBuilder.BuiltQuery q = builder.buildGrandTotalQuery(
+                    totalDef(), null, List.of("category", "amount", "qty"),
+                    List.of(new SqlBuilder.GroupedAggregation(
+                            "amount", "weightedavg",
+                            Map.of("weightField", "qty"))),
+                    Collections.emptyMap(),
+                    null, null);
+
+            assertThat(q.sql())
+                    .contains("SUM([amount] * [qty])")
+                    .contains("NULLIF(SUM(CASE WHEN [amount] IS NOT NULL AND [qty] IS NOT NULL THEN [qty] END), 0)")
+                    .contains("AS [amount]");
+        }
+
+        @Test
+        void emptyAggregationsRejected() {
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildGrandTotalQuery(
+                            totalDef(), null, List.of("category", "amount"),
+                            List.of(),
+                            Collections.emptyMap(), null, null));
+        }
+
+        @Test
+        void aggregationsAllPointingToHiddenColumnsRejected() {
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildGrandTotalQuery(
+                            totalDef(), null, List.of("category"),
+                            List.of(new SqlBuilder.GroupedAggregation("ghost", "sum")),
+                            Collections.emptyMap(), null, null));
+        }
+
+        @Test
+        void filterPredicatePushedDownAlongsideGrandTotal() {
+            Map<String, Object> filterModel = Map.of(
+                    "category", Map.of("type", "equals", "filter", "x"));
+            SqlBuilder.BuiltQuery q = builder.buildGrandTotalQuery(
+                    totalDef(), null, List.of("category", "amount"),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    filterModel, null, null);
+
+            assertThat(q.sql())
+                    .contains("WHERE 1=1")
+                    .contains("[category] =")
+                    .contains("SUM([amount]) AS [amount]");
+        }
+    }
 }
