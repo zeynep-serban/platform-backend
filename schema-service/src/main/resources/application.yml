@@ -75,6 +75,17 @@ schema:
     # fail etmez. Yeni ERP eklenince override edilir.
     like-pattern: ${SCHEMA_YEARLY_LIKE_PATTERN:workcube_mikrolink_%_%}
     regex: ${SCHEMA_YEARLY_REGEX:}
+  fk-heuristics:
+    # Phase 1 portability (Codex 019e2d7d AGREE — quick win 3+4/5): FK
+    # keşif sözlükleri JSON kaynağından. alias-path → alias_pattern
+    # heuristic (kolon→tablo, confidence 0.90). common-fk-path →
+    # common_fk heuristic (confidence 0.92). Default classpath kaynağı
+    # Workcube-uyumlu (45 alias / 25 common FK). file: ile dış JSON
+    # override edilir; dış dosya bozuk/eksik ise classpath default'a
+    # düşülür (WARN). classpath default'un kendisi bozuksa startup fail
+    # (packaging bug). Geçerli boş JSON {} → o heuristic kapatılır.
+    alias-path: ${SCHEMA_FK_ALIAS_PATH:classpath:fk-heuristics/aliases-workcube.json}
+    common-fk-path: ${SCHEMA_FK_COMMON_PATH:classpath:fk-heuristics/common-fk-workcube.json}
   ai:
     enabled: ${SCHEMA_AI_ENABLED:false}
     api-key: ${SCHEMA_AI_API_KEY:}

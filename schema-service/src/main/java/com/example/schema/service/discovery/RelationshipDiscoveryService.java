@@ -5,6 +5,7 @@ import com.example.schema.model.Relationship;
 import com.example.schema.model.TableInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -18,56 +19,48 @@ public class RelationshipDiscoveryService {
 
     private static final Logger log = LoggerFactory.getLogger(RelationshipDiscoveryService.class);
 
-    // Technique 3: Alias mappings
-    private static final Map<String, String> ALIAS_MAP = Map.ofEntries(
-        Map.entry("COMP_ID", "COMPANY"), Map.entry("CMP_ID", "COMPANY"),
-        Map.entry("ACC_COMPANY_ID", "COMPANY"), Map.entry("SALES_COMPANY_ID", "COMPANY"),
-        Map.entry("TO_COMPANY_ID", "COMPANY"), Map.entry("CARRIER_COMPANY_ID", "COMPANY"),
-        Map.entry("FUEL_COMPANY_ID", "COMPANY"), Map.entry("OLD_COMPANY_ID", "COMPANY"),
-        Map.entry("FROM_CMP_ID", "COMPANY"), Map.entry("TO_CMP_ID", "COMPANY"),
-        Map.entry("CH_COMPANY_ID", "COMPANY"), Map.entry("SUP_COMPANY_ID", "COMPANY"),
-        Map.entry("OUR_CMP_ID", "OUR_COMPANY"),
-        Map.entry("EMP_ID", "EMPLOYEES"), Map.entry("ACC_EMPLOYEE_ID", "EMPLOYEES"),
-        Map.entry("BASKET_EMPLOYEE_ID", "EMPLOYEES"), Map.entry("CC_EMP_ID", "EMPLOYEES"),
-        Map.entry("VALID_EMPLOYEE_ID", "EMPLOYEES"), Map.entry("SSK_EMPLOYEE_ID", "EMPLOYEES"),
-        Map.entry("RESP_EMP_ID", "EMPLOYEES"), Map.entry("DATA_OFFICER_ID", "EMPLOYEES"),
-        Map.entry("PROJECT_EMP_ID", "EMPLOYEES"), Map.entry("SERVICE_EMPLOYEE_ID", "EMPLOYEES"),
-        Map.entry("MANAGER_ID", "EMPLOYEES"), Map.entry("SECOND_BOSS_ID", "EMPLOYEES"),
-        Map.entry("THIRD_BOSS_ID", "EMPLOYEES"), Map.entry("FOURTH_BOSS_ID", "EMPLOYEES"),
-        Map.entry("FIFTH_BOSS_ID", "EMPLOYEES"), Map.entry("FIRST_BOSS_ID", "EMPLOYEES"),
-        Map.entry("DEPT_ID", "DEPARTMENT"), Map.entry("ACC_DEPARTMENT_ID", "DEPARTMENT"),
-        Map.entry("ACC_BRANCH_ID", "BRANCH"), Map.entry("RELATED_BRANCH_ID", "BRANCH"),
-        Map.entry("ACC_PROJECT_ID", "PRO_PROJECTS"), Map.entry("ROW_PROJECT_ID", "PRO_PROJECTS"),
-        Map.entry("OUTSRC_PARTNER_ID", "COMPANY_PARTNER"), Map.entry("SUP_PARTNER_ID", "COMPANY_PARTNER"),
-        Map.entry("MANAGER_PARTNER_ID", "COMPANY_PARTNER"), Map.entry("AUTHOR_PARTNER_ID", "COMPANY_PARTNER"),
-        Map.entry("OUTSRC_CONSUMER_ID", "CONSUMER"), Map.entry("SUP_CONSUMER_ID", "CONSUMER"),
-        Map.entry("RELATED_CONSUMER_ID", "CONSUMER"), Map.entry("ACC_CONSUMER_ID", "CONSUMER"),
-        Map.entry("EMPAPP_ID", "EMPLOYEES_APP_EDU_INFO"), Map.entry("CARD_CAT_ID", "SETUP_PROCESS_CAT")
-    );
-
-    // Technique 4: Common FK patterns
-    private static final Map<String, String> COMMON_FK_MAP = Map.ofEntries(
-        Map.entry("COMPANY_ID", "COMPANY"), Map.entry("EMPLOYEE_ID", "EMPLOYEES"),
-        Map.entry("OUR_COMPANY_ID", "OUR_COMPANY"), Map.entry("BRANCH_ID", "BRANCH"),
-        Map.entry("PROJECT_ID", "PRO_PROJECTS"), Map.entry("CONSUMER_ID", "CONSUMER"),
-        Map.entry("DEPARTMENT_ID", "DEPARTMENT"), Map.entry("PARTNER_ID", "COMPANY_PARTNER"),
-        Map.entry("PERIOD_ID", "SETUP_DUTY_PERIOD"), Map.entry("EXPENSE_ITEM_ID", "EXPENSE_ITEMS"),
-        Map.entry("EXPENSE_CENTER_ID", "EXPENSE_CENTER"), Map.entry("PAYMETHOD_ID", "SETUP_PAYMETHOD"),
-        Map.entry("COMMETHOD_ID", "SETUP_COMMETHOD"), Map.entry("ACTIVITY_TYPE_ID", "SETUP_ACTIVITY_TYPES"),
-        Map.entry("ORGANIZATION_STEP_ID", "SETUP_ORGANIZATION_STEPS"),
-        Map.entry("OFFTIMECAT_ID", "SETUP_OFFTIME"), Map.entry("TRAINING_ID", "TRAINING"),
-        Map.entry("TRAINING_CAT_ID", "TRAINING_CAT"), Map.entry("SURVEY_MAIN_ID", "SURVEY_MAIN"),
-        Map.entry("PROCESS_CAT_ID", "SETUP_PROCESS_CAT"), Map.entry("STOCK_ID", "SETUP_STOCK_AMOUNT"),
-        Map.entry("PRODUCT_ID", "PRODUCTS"), Map.entry("UNIT_ID", "SETUP_UNIT"),
-        Map.entry("BRAND_ID", "SETUP_BRAND"), Map.entry("MONEY_ID", "SETUP_MONEY")
-    );
+    /**
+     * Phase 1 portability (Codex 019e2d7d AGREE — quick win 3+4/5): the
+     * FK-heuristic dictionaries are loaded from JSON instead of being
+     * hard-coded. Defaults stay Workcube-compatible; a new ERP supplies
+     * its own files via {@code schema.fk-heuristics.alias-path} /
+     * {@code common-fk-path}. See {@link FkHeuristicMapLoader} for the
+     * fallback contract.
+     */
+    static final String DEFAULT_ALIAS_RESOURCE = "classpath:fk-heuristics/aliases-workcube.json";
+    static final String DEFAULT_COMMON_FK_RESOURCE = "classpath:fk-heuristics/common-fk-workcube.json";
 
     private static final Pattern JOIN_PATTERN = Pattern.compile(
         "(\\w+)\\.(\\w+)\\s*=\\s*(\\w+)\\.(\\w+)", Pattern.CASE_INSENSITIVE
     );
 
+    /** Technique 3: alias column → table dictionary (config-driven). */
+    private final Map<String, String> aliasMap;
+
+    /** Technique 4: common-FK column → table dictionary (config-driven). */
+    private final Map<String, String> commonFkMap;
+
     @Value("${schema.discovery.enable-view-parsing:true}")
     private boolean enableViewParsing;
+
+    @Autowired
+    public RelationshipDiscoveryService(
+            FkHeuristicMapLoader loader,
+            @Value("${schema.fk-heuristics.alias-path:}") String aliasPath,
+            @Value("${schema.fk-heuristics.common-fk-path:}") String commonFkPath) {
+        this(loader.load(aliasPath, DEFAULT_ALIAS_RESOURCE, "alias"),
+             loader.load(commonFkPath, DEFAULT_COMMON_FK_RESOURCE, "common-fk"));
+    }
+
+    /**
+     * Test-friendly constructor — injects the heuristic maps directly,
+     * bypassing JSON loading. Package-private; production wiring uses the
+     * {@link FkHeuristicMapLoader}-based constructor above.
+     */
+    RelationshipDiscoveryService(Map<String, String> aliasMap, Map<String, String> commonFkMap) {
+        this.aliasMap = Map.copyOf(aliasMap);
+        this.commonFkMap = Map.copyOf(commonFkMap);
+    }
 
     public List<Relationship> discoverAll(Map<String, TableInfo> tables,
                                           Map<String, String> viewDefinitions) {
@@ -115,7 +108,7 @@ public class RelationshipDiscoveryService {
         List<Relationship> rels = new ArrayList<>();
         for (var entry : tables.entrySet()) {
             for (ColumnInfo col : entry.getValue().columns()) {
-                String target = ALIAS_MAP.get(col.name());
+                String target = aliasMap.get(col.name());
                 if (target != null && tableNames.contains(target) && !target.equals(entry.getKey())) {
                     rels.add(new Relationship(entry.getKey(), col.name(), target, col.name(), 0.90, "alias_pattern"));
                 }
@@ -129,7 +122,7 @@ public class RelationshipDiscoveryService {
         List<Relationship> rels = new ArrayList<>();
         for (var entry : tables.entrySet()) {
             for (ColumnInfo col : entry.getValue().columns()) {
-                String target = COMMON_FK_MAP.get(col.name());
+                String target = commonFkMap.get(col.name());
                 if (target != null && tableNames.contains(target) && !target.equals(entry.getKey())) {
                     rels.add(new Relationship(entry.getKey(), col.name(), target, col.name(), 0.92, "common_fk"));
                 }
