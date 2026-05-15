@@ -15,6 +15,7 @@ import com.example.report.contract.rules.RC008SchemaResolverRegistered;
 import com.example.report.contract.rules.RC009ActionScopeValid;
 import com.example.report.contract.rules.RC010DestructiveActionRequiresPermissionAndConfirm;
 import com.example.report.contract.rules.RC011WorkcubeSourceAllowlisted;
+import com.example.report.contract.rules.RC012AuthzReferenceCheck;
 import com.example.report.contract.schema.TenantColumnAllowlist;
 import com.example.report.registry.ReportDefinition;
 import java.util.ArrayList;
@@ -111,7 +112,8 @@ public final class ContractValidator {
                 new RC008SchemaResolverRegistered(),
                 new RC009ActionScopeValid(),
                 new RC010DestructiveActionRequiresPermissionAndConfirm(),
-                new RC011WorkcubeSourceAllowlisted()
+                new RC011WorkcubeSourceAllowlisted(),
+                new RC012AuthzReferenceCheck()
         ));
     }
 

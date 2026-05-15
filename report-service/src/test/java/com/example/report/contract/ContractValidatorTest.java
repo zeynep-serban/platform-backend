@@ -11,19 +11,20 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Phase 2 Program 1a — ContractValidator orchestrator + 11 RC rule tests.
+ * Phase 2 Program 1a — ContractValidator orchestrator + 13 RC rule tests.
  *
  * <p>Spec §5.1 unit tests for build-time validator. Each rule has dedicated
- * test; orchestrator wires all 11.
+ * test; orchestrator wires all 13 (12 + R16 PR-C RC-012).
  */
 class ContractValidatorTest {
 
     private final ContractValidator validator = ContractValidator.withDefaultRules();
 
     @Test
-    void ruleCount_isExactly12() {
-        // Adım 11.1 (Codex iter-17 PARTIAL): RC-011 WorkcubeSourceAllowlisted added
-        assertThat(validator.ruleCount()).isEqualTo(12);
+    void ruleCount_isExactly13() {
+        // Adım 11.1 (Codex iter-17 PARTIAL): RC-011 WorkcubeSourceAllowlisted added (12 total)
+        // R16 PR-C (Codex 019e27f5 Option 2): RC-012 AuthzReferenceCheck added (13 total)
+        assertThat(validator.ruleCount()).isEqualTo(13);
     }
 
     @Test

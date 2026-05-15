@@ -1,0 +1,33 @@
+# R16 PR-C — Authz reference debt registry (RC-012 WARN-first).
+#
+# Codex 019e27f5 PR-C revize: deferred-stub-rules.yaml uzantısı değil, ayrı
+# dosya (stub debt ile authz reference debt aynı sınıf değil).
+#
+# Bu dosyaya kayıtlı `key` değerleri (örn. reportGroup "FINANCE_REPORTS") şu
+# anda authz reference registry'sinde YOK ama warn_until tarihine kadar WARN
+# log üretir + CI yeşil kalır. Tarih geçtiğinde RC-012 WARN → FAIL'e döner.
+#
+# Yeni entry eklemek için: rule_id + reference_type + key + warn_until +
+# owner + reason + tracking_pr zorunlu. warn_until tarihi geçtikten sonra
+# WARN'in FAIL'e çevrilmesi otomatik (test enforcement).
+#
+# Reference: ADR-0017 Contract-Registry Cross-Check Pattern, R16 close-out
+# discipline gap (Session 53 handoff).
+
+authz_reference_debt: []
+# Boş başlangıç — şu an ReportDefinition.access.reportGroup'ları canonical
+# model.fga `type report_group`'ta YOK çünkü PR-B (#196) henüz merge
+# edilmedi (merge sonra type report_group eklenmiş olur).
+#
+# PR-B merge edildiğinde: bu dosya boş kalabilir (her reportGroup model'de
+# karşılık bulur). PR-B merge edilmeden RC-012 koşarsa, WARN log üretir
+# ama CI fail etmez (warn_until 2026-07-15 buffer).
+#
+# Örnek (placeholder format):
+# - rule_id: RC-012
+#   reference_type: reportGroup
+#   key: EXPERIMENTAL_REPORTS
+#   warn_until: "2026-07-15"
+#   owner: platform-team
+#   reason: "Canonical model'e eklenmedi; PR-X track"
+#   tracking_pr: 999
