@@ -55,7 +55,12 @@
       "type": "text",
       "width": 110,
       "sensitive": false,
-      "groupable": true
+      "groupable": true,
+      "pivotable": true,
+      "pivotValues": [
+        { "value": "Borç", "label": "Borç" },
+        { "value": "Alacak", "label": "Alacak" }
+      ]
     },
     {
       "field": "AMOUNT",
