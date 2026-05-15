@@ -245,7 +245,7 @@ public class ImpersonationController {
                     .impersonatorEmail(impersonatorEmail)
                     .targetSubject(resolvedTargetSubject)
                     .targetUserId(request.targetUserId())
-                    .targetEmail(request.targetEmail() != null ? request.targetEmail() : targetRecord.getEmail())
+                    .targetEmail(auditTargetEmail(request, targetRecord))
                     .reason(request.reason())
                     .correlationId(correlationId)
                     .errorCode("TARGET_USER_DISABLED")
@@ -269,7 +269,7 @@ public class ImpersonationController {
                     .impersonatorEmail(impersonatorEmail)
                     .targetSubject(resolvedTargetSubject)
                     .targetUserId(request.targetUserId())
-                    .targetEmail(request.targetEmail())
+                    .targetEmail(auditTargetEmail(request, targetRecord))
                     .reason(request.reason())
                     .correlationId(correlationId)
                     .errorCode("SELF_IMPERSONATION_FORBIDDEN")
@@ -292,7 +292,7 @@ public class ImpersonationController {
                     .impersonatorEmail(impersonatorEmail)
                     .targetSubject(resolvedTargetSubject)
                     .targetUserId(request.targetUserId())
-                    .targetEmail(request.targetEmail())
+                    .targetEmail(auditTargetEmail(request, targetRecord))
                     .reason(request.reason())
                     .correlationId(correlationId)
                     .errorCode("INSUFFICIENT_AUTHORITY")
@@ -316,7 +316,7 @@ public class ImpersonationController {
                     .impersonatorEmail(impersonatorEmail)
                     .targetSubject(resolvedTargetSubject)
                     .targetUserId(request.targetUserId())
-                    .targetEmail(request.targetEmail())
+                    .targetEmail(auditTargetEmail(request, targetRecord))
                     .reason(request.reason())
                     .correlationId(correlationId)
                     .errorCode(e.errorCode())
@@ -341,7 +341,7 @@ public class ImpersonationController {
                     .impersonatorEmail(impersonatorEmail)
                     .targetSubject(resolvedTargetSubject)
                     .targetUserId(request.targetUserId())
-                    .targetEmail(request.targetEmail())
+                    .targetEmail(auditTargetEmail(request, targetRecord, claims))
                     .reason(request.reason())
                     .correlationId(correlationId)
                     .errorCode("TARGET_SUBJECT_MISMATCH")
@@ -362,7 +362,7 @@ public class ImpersonationController {
                     .impersonatorEmail(impersonatorEmail)
                     .targetSubject(resolvedTargetSubject)
                     .targetUserId(request.targetUserId())
-                    .targetEmail(request.targetEmail())
+                    .targetEmail(auditTargetEmail(request, targetRecord, claims))
                     .reason(request.reason())
                     .correlationId(correlationId)
                     .errorCode("EXCHANGED_TOKEN_NOT_BROKER_ISSUED")
@@ -384,7 +384,7 @@ public class ImpersonationController {
                     .impersonatorEmail(impersonatorEmail)
                     .targetSubject(resolvedTargetSubject)
                     .targetUserId(request.targetUserId())
-                    .targetEmail(request.targetEmail())
+                    .targetEmail(auditTargetEmail(request, targetRecord, claims))
                     .reason(request.reason())
                     .correlationId(correlationId)
                     .errorCode("EXCHANGED_TOKEN_EXPIRED")
@@ -609,6 +609,22 @@ public class ImpersonationController {
             return requestedTargetEmail;
         }
         return targetRecord != null ? targetRecord.getEmail() : requestedTargetEmail;
+    }
+
+    /**
+     * Codex {@code 019e27bf} fresh-context audit follow-up — global
+     * invariant for audit branches that fire AFTER the KC token exchange.
+     * Precedence: KC claims email (authoritative) → request → targetRecord.
+     * This is the post-exchange counterpart to {@link #auditTargetEmail}
+     * (which only knows about request + user-service lookup).
+     */
+    private String auditTargetEmail(StartSessionRequest request,
+                                    RemoteUserResponse targetRecord,
+                                    DecodedClaims claims) {
+        if (claims != null && claims.email() != null && !claims.email().isBlank()) {
+            return claims.email();
+        }
+        return auditTargetEmail(request, targetRecord);
     }
 
     @ExceptionHandler(TokenExchangeException.class)
