@@ -16,3 +16,12 @@ docs/deploy/env/*.local
 # Maven build output
 target/
 /.claude/
+
+# Python (etl-worker)
+**/.venv/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.egg-info/
+**/.coverage
+**/htmlcov/

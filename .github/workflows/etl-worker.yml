@@ -1,0 +1,53 @@
+name: etl-worker — pytest + ruff + mypy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'etl-worker/**'
+      - '.github/workflows/etl-worker.yml'
+  pull_request:
+    paths:
+      - 'etl-worker/**'
+      - '.github/workflows/etl-worker.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: etl-worker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: etl-worker Python gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: etl-worker
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: ruff lint
+        run: python -m ruff check etl_worker tests
+
+      - name: mypy strict
+        run: python -m mypy etl_worker
+
+      - name: pytest
+        run: python -m pytest --cov=etl_worker --cov-report=term-missing

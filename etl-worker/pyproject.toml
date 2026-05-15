@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "etl-worker"
+version = "0.1.0"
+description = "Workcube reporting ETL worker — schema-service contract consumer. Adım 12 (reporting refactor plan)."
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "Platform team" }]
+# Runtime stays stdlib-only for PR-1. New runtime dependencies are added
+# only when the runner / live ETL slices land (Adım 12 PR-2+).
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.7",
+    "mypy>=1.11",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["etl_worker*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "RUF", # ruff-specific
+]
+
+# RUF002 — "Ambiguous Latin small letter dotless I (ı)" — applies only
+# to docstrings that cite the Turkish "Adım" plan section markers from
+# docs/plan-reporting-refactor-2026-05-14.md (in platform-k8s-gitops).
+# CLAUDE.md mandates Turkish user-facing prose, and the plan markers
+# are canonical, so per-file scope keeps the linter useful elsewhere
+# without anglicizing plan section names.
+[tool.ruff.lint.per-file-ignores]
+"etl_worker/__init__.py" = ["RUF001", "RUF002"]
+"etl_worker/contracts.py" = ["RUF001", "RUF002"]
+"etl_worker/schema_service_client.py" = ["RUF001", "RUF002"]
+"tests/test_schema_service_client.py" = ["RUF001", "RUF002"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+files = ["etl_worker"]
