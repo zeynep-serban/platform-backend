@@ -10,6 +10,7 @@ future ADR moves this to a standalone repo (``Halildeu/etl-worker``),
 ``git filter-repo`` preserves history. See ``README.md``.
 """
 
+from .config import Config, ConfigError
 from .contracts import ColumnSpec, SchemaSnapshot, TableSpec
 from .schema_service_client import (
     SchemaContractVersionMismatch,
@@ -20,6 +21,8 @@ from .schema_service_client import (
 
 __all__ = [
     "ColumnSpec",
+    "Config",
+    "ConfigError",
     "SchemaContractVersionMismatch",
     "SchemaServiceClient",
     "SchemaServiceMalformedResponse",

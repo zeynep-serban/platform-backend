@@ -4,14 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "etl-worker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Workcube reporting ETL worker — schema-service contract consumer. Adım 12 (reporting refactor plan)."
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
 authors = [{ name = "Platform team" }]
-# Runtime stays stdlib-only for PR-1. New runtime dependencies are added
-# only when the runner / live ETL slices land (Adım 12 PR-2+).
+# Runtime stays stdlib-only for PR-1 and PR-2a (CLI scaffold). New
+# runtime dependencies arrive only when the runner / live ETL slices
+# land (Adım 12 PR-2b onwards).
 dependencies = []
+
+[project.scripts]
+etl-worker = "etl_worker.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -54,8 +58,12 @@ select = [
 # without anglicizing plan section names.
 [tool.ruff.lint.per-file-ignores]
 "etl_worker/__init__.py" = ["RUF001", "RUF002"]
+"etl_worker/cli.py" = ["RUF001", "RUF002"]
+"etl_worker/config.py" = ["RUF001", "RUF002"]
 "etl_worker/contracts.py" = ["RUF001", "RUF002"]
 "etl_worker/schema_service_client.py" = ["RUF001", "RUF002"]
+"tests/test_cli.py" = ["RUF001", "RUF002"]
+"tests/test_config.py" = ["RUF001", "RUF002"]
 "tests/test_schema_service_client.py" = ["RUF001", "RUF002"]
 
 [tool.mypy]

@@ -14,11 +14,55 @@ subsequent PRs.
 
 | Slice | Scope | Status |
 |---|---|---|
-| PR-1 | `SchemaServiceClient` + contract models + tests + CI gate | this PR |
-| PR-2a | Config / CLI / client wiring (`SCHEMA_SERVICE_URL`, internal key env, schema/scope args, typed exit behaviour) | pending |
+| PR-1 | `SchemaServiceClient` + contract models + tests + CI gate | ✅ merged ([#205](https://github.com/Halildeu/platform-backend/pull/205)) |
+| PR-2a | Config / CLI / client wiring (`SCHEMA_SERVICE_URL`, internal key env, schema/scope args, typed exit behaviour) | this PR |
 | PR-2b | Runner orchestration (retry, audit, resume, DB lifecycle) | pending |
 | PR-3 | Dockerfile + K8s Job manifest + test cluster wiring | pending |
 | PR-4 | Live smoke against testai schema-service + reports DB writes | pending (operator gate) |
+
+## PR-2a — CLI usage (this slice)
+
+Console script:
+
+```
+$ etl-worker --help
+usage: etl-worker [-h] {fetch-snapshot} ...
+
+$ etl-worker fetch-snapshot --help
+usage: etl-worker fetch-snapshot [-h] [--schema SCHEMA] [--timeout TIMEOUT]
+```
+
+Environment variables (`Config.from_env()`):
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `SCHEMA_SERVICE_URL` | ✅ | — | http / https only; no embedded credentials; trailing slash trimmed |
+| `SCHEMA_SERVICE_INTERNAL_API_KEY` | — | unset (passthrough) | Sent as `X-Internal-Api-Key` header |
+| `SCHEMA_SERVICE_TIMEOUT_SECONDS` | — | `10` | Positive float |
+| `SCHEMA_SERVICE_SCHEMA` | — | unset | Default for `?schema=` selector; `--schema` CLI flag overrides |
+| `SCHEMA_SERVICE_CONTRACT_VERSIONS` | — | `1` | CSV of accepted versions, e.g. `1,2` |
+
+Success output: one-line JSON on stdout
+
+```json
+{"contract_version":"1","allowlist_name":"ReportingAllowlist","allowlist_version":"V1","table_count":42,"column_count":312}
+```
+
+Error output: one-line human-readable message on stderr + sysexits-style exit code:
+
+| Exit code | Constant | Trigger | Caller action |
+|---:|---|---|---|
+| `0` | `EX_OK` | Snapshot fetched + parsed | Continue pipeline |
+| `64` | `EX_USAGE` | Bad CLI args, missing config, invalid URL, bad timeout, empty CSV | Abort — fix the invocation |
+| `70` | `EX_SOFTWARE` | 4xx response, parse failure, malformed body | Abort — fix the target contract / schema-service shape |
+| `75` | `EX_TEMPFAIL` | 5xx response or transport-level outage | Retry with backoff |
+| `76` | `EX_PROTOCOL` | `contract_version` not in `SCHEMA_SERVICE_CONTRACT_VERSIONS` | Abort — operator must reconcile |
+
+> The command validates the **Adım 12 target contract**; live wiring
+> against the production schema-service shape waits for the
+> schema-service target-shape PR (`version` → `contract_version`,
+> `tables` Map → list, `dataType` → `type`, plus
+> `allowlist_name` / `allowlist_version` emission).
 
 ## Target contract — *not* the current schema-service response
 
@@ -115,9 +159,14 @@ etl-worker/
 ├── pyproject.toml
 ├── etl_worker/
 │   ├── __init__.py
+│   ├── __main__.py              # `python -m etl_worker` entry point
+│   ├── cli.py                   # argparse CLI + exit-code contract
+│   ├── config.py                # Config.from_env() + ConfigError
 │   ├── contracts.py             # SchemaSnapshot / TableSpec / ColumnSpec dataclasses
 │   └── schema_service_client.py # SchemaServiceClient + typed exceptions
 └── tests/
+    ├── test_cli.py              # 16 CLI cases (override precedence + exit-code matrix)
+    ├── test_config.py           # 23 Config.from_env validation cases
     └── test_schema_service_client.py
 ```
 
