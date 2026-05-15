@@ -48,6 +48,21 @@ public class TupleSyncService {
     }
 
     /**
+     * R16 PR-B-2 (Codex 019e27f5 önerisi): {@code reports.<GROUP>}
+     * permission key'leri OpenFGA'da {@code report_group} type'a yazılır,
+     * normal {@code REPORT} key'leri (örn. dashboard {@code FIN_ANALYTICS})
+     * legacy {@code report} type'ında kalır.
+     */
+    public static final Set<String> REPORT_GROUP_KEYS = Set.of(
+            "FINANCE_REPORTS",
+            "HR_REPORTS",
+            "SALES_REPORTS",
+            "ANALYTICS_REPORTS"
+    );
+
+    private static final String REPORTS_PREFIX = "reports.";
+
+    /**
      * Write feature tuples for a user based on their combined role permissions.
      * Applies deny-wins semantics: if any role DENYs a permission, the user is blocked.
      */
@@ -66,11 +81,20 @@ public class TupleSyncService {
             PermissionType type = PermissionType.valueOf(parts[0]);
             String key = parts[1];
 
-            TupleMapping mapping = toTupleMapping(type, grant.grantType());
+            // R16 PR-B-2 (Codex 019e27f5): key-aware mapping. REPORT permission
+            // key'i `reports.<GROUP>` ise object_type = "report_group" + key
+            // suffix; aksi halde legacy "report" type devam.
+            TupleMapping mapping = toTupleMapping(type, key, grant.grantType());
             if (mapping == null) continue;
 
+            // R16 PR-B-2: report_group için object_id key suffix (FINANCE_REPORTS),
+            // diğerleri için raw key (FIN_ANALYTICS, MODULE_X, vb.).
+            String objectId = "report_group".equals(mapping.objectType())
+                    ? normalizeReportGroupKey(key)
+                    : key;
+
             try {
-                authzService.writeTuple(userId, mapping.relation(), mapping.objectType(), key);
+                authzService.writeTuple(userId, mapping.relation(), mapping.objectType(), objectId);
 
                 // CNS-20260415-004 Codex bulgu #3: Eskiden DENY icin ikinci "blocked"
                 // tuple yazilirdi. Ancak toTupleMapping(DENY) zaten "blocked" relation
@@ -79,7 +103,7 @@ public class TupleSyncService {
                 // blocked tuple'ini yaziyor → duplicate write. Kaldirildi.
             } catch (Exception e) {
                 anyWriteFailed = true;
-                log.warn("OpenFGA tuple write failed for user:{} {}:{} — {}", userId, mapping.relation(), key, e.getMessage());
+                log.warn("OpenFGA tuple write failed for user:{} {}:{} — {}", userId, mapping.relation(), objectId, e.getMessage());
             }
         }
         // P0 fail-closed: only bump version if ALL OpenFGA writes succeeded
@@ -259,12 +283,19 @@ public class TupleSyncService {
         java.util.LinkedHashMap<String, ClientTupleKeyWithoutCondition> dedupe = new java.util.LinkedHashMap<>();
         for (RolePermission rp : allPerms) {
             if (rp.getPermissionType() == null || rp.getPermissionKey() == null) continue;
-            String objectType = objectTypeForPermissionType(rp.getPermissionType());
+            // R16 PR-B-2 (Codex 019e27f5): key-aware cleanup. report_group
+            // tuple'ları normalize edilmiş key (FINANCE_REPORTS) ile yazıldığı
+            // için delete tarafında da aynı normalizasyon uygulanmalı; legacy
+            // report tuple'ları raw key (FIN_ANALYTICS) korur.
+            String objectType = objectTypeForPermissionType(rp.getPermissionType(), rp.getPermissionKey());
             if (objectType == null) continue;
+            String objectId = "report_group".equals(objectType)
+                    ? normalizeReportGroupKey(rp.getPermissionKey())
+                    : rp.getPermissionKey();
             for (String relation : getRelationsForType(rp.getPermissionType())) {
-                String canonical = userId + "|" + relation + "|" + objectType + ":" + rp.getPermissionKey();
+                String canonical = userId + "|" + relation + "|" + objectType + ":" + objectId;
                 dedupe.putIfAbsent(canonical, OpenFgaAuthzService.deleteTupleKey(
-                        userId, relation, objectType, rp.getPermissionKey()));
+                        userId, relation, objectType, objectId));
             }
         }
 
@@ -283,11 +314,47 @@ public class TupleSyncService {
     }
 
     private String objectTypeForPermissionType(PermissionType type) {
+        return objectTypeForPermissionType(type, null);
+    }
+
+    /**
+     * R16 PR-B-2 (Codex 019e27f5 önerisi) — key-aware mapping.
+     *
+     * <p>{@code PermissionType.REPORT} + key {@code reports.<GROUP>} (or raw
+     * GROUP key) → {@code report_group} OpenFGA type. Aksi halde legacy
+     * {@code report} type. Diğer types değişmez.
+     */
+    private String objectTypeForPermissionType(PermissionType type, String key) {
         return switch (type) {
             case MODULE -> "module";
             case ACTION -> "action";
-            case REPORT -> "report";
+            case REPORT -> isReportGroupKey(key) ? "report_group" : "report";
         };
+    }
+
+    /**
+     * Key normalize + REPORT_GROUP_KEYS membership check.
+     */
+    public static boolean isReportGroupKey(String key) {
+        if (key == null || key.isBlank()) return false;
+        String normalized = normalizeReportGroupKey(key);
+        return REPORT_GROUP_KEYS.contains(normalized);
+    }
+
+    /**
+     * Permission key {@code reports.FINANCE_REPORTS} → {@code FINANCE_REPORTS}.
+     * Prefix yoksa key olduğu gibi döner.
+     *
+     * <p>R16 PR-B-2 (Codex 019e27f5): kullanılan yerler:
+     * <ul>
+     *   <li>{@link TupleSyncService} OpenFGA tuple write (object_id normalize)</li>
+     *   <li>{@code AuthorizationControllerV1} /authz/me reports map (FE
+     *       {@code canViewReport(reportGroup)} suffix-only beklediği için)</li>
+     * </ul>
+     */
+    public static String normalizeReportGroupKey(String key) {
+        if (key == null) return null;
+        return key.startsWith(REPORTS_PREFIX) ? key.substring(REPORTS_PREFIX.length()) : key;
     }
 
     private List<String> getRelationsForType(PermissionType type) {
@@ -299,7 +366,18 @@ public class TupleSyncService {
         };
     }
 
-    private TupleMapping toTupleMapping(PermissionType type, GrantType grant) {
+    /**
+     * @deprecated R16 PR-B-2: key-aware overload kullanılmalı
+     *     ({@link #toTupleMapping(PermissionType, String, GrantType)}).
+     *     Bu overload geriye dönük testler için tutuluyor.
+     */
+    @Deprecated
+    TupleMapping toTupleMapping(PermissionType type, GrantType grant) {
+        return toTupleMapping(type, null, grant);
+    }
+
+    private TupleMapping toTupleMapping(PermissionType type, String key, GrantType grant) {
+        String reportObjectType = isReportGroupKey(key) ? "report_group" : "report";
         return switch (type) {
             case MODULE -> switch (grant) {
                 case MANAGE -> new TupleMapping("can_manage", "module");
@@ -313,9 +391,9 @@ public class TupleSyncService {
                 default -> null;
             };
             case REPORT -> switch (grant) {
-                case MANAGE -> new TupleMapping("can_edit", "report");
-                case ALLOW, VIEW -> new TupleMapping("can_view", "report");
-                case DENY -> new TupleMapping("blocked", "report");
+                case MANAGE -> new TupleMapping("can_edit", reportObjectType);
+                case ALLOW, VIEW -> new TupleMapping("can_view", reportObjectType);
+                case DENY -> new TupleMapping("blocked", reportObjectType);
             };
             // PAGE, FIELD removed in V10 migration (TB-21)
         };

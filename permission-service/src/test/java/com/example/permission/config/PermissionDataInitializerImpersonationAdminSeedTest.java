@@ -121,8 +121,10 @@ class PermissionDataInitializerImpersonationAdminSeedTest {
     void run_adminAlreadyHasAllGranules_isIdempotent_noDuplicateInsertOrEvent() throws Exception {
         Role admin = adminRoleWithGranuleMarker(99L);
         // Pre-seed every granule the initializer would otherwise insert: the
-        // 12 dashboards (HR + Finans) plus IMPERSONATION_AUDIT MANAGE. This
-        // makes the entire granule pass for ADMIN a no-op.
+        // 12 dashboards (HR + Finans) + 4 report_group keys (R16 PR-B-2:
+        // reports.FINANCE_REPORTS / HR_REPORTS / SALES_REPORTS /
+        // ANALYTICS_REPORTS) + IMPERSONATION_AUDIT MANAGE. This makes the
+        // entire granule pass for ADMIN a no-op.
         for (String key : List.of(
                 "HR_ANALYTICS", "HR_FINANSAL", "HR_EQUITY_RISK",
                 "HR_BENEFITS_LITE", "HR_COMPENSATION", "HR_SALARY_ANALYTICS",
@@ -130,6 +132,14 @@ class PermissionDataInitializerImpersonationAdminSeedTest {
                 "FIN_ANALYTICS", "FIN_RATIOS", "FIN_RECONCILIATION")) {
             admin.addRolePermission(new RolePermission(
                     admin, PermissionType.REPORT, key, GrantType.MANAGE));
+        }
+        // R16 PR-B-2 (Codex 019e27f5): report_group granule seed eklendi.
+        // Idempotency test pre-seed bu yeni granule'ları da içermeli.
+        for (String groupKey : List.of(
+                "reports.FINANCE_REPORTS", "reports.HR_REPORTS",
+                "reports.SALES_REPORTS", "reports.ANALYTICS_REPORTS")) {
+            admin.addRolePermission(new RolePermission(
+                    admin, PermissionType.REPORT, groupKey, GrantType.MANAGE));
         }
         admin.addRolePermission(new RolePermission(
                 admin, PermissionType.MODULE, "IMPERSONATION_AUDIT", GrantType.MANAGE));

@@ -98,6 +98,27 @@ public class PermissionDataInitializer implements CommandLineRunner {
             "FIN_ANALYTICS", "FIN_RATIOS", "FIN_RECONCILIATION"
     );
 
+    /**
+     * R16 PR-B-2 (Codex 019e27f5 önerisi) — report_group GranuleSeed key'leri.
+     *
+     * <p>Bu key'ler {@code reports.<GROUP>} permission catalog entry'leriyle
+     * eşleşir; {@link com.example.permission.service.TupleSyncService}
+     * {@code REPORT_GROUP_KEYS} membership check yapıp OpenFGA
+     * {@code report_group:<KEY>#can_view} tuple'ı yazar.
+     *
+     * <p>R15 user-visible repair: bu seed'ler ile ADMIN + REPORT_MANAGER
+     * + REPORT_VIEWER + FINANCE_* rolleri otomatik report_group tuple'larına
+     * sahip olur → /authz/me.reports map dolu döner → FE filter 24 hidden
+     * report'u görünür hale getirir.
+     */
+    private static final List<String> DEFAULT_REPORT_GROUP_KEYS = List.of(
+            "FINANCE_REPORTS", "HR_REPORTS", "SALES_REPORTS", "ANALYTICS_REPORTS"
+    );
+
+    private static final List<String> DEFAULT_FIN_REPORT_GROUP_KEYS = List.of(
+            "FINANCE_REPORTS", "ANALYTICS_REPORTS"
+    );
+
     private record GranuleSeed(
             PermissionType type,
             String key,
@@ -117,30 +138,44 @@ public class PermissionDataInitializer implements CommandLineRunner {
 
     private static final Map<String, List<GranuleSeed>> DEFAULT_ROLE_GRANULES = Map.ofEntries(
             Map.entry("ADMIN",           buildAdminGranules()),
-            Map.entry("REPORT_MANAGER",  buildDashboardGranules(
-                    GrantType.MANAGE,
-                    DEFAULT_HR_DASHBOARD_KEYS, DEFAULT_FIN_DASHBOARD_KEYS)),
+            Map.entry("REPORT_MANAGER",  combine(
+                    buildDashboardGranules(GrantType.MANAGE,
+                            DEFAULT_HR_DASHBOARD_KEYS, DEFAULT_FIN_DASHBOARD_KEYS),
+                    // R16 PR-B-2: report_group seed (TupleSyncService
+                    // REPORT_GROUP_KEYS membership ile report_group type'a
+                    // tuple yazar; /authz/me.reports map dolar)
+                    buildReportGroupGranules(GrantType.MANAGE,
+                            DEFAULT_REPORT_GROUP_KEYS))),
             // REPORT_VIEWER intentionally gets every dashboard at VIEW level —
             // a "viewer" who can't open any dashboard would be a surprising
             // role contract for users assigning it from the drawer.
-            Map.entry("REPORT_VIEWER",   buildDashboardGranules(
-                    GrantType.VIEW,
-                    DEFAULT_HR_DASHBOARD_KEYS, DEFAULT_FIN_DASHBOARD_KEYS)),
-            Map.entry("FINANCE_MANAGER", buildDashboardGranules(
-                    GrantType.MANAGE,
-                    DEFAULT_FIN_DASHBOARD_KEYS)),
-            Map.entry("FINANCE_VIEWER",  buildDashboardGranules(
-                    GrantType.VIEW,
-                    DEFAULT_FIN_DASHBOARD_KEYS))
+            Map.entry("REPORT_VIEWER",   combine(
+                    buildDashboardGranules(GrantType.VIEW,
+                            DEFAULT_HR_DASHBOARD_KEYS, DEFAULT_FIN_DASHBOARD_KEYS),
+                    buildReportGroupGranules(GrantType.VIEW,
+                            DEFAULT_REPORT_GROUP_KEYS))),
+            Map.entry("FINANCE_MANAGER", combine(
+                    buildDashboardGranules(GrantType.MANAGE,
+                            DEFAULT_FIN_DASHBOARD_KEYS),
+                    buildReportGroupGranules(GrantType.MANAGE,
+                            DEFAULT_FIN_REPORT_GROUP_KEYS))),
+            Map.entry("FINANCE_VIEWER",  combine(
+                    buildDashboardGranules(GrantType.VIEW,
+                            DEFAULT_FIN_DASHBOARD_KEYS),
+                    buildReportGroupGranules(GrantType.VIEW,
+                            DEFAULT_FIN_REPORT_GROUP_KEYS)))
     );
 
     /**
-     * ADMIN granule seed list = dashboard MANAGE (HR + Finans) + dedicated
-     * IMPERSONATION_AUDIT MANAGE module grant (PR-D2).
+     * ADMIN granule seed list = dashboard MANAGE (HR + Finans) + report_group
+     * MANAGE (R16 PR-B-2) + dedicated IMPERSONATION_AUDIT MANAGE module
+     * grant (PR-D2).
      */
     private static List<GranuleSeed> buildAdminGranules() {
         List<GranuleSeed> out = new ArrayList<>(buildDashboardGranules(
                 GrantType.MANAGE, DEFAULT_HR_DASHBOARD_KEYS, DEFAULT_FIN_DASHBOARD_KEYS));
+        // R16 PR-B-2: ADMIN tüm report_group'lar için MANAGE
+        out.addAll(buildReportGroupGranules(GrantType.MANAGE, DEFAULT_REPORT_GROUP_KEYS));
         out.add(IMPERSONATION_AUDIT_ADMIN_GRANULE);
         return List.copyOf(out);
     }
@@ -155,6 +190,32 @@ public class PermissionDataInitializer implements CommandLineRunner {
                 out.add(new GranuleSeed(
                         PermissionType.REPORT, key, grant));
             }
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * R16 PR-B-2 (Codex 019e27f5): report_group GranuleSeed builder. Key'ler
+     * {@code reports.<GROUP>} formatında üretilir; TupleSyncService
+     * {@code REPORT_GROUP_KEYS} membership ile {@code report_group} type'a
+     * eşleştirir.
+     */
+    private static List<GranuleSeed> buildReportGroupGranules(
+            GrantType grant,
+            List<String> groupKeys) {
+        List<GranuleSeed> out = new ArrayList<>();
+        for (String groupKey : groupKeys) {
+            out.add(new GranuleSeed(
+                    PermissionType.REPORT, "reports." + groupKey, grant));
+        }
+        return List.copyOf(out);
+    }
+
+    @SafeVarargs
+    private static List<GranuleSeed> combine(List<GranuleSeed>... lists) {
+        List<GranuleSeed> out = new ArrayList<>();
+        for (List<GranuleSeed> list : lists) {
+            out.addAll(list);
         }
         return List.copyOf(out);
     }
