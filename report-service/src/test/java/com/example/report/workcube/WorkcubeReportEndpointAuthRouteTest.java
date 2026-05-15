@@ -1,8 +1,6 @@
 package com.example.report.workcube;
 
 import com.example.report.config.SecurityConfig;
-import com.example.report.dto.PagedResultDto;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,7 +20,6 @@ import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -174,7 +171,7 @@ class WorkcubeReportEndpointAuthRouteTest {
                 tokenValue,
                 now.minusSeconds(60),
                 now.plusSeconds(300),
-                Map.of("alg", "none", "typ", "JWT"),
+                Map.of("alg", "RS256", "typ", "JWT"),
                 Map.of(
                         "sub", "route-test-subject",
                         "preferred_username", "route-test",
@@ -200,9 +197,10 @@ class WorkcubeReportEndpointAuthRouteTest {
      *       advice, and Spring Security filter chain unchanged.</li>
      * </ol>
      *
-     * <p>The {@link ObjectMapper} parameter is satisfied by the standard
+     * <p>The {@link WorkcubeQueryExceptionHandler} constructor dependency
+     * on Jackson's {@code ObjectMapper} is satisfied by the standard
      * Spring Boot MVC auto-configuration that the {@code @WebMvcTest}
-     * slice activates.
+     * slice activates — no manual bean is needed here.
      */
     @TestConfiguration
     static class TestMssqlBeanConfig {
