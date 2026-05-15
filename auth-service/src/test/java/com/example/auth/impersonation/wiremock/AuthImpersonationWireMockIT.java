@@ -634,4 +634,125 @@ class AuthImpersonationWireMockIT {
                 .as("active lookup must carry impersonatorUserId=1 query param")
                 .contains("impersonatorUserId=1");
     }
+
+    // ------------------------------------------------------------------
+    // Audit target_email global invariant tests (Codex 019e27bf
+    // fresh-context audit finding #4 — 9+ branches had been left using
+    // request.targetEmail(); the controller now routes them through the
+    // auditTargetEmail helper so every BLOCKED/FAILED row carries the
+    // resolved address even when the operator omits it from the body).
+    //
+    // These cases POST without targetEmail and assert the audit row
+    // still carries the user-service-resolved address. Each one drives
+    // the controller to a different post-resolution branch.
+    // ------------------------------------------------------------------
+
+    @Test
+    void post_resolution_disabled_branch_audit_carries_resolved_email() throws Exception {
+        long targetUserId = 50L;
+        String resolvedEmail = "disabled.target@example.com";
+        stubAuthzMe(true);
+        stubUserServiceTarget(targetUserId, "target-disabled-uuid", resolvedEmail, false);
+        stubAuditAccepted();
+
+        var mvcResult = mockMvc.perform(post("/api/v1/impersonation/sessions")
+                        .with(jwt().jwt(j -> j.subject("admin-uuid")
+                                .claim("userId", 1L)
+                                .claim("email", "admin@example.com")
+                                .claim("azp", "frontend")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"targetUserId\":" + targetUserId
+                                + ",\"reason\":\"disabled branch audit invariant\"}"))
+                .andReturn();
+
+        assertThat(mvcResult.getResponse().getStatus()).isEqualTo(403);
+        JsonNode auditBody = lastBodyTo("/api/v1/internal/impersonation/audit-events");
+        assertThat(auditBody).isNotNull();
+        assertThat(auditBody.get("errorCode").asText()).isEqualTo("TARGET_USER_DISABLED");
+        assertThat(auditBody.get("targetEmail").asText())
+                .as("DISABLED branch must carry the user-service-resolved email")
+                .isEqualTo(resolvedEmail);
+    }
+
+    @Test
+    void post_resolution_insufficient_authority_branch_audit_carries_resolved_email()
+            throws Exception {
+        long targetUserId = 51L;
+        String resolvedEmail = "halil@example.com";
+        // authz/me says not super admin; target resolution still runs.
+        stubAuthzMe(false);
+        stubUserServiceTarget(targetUserId, "target-not-self", resolvedEmail, true);
+        stubAuditAccepted();
+
+        var mvcResult = mockMvc.perform(post("/api/v1/impersonation/sessions")
+                        .with(jwt().jwt(j -> j.subject("admin-uuid")
+                                .claim("userId", 1L)
+                                .claim("email", "viewer@example.com")
+                                .claim("azp", "frontend")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"targetUserId\":" + targetUserId
+                                + ",\"reason\":\"insufficient authority invariant\"}"))
+                .andReturn();
+
+        assertThat(mvcResult.getResponse().getStatus()).isEqualTo(403);
+        JsonNode auditBody = lastBodyTo("/api/v1/internal/impersonation/audit-events");
+        assertThat(auditBody).isNotNull();
+        assertThat(auditBody.get("errorCode").asText()).isEqualTo("INSUFFICIENT_AUTHORITY");
+        assertThat(auditBody.get("targetEmail").asText())
+                .as("INSUFFICIENT_AUTHORITY branch must carry resolved email")
+                .isEqualTo(resolvedEmail);
+    }
+
+    @Test
+    void post_exchange_subject_mismatch_branch_audit_carries_claims_email()
+            throws Exception {
+        long targetUserId = 52L;
+        String targetSubject = "target-mismatch-uuid";
+        String resolvedEmail = "halil.kocoglu@example.com";
+        String claimsEmail = "claims-email-from-kc@example.com"; // KC-authoritative
+        stubAuthzMe(true);
+        stubUserServiceTarget(targetUserId, targetSubject, resolvedEmail, true);
+        stubSessionCreate201(java.util.UUID.randomUUID().toString(), 1L, targetUserId);
+        stubAuditAccepted();
+
+        // Force the controller's Step 3a subject-mismatch guard: KC
+        // returns claims with a DIFFERENT sub than the one we asked for.
+        String fakeJwt = TestTokens.buildFakeExchangedJwt(
+                "https://wiremock-it/realms/test",
+                "jti-mismatch",
+                "sid-mismatch",
+                "different-subject-from-kc", // <-- mismatch
+                "impersonation-broker",
+                9_999_999_999L,
+                claimsEmail);
+        KeycloakBrokerClient.DecodedClaims claims = new KeycloakBrokerClient.DecodedClaims(
+                "https://wiremock-it/realms/test",
+                "jti-mismatch",
+                "sid-mismatch",
+                "different-subject-from-kc",
+                "impersonation-broker",
+                9_999_999_999L,
+                claimsEmail);
+        when(keycloakBrokerClient.exchange(any(), eq(targetSubject)))
+                .thenReturn(new KeycloakBrokerClient.ExchangeResult(fakeJwt, 3600L, claims));
+
+        var mvcResult = mockMvc.perform(post("/api/v1/impersonation/sessions")
+                        .with(jwt().jwt(j -> j.subject("admin-uuid")
+                                .claim("userId", 1L)
+                                .claim("email", "admin@example.com")
+                                .claim("azp", "frontend")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"targetUserId\":" + targetUserId
+                                + ",\"reason\":\"subject mismatch invariant\"}"))
+                .andReturn();
+
+        assertThat(mvcResult.getResponse().getStatus()).isEqualTo(400);
+        JsonNode auditBody = lastBodyTo("/api/v1/internal/impersonation/audit-events");
+        assertThat(auditBody).isNotNull();
+        assertThat(auditBody.get("errorCode").asText()).isEqualTo("TARGET_SUBJECT_MISMATCH");
+        // Post-exchange branches prefer claims.email (KC authoritative).
+        assertThat(auditBody.get("targetEmail").asText())
+                .as("post-exchange branch must carry claims.email (KC-authoritative)")
+                .isEqualTo(claimsEmail);
+    }
 }
