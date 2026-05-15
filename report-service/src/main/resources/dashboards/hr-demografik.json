@@ -427,8 +427,8 @@
       "id": "salary-gender-trend", "title": "Maaş Farkı Trend (Son 6 Yıl)", "chartType": "line", "size": "lg",
       "source": "EMPLOYEES_IN_OUT", "sourceSchema": "workcube_mikrolink",
       "aggregate": {
-        "select": "CAST(s.PERIOD_YEAR AS VARCHAR) AS label, CAST(AVG(CASE WHEN ed.SEX = 1 THEN s.MONEY END) AS INT) AS male_avg, CAST(AVG(CASE WHEN ed.SEX = 0 THEN s.MONEY END) AS INT) AS female_avg, CAST(AVG(s.MONEY) AS INT) AS value",
-        "where": "[workcube_mikrolink].[EMPLOYEES_IN_OUT].FINISH_DATE IS NULL AND s.MONEY > 0 AND s.PERIOD_YEAR >= YEAR(GETDATE()) - 5",
+        "select": "CAST(s.PERIOD_YEAR AS VARCHAR) AS label, CAST(AVG(CASE WHEN ed.SEX = 1 THEN TRY_CAST(s.MONEY AS DECIMAL(18,2)) END) AS INT) AS male_avg, CAST(AVG(CASE WHEN ed.SEX = 0 THEN TRY_CAST(s.MONEY AS DECIMAL(18,2)) END) AS INT) AS female_avg, CAST(AVG(TRY_CAST(s.MONEY AS DECIMAL(18,2))) AS INT) AS value",
+        "where": "[workcube_mikrolink].[EMPLOYEES_IN_OUT].FINISH_DATE IS NULL AND TRY_CAST(s.MONEY AS DECIMAL(18,2)) > 0 AND s.PERIOD_YEAR >= YEAR(GETDATE()) - 5",
         "join": "LEFT JOIN [workcube_mikrolink].[EMPLOYEES_DETAIL] ed ON ed.EMPLOYEE_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].EMPLOYEE_ID LEFT JOIN [workcube_mikrolink].[EMPLOYEES_SALARY] s ON s.IN_OUT_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].IN_OUT_ID",
         "groupBy": "s.PERIOD_YEAR",
         "orderBy": "s.PERIOD_YEAR"
@@ -454,10 +454,10 @@
       "id": "turnover-reasons", "title": "Ayrılma Nedenleri", "chartType": "bar", "size": "md",
       "source": "EMPLOYEES_IN_OUT", "sourceSchema": "workcube_mikrolink",
       "aggregate": {
-        "select": "CASE WHEN EXPLANATION_ID IS NOT NULL THEN ISNULL(r.REASON_NAME, 'Diger') ELSE 'Gonullu' END AS label, COUNT(*) AS value",
+        "select": "CASE WHEN EXPLANATION_ID IS NOT NULL THEN ISNULL(r.REASON, 'Diger') ELSE 'Gonullu' END AS label, COUNT(*) AS value",
         "where": "FINISH_DATE IS NOT NULL AND FINISH_DATE >= DATEADD(YEAR, -1, GETDATE())",
         "join": "LEFT JOIN [workcube_mikrolink].[SETUP_EMPLOYEE_FIRE_REASONS] r ON r.REASON_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].EXPLANATION_ID",
-        "groupBy": "CASE WHEN [workcube_mikrolink].[EMPLOYEES_IN_OUT].EXPLANATION_ID IS NOT NULL THEN ISNULL(r.REASON_NAME, 'Diger') ELSE 'Gonullu' END",
+        "groupBy": "CASE WHEN [workcube_mikrolink].[EMPLOYEES_IN_OUT].EXPLANATION_ID IS NOT NULL THEN ISNULL(r.REASON, 'Diger') ELSE 'Gonullu' END",
         "orderBy": "COUNT(*) DESC"
       }, "chartConfig": { "orientation": "horizontal", "showValues": true }
     }
