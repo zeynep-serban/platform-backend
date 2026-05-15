@@ -1,0 +1,190 @@
+name: etl-worker — image build + GHCR push
+
+# Adım 12 PR-3b — Codex `019e2a5c` plan-time AGREE on Opt-B′ sequence.
+# Builds the Python container, runs no-env container smoke tests
+# (`--help`, `run --reports-db postgres` without REPORTS_DB_* envs
+# returns EX_USAGE=64), then pushes to GHCR with an immutable
+# `sha-<short>` tag whose digest the gitops PR-3c manifest will pin.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'etl-worker/**'
+      - '.github/workflows/etl-worker-image.yml'
+  pull_request:
+    paths:
+      - 'etl-worker/**'
+      - '.github/workflows/etl-worker-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: halildeu
+  IMAGE_NAME: platform-backend-etl-worker
+
+concurrency:
+  group: etl-worker-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-smoke-push:
+    name: build + container smoke + push
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Codex 019e2d27 REVISE P1 #1: GHCR push must only come from
+      # ``main`` — ``workflow_dispatch`` defaults to "any branch" so
+      # without the ref guard a maintainer could push a non-main
+      # digest that PR-3c would then pin. Login + push + summary
+      # share the same ``release_image`` gate so they cannot drift.
+      - name: Login to GHCR
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive short SHA
+        id: sha
+        run: echo "short=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      # Build the image LOCALLY first so we can container-smoke it
+      # before we push anything to the registry. ``load: true`` puts
+      # it in the local Docker daemon; ``push: false`` skips the
+      # registry round-trip until the local smoke battery passes.
+      #
+      # Codex 019e2d27 REVISE P1 #3: we deliberately reuse the same
+      # ``cache-to`` scope for both this build and the final push so
+      # the second build replays only the resolved layers from cache,
+      # not a fresh resolve. Combined with the post-push pinned-digest
+      # smoke below this keeps the digest PR-3c pins identical to the
+      # one we smoke-tested locally.
+      - name: Build image (local load for smoke)
+        id: build-local
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: etl-worker/Dockerfile
+          push: false
+          load: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:smoke
+          cache-from: type=gha,scope=etl-worker
+          cache-to: type=gha,scope=etl-worker,mode=max
+          provenance: false
+
+      # Container smoke #1 — entrypoint resolves the console script.
+      # ``--help`` exits 0 and prints usage on stdout. No external
+      # dependency exercised.
+      - name: Container smoke — etl-worker --help
+        run: |
+          set -e
+          out=$(docker run --rm ${{ env.IMAGE_NAME }}:smoke --help)
+          echo "$out"
+          echo "$out" | grep -q "fetch-snapshot" || { echo "::error::--help output missing 'fetch-snapshot' subcommand"; exit 1; }
+          echo "$out" | grep -q "run" || { echo "::error::--help output missing 'run' subcommand"; exit 1; }
+
+      # Container smoke #2 — missing SCHEMA_SERVICE_URL is a usage
+      # failure (EX_USAGE=64). Codex 019e2a5c PR-3a contract.
+      - name: Container smoke — run without SCHEMA_SERVICE_URL is EX_USAGE
+        run: |
+          set +e
+          out=$(docker run --rm ${{ env.IMAGE_NAME }}:smoke run 2>&1)
+          code=$?
+          echo "$out"
+          if [ "$code" -ne 64 ]; then
+            echo "::error::expected EX_USAGE=64, got $code"
+            exit 1
+          fi
+          echo "$out" | grep -qi "SCHEMA_SERVICE_URL" || { echo "::error::stderr missing SCHEMA_SERVICE_URL hint"; exit 1; }
+          echo "$out" | grep -qi "Traceback" && { echo "::error::traceback leaked to stderr"; exit 1; }
+          exit 0
+
+      # Container smoke #3 — ``--reports-db postgres`` without
+      # REPORTS_DB_* envs is the explicit fail-closed switch from
+      # PR-3a (Codex 019e2a5c blocker #1 absorb).
+      - name: Container smoke — --reports-db postgres without REPORTS_DB_* envs is EX_USAGE
+        run: |
+          set +e
+          out=$(docker run --rm \
+            -e SCHEMA_SERVICE_URL=http://schema-service.test:8096 \
+            ${{ env.IMAGE_NAME }}:smoke run --reports-db postgres 2>&1)
+          code=$?
+          echo "$out"
+          if [ "$code" -ne 64 ]; then
+            echo "::error::expected EX_USAGE=64, got $code"
+            exit 1
+          fi
+          echo "$out" | grep -qi "REPORTS_DB_HOST" || { echo "::error::stderr missing REPORTS_DB_HOST hint"; exit 1; }
+          echo "$out" | grep -qi "Traceback" && { echo "::error::traceback leaked to stderr"; exit 1; }
+          exit 0
+
+      # Container smoke #4 — psycopg + libpq actually load inside the
+      # runtime image. Codex 019e2d27 REVISE P1 #2: the first three
+      # smokes never invoke ``--reports-db postgres`` with a complete
+      # profile, so they never import psycopg. The binary wheel +
+      # libpq claim from PR-3a + the Dockerfile design is otherwise
+      # only verified at PR-4 live-smoke time. This gate proves the
+      # wheel is installed AND can dlopen its bundled libpq.
+      - name: Container smoke — psycopg + libpq import
+        run: |
+          set -e
+          docker run --rm --entrypoint python ${{ env.IMAGE_NAME }}:smoke \
+            -c 'import psycopg; from psycopg import pq; print("psycopg=" + psycopg.__version__); print("libpq=" + str(pq.version()))'
+
+      # Build + push the final immutable artifact. On pull_request
+      # events GHCR push is skipped (login step is gated above) but
+      # the smoke gates still run — branch coverage stays useful for
+      # contributors without a registry credential.
+      - name: Build + Push image (immutable tag)
+        id: build-push
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: etl-worker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:sha-${{ steps.sha.outputs.short }}
+          cache-from: type=gha,scope=etl-worker
+          cache-to: type=gha,scope=etl-worker,mode=max
+          provenance: false
+
+      # Codex 019e2d27 REVISE P1/P2 #3: re-smoke the pushed image by
+      # its ``@sha256:<digest>`` reference. This binds the digest
+      # PR-3c will pin to the same artifact we just smoked — closes
+      # the local-vs-push "different build" doubt without needing a
+      # single-build refactor.
+      - name: Container smoke — pinned digest --help + psycopg import
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        run: |
+          set -e
+          image="${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}"
+          echo "Smoking pushed digest: $image"
+          docker run --rm "$image" --help | grep -q "fetch-snapshot"
+          docker run --rm --entrypoint python "$image" \
+            -c 'import psycopg; from psycopg import pq; print("psycopg=" + psycopg.__version__); print("libpq=" + str(pq.version()))'
+
+      - name: Summary — digest (PR-3c pin için kanıt)
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        run: |
+          echo "### etl-worker image push" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: \`sha-${{ steps.sha.outputs.short }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Digest**: \`${{ steps.build-push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:sha-${{ steps.sha.outputs.short }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pinnable**: \`${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "PR-3c (platform-k8s-gitops) consumes the **Pinnable** form for an immutable digest pin." >> $GITHUB_STEP_SUMMARY

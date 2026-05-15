@@ -16,10 +16,12 @@ subsequent PRs.
 |---|---|---|
 | PR-1 | `SchemaServiceClient` + contract models + tests + CI gate | ✅ merged ([#205](https://github.com/Halildeu/platform-backend/pull/205)) |
 | PR-2a | Config / CLI / client wiring (`SCHEMA_SERVICE_URL`, internal key env, schema args, typed exit behaviour, console script) | ✅ merged ([#206](https://github.com/Halildeu/platform-backend/pull/206)) |
-| PR-2b1 | Runner **retry foundation** (`run` subcommand, bounded backoff, injectable sleeper) | this PR |
-| PR-2b2 | Audit log + checkpoint / resume | pending |
-| PR-2b3 | reports_db writer stub interface + DB lifecycle boundaries | pending |
-| PR-3 | Dockerfile + K8s Job manifest + test cluster wiring | pending |
+| PR-2b1 | Runner **retry foundation** (`run` subcommand, bounded backoff, injectable sleeper) | ✅ merged ([#208](https://github.com/Halildeu/platform-backend/pull/208)) |
+| PR-2b2a | Audit log foundation (`JsonLinesAuditWriter`, 6-event vocabulary, atomic append) | ✅ merged ([#210](https://github.com/Halildeu/platform-backend/pull/210)) |
+| PR-2b2b / PR-2b3 | Checkpoint file (atomic write + content-only signature) + `ReportsDbWriter` Protocol + transaction boundary | ✅ merged ([#211](https://github.com/Halildeu/platform-backend/pull/211)) |
+| PR-3a | `PgReportsDbWriter` (psycopg) + `REPORTS_DB_*` config + `--reports-db` CLI fail-closed switch | ✅ merged ([#212](https://github.com/Halildeu/platform-backend/pull/212)) |
+| PR-3b | Dockerfile (multi-stage Python 3.12 slim) + GHCR image build/push workflow + container smoke gates | this PR |
+| PR-3c | platform-k8s-gitops manifest update with immutable digest pin from PR-3b output | pending |
 | PR-4 | Live smoke against testai schema-service + reports DB writes | pending (operator gate) |
 
 ## PR-2a — CLI usage (this slice)
