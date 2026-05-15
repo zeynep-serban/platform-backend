@@ -21,6 +21,15 @@ public class SchemaExtractService {
     @Value("${schema.default-schema:workcube_mikrolink}")
     private String defaultSchema;
 
+    /**
+     * Phase 1 portability (Codex 019e2d14 §8 — PR #701 quick wins):
+     * Schema discovery LIKE patterns config'e taşındı. Önce Workcube
+     * pattern'i (geriye uyumlu default), sonra "dbo". Yeni ERP veya
+     * tenant ekleyince listeye eklenir, kod değişikliği yok.
+     */
+    @Value("${schema.discovery.patterns:workcube_mikrolink%,dbo}")
+    private String[] discoveryPatterns;
+
     public SchemaExtractService(NamedParameterJdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
@@ -118,30 +127,53 @@ public class SchemaExtractService {
     }
 
     /**
-     * List all available schemas (workcube_mikrolink, workcube_mikrolink_35, etc.)
+     * List all available schemas matching configured patterns (default:
+     * Workcube — workcube_mikrolink%, dbo). Phase 1 portability:
+     * `schema.discovery.patterns` config ile yeni ERP'ler eklenebilir
+     * (örn. `eta_%,logo_%,workcube_mikrolink%,dbo`) kod değişikliği yok.
      */
     @Cacheable("schemas")
     public List<Map<String, Object>> listSchemas() {
-        log.info("Listing available schemas...");
+        log.info("Listing available schemas matching patterns: {}", Arrays.toString(discoveryPatterns));
+
+        // Build WHERE clause: s.name LIKE :p0 OR s.name LIKE :p1 OR ...
+        // Empty pattern → safe fallback (Workcube + dbo) to avoid SQL injection or empty IN clause.
+        String[] patterns = (discoveryPatterns == null || discoveryPatterns.length == 0)
+            ? new String[] {"workcube_mikrolink%", "dbo"}
+            : discoveryPatterns;
+
+        StringBuilder whereClause = new StringBuilder();
+        Map<String, Object> params = new HashMap<>();
+        for (int i = 0; i < patterns.length; i++) {
+            if (i > 0) whereClause.append(" OR ");
+            String paramName = "p" + i;
+            // Pattern with '%' → LIKE; without '%' → exact match
+            if (patterns[i].contains("%")) {
+                whereClause.append("s.name LIKE :").append(paramName);
+            } else {
+                whereClause.append("s.name = :").append(paramName);
+            }
+            params.put(paramName, patterns[i].trim());
+        }
+
         String sql = """
             SELECT s.name AS schema_name, COUNT(t.object_id) AS table_count
             FROM sys.schemas s
             LEFT JOIN sys.tables t ON s.schema_id = t.schema_id
-            WHERE s.name LIKE 'workcube_mikrolink%'
-               OR s.name = 'dbo'
+            WHERE %s
             GROUP BY s.name
             HAVING COUNT(t.object_id) > 0
             ORDER BY COUNT(t.object_id) DESC
-            """;
+            """.formatted(whereClause.toString());
 
         List<Map<String, Object>> schemas = new ArrayList<>();
-        jdbc.query(sql, Map.of(), rs -> {
+        jdbc.query(sql, params, rs -> {
             schemas.add(Map.of(
                 "name", rs.getString("schema_name"),
                 "tableCount", rs.getInt("table_count")
             ));
         });
-        log.info("Found {} schemas", schemas.size());
+        log.info("Found {} schemas matching {} patterns", schemas.size(), patterns.length);
         return schemas;
     }
 }

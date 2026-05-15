@@ -57,6 +57,11 @@ schema:
   discovery:
     enable-view-parsing: ${SCHEMA_ENABLE_VIEW_PARSE:true}
     enable-sp-parsing: ${SCHEMA_ENABLE_SP_PARSE:false}
+    # Phase 1 portability (Codex 019e2d14 §8): schema discovery LIKE
+    # patterns. Default Workcube-uyumlu. Multi-tenant veya yeni ERP
+    # ekleyince listeye eklenir (örn. "eta_%,logo_%,workcube_mikrolink%,dbo").
+    # '%' içeren değer LIKE pattern, içermeyen exact match.
+    patterns: ${SCHEMA_DISCOVERY_PATTERNS:workcube_mikrolink%,dbo}
   ai:
     enabled: ${SCHEMA_AI_ENABLED:false}
     api-key: ${SCHEMA_AI_API_KEY:}
