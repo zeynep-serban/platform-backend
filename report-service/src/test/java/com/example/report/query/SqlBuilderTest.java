@@ -1830,4 +1830,215 @@ class SqlBuilderTest {
                     .contains("SUM([amount]) AS [amount]");
         }
     }
+
+    // ── PR-0.5b: buildGroupedExportQuery + buildPivotedGroupedExportQuery ──
+
+    @Nested
+    class BuildGroupedExportQuery {
+
+        private ReportDefinition exportDef() {
+            return new ReportDefinition(
+                    "export-report", "v1", "Export", "desc", "cat",
+                    "TXN", "dbo", "static", null, null,
+                    List.of(
+                            new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("region", "Region", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false),
+                            new ColumnDefinition("qty", "Qty", "number", 100, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+        }
+
+        @Test
+        void emitsTopCapWithoutOffsetFetch() {
+            SqlBuilder.BuiltQuery q = builder.buildGroupedExportQuery(
+                    exportDef(), null,
+                    List.of("category", "region", "amount"),
+                    List.of("category"),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(), null,
+                    null, null, 500000);
+
+            assertThat(q.sql())
+                    .contains("SELECT TOP(:_maxRows)")
+                    .contains("[category]")
+                    .contains("COUNT(*) AS [_rowCount]")
+                    .contains("SUM([amount]) AS [amount]")
+                    .contains("GROUP BY [category]")
+                    .doesNotContain("OFFSET")
+                    .doesNotContain("FETCH NEXT");
+            assertThat(q.params().getValue("_maxRows")).isEqualTo(500000);
+        }
+
+        @Test
+        void multiLevelGroupBy() {
+            SqlBuilder.BuiltQuery q = builder.buildGroupedExportQuery(
+                    exportDef(), null,
+                    List.of("category", "region", "amount", "qty"),
+                    List.of("category", "region"),
+                    List.of(
+                            new SqlBuilder.GroupedAggregation("amount", "sum"),
+                            new SqlBuilder.GroupedAggregation("qty", "avg")),
+                    Collections.emptyMap(), null,
+                    null, null, 100);
+
+            assertThat(q.sql())
+                    .contains("[category]")
+                    .contains("[region]")
+                    .contains("SUM([amount]) AS [amount]")
+                    .contains("AVG([qty]) AS [qty]")
+                    .contains("GROUP BY [category], [region]")
+                    // Both group cols default-appended to ORDER BY for
+                    // deterministic exports.
+                    .contains("ORDER BY [category] ASC, [region] ASC");
+        }
+
+        @Test
+        void groupColumnOutsideVisibleSetRejected() {
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildGroupedExportQuery(
+                            exportDef(), null,
+                            List.of("category", "amount"),
+                            List.of("hidden"),
+                            List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                            Collections.emptyMap(), null,
+                            null, null, 100));
+        }
+
+        @Test
+        void emptyGroupColumnsRejected() {
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildGroupedExportQuery(
+                            exportDef(), null,
+                            List.of("category", "amount"),
+                            List.of(),
+                            List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                            Collections.emptyMap(), null,
+                            null, null, 100));
+        }
+
+        @Test
+        void weightedavgProjectsWeightFieldInGroupedExport() {
+            SqlBuilder.BuiltQuery q = builder.buildGroupedExportQuery(
+                    exportDef(), null,
+                    List.of("category", "amount", "qty"),
+                    List.of("category"),
+                    List.of(new SqlBuilder.GroupedAggregation(
+                            "amount", "weightedavg", Map.of("weightField", "qty"))),
+                    Collections.emptyMap(), null,
+                    null, null, 100);
+
+            assertThat(q.sql())
+                    .contains("SUM([amount] * [qty])")
+                    .contains("NULLIF(SUM(CASE WHEN [amount] IS NOT NULL AND [qty] IS NOT NULL THEN [qty] END), 0)");
+        }
+
+        @Test
+        void medianWrappedInPartitionByGroupKeys() {
+            SqlBuilder.BuiltQuery q = builder.buildGroupedExportQuery(
+                    exportDef(), null,
+                    List.of("category", "region", "amount"),
+                    List.of("category", "region"),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "median")),
+                    Collections.emptyMap(), null,
+                    null, null, 100);
+
+            assertThat(q.sql())
+                    .contains("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY [amount])")
+                    .contains("OVER (PARTITION BY [category], [region])")
+                    .contains("MAX([__median_amount]) AS [amount]")
+                    .contains("GROUP BY [category], [region]");
+        }
+
+        @Test
+        void deterministicOrderByAppendsGroupColumns() {
+            // sortModel only specifies category DESC; export must append
+            // region ASC so two runs over the same input emit identical
+            // byte-for-byte output.
+            SqlBuilder.BuiltQuery q = builder.buildGroupedExportQuery(
+                    exportDef(), null,
+                    List.of("category", "region", "amount"),
+                    List.of("category", "region"),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(),
+                    List.of(Map.of("colId", "category", "sort", "desc")),
+                    null, null, 100);
+
+            assertThat(q.sql())
+                    .contains("ORDER BY [category] DESC, [region] ASC");
+        }
+    }
+
+    @Nested
+    class BuildPivotedGroupedExportQuery {
+
+        private ReportDefinition pivotExportDef() {
+            return new ReportDefinition(
+                    "pivot-export", "v1", "PivotExport", "desc", "cat",
+                    "TXN", "dbo", "static", null, null,
+                    List.of(
+                            new ColumnDefinition("category", "Category", "text", 100, false),
+                            new ColumnDefinition("ba", "Borç/Alacak", "text", 100, false),
+                            new ColumnDefinition("amount", "Amount", "number", 120, false)),
+                    "category", "ASC",
+                    new AccessConfig(null, null, null, null));
+        }
+
+        @Test
+        void emitsCaseWhenAggsWithoutPagination() {
+            SqlBuilder.PivotedBuiltQuery q = builder.buildPivotedGroupedExportQuery(
+                    pivotExportDef(), null,
+                    List.of("category", "ba", "amount"),
+                    "category", "ba",
+                    List.of(
+                            new com.example.report.registry.PivotValue("Borç", "Borç"),
+                            new com.example.report.registry.PivotValue("Alacak", "Alacak")),
+                    List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                    Collections.emptyMap(), null,
+                    null, null, 100);
+
+            assertThat(q.sql())
+                    .contains("SELECT TOP(:_maxRows)")
+                    .contains("CASE WHEN [ba] = :_pivot_0 THEN [amount]")
+                    .contains("CASE WHEN [ba] = :_pivot_1 THEN [amount]")
+                    .contains("GROUP BY [category]")
+                    .doesNotContain("OFFSET")
+                    .doesNotContain("FETCH NEXT");
+            assertThat(q.pivotResultFields()).hasSize(2);
+            assertThat(q.pivotResultColumns()).hasSize(2);
+            assertThat(q.pivotResultColumns().get(0).pivotLabel()).isEqualTo("Borç");
+            assertThat(q.pivotResultColumns().get(1).pivotLabel()).isEqualTo("Alacak");
+        }
+
+        @Test
+        void pivotValuesEmptyRejected() {
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildPivotedGroupedExportQuery(
+                            pivotExportDef(), null,
+                            List.of("category", "ba", "amount"),
+                            "category", "ba",
+                            List.of(),
+                            List.of(new SqlBuilder.GroupedAggregation("amount", "sum")),
+                            Collections.emptyMap(), null,
+                            null, null, 100));
+        }
+
+        @Test
+        void medianRejectedInPivotExport() {
+            // ALLOWED_PIVOT_AGG_FUNCS excludes median/percentilecont.
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> builder.buildPivotedGroupedExportQuery(
+                            pivotExportDef(), null,
+                            List.of("category", "ba", "amount"),
+                            "category", "ba",
+                            List.of(new com.example.report.registry.PivotValue("Borç", "Borç")),
+                            List.of(new SqlBuilder.GroupedAggregation("amount", "median")),
+                            Collections.emptyMap(), null,
+                            null, null, 100));
+        }
+    }
 }

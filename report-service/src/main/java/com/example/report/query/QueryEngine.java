@@ -315,6 +315,56 @@ public class QueryEngine {
                 rls.whereClause(), rls.params(), maxExportRows);
     }
 
+    /**
+     * PR-0.5b (Codex thread 019e2cd7): multi-level grouped export.
+     * Returns the same {@link SqlBuilder.BuiltQuery} shape the flat
+     * export uses; the controller layer wires {@code _rowCount + agg
+     * aliases} into the streaming exporter.
+     */
+    public SqlBuilder.BuiltQuery buildGroupedExportQuery(
+            ReportDefinition def,
+            AuthzMeResponse authz,
+            List<String> groupColumns,
+            List<SqlBuilder.GroupedAggregation> aggregations,
+            Map<String, Object> agGridFilter,
+            List<Map<String, String>> sortModel) {
+        List<String> visibleColumns = columnFilter.getVisibleColumns(def, authz);
+        RowFilterInjector.RlsResult rls = rowFilterInjector.buildRlsClause(def, authz);
+
+        YearlySchemaResolver.ResolvedSchemas schemas = resolveSchemas(def, authz, agGridFilter);
+
+        return sqlBuilder.buildGroupedExportQuery(
+                def, schemas, visibleColumns, groupColumns, aggregations,
+                agGridFilter, sortModel,
+                rls.whereClause(), rls.params(), maxExportRows);
+    }
+
+    /**
+     * PR-0.5b (Codex thread 019e2cd7): single-level pivot export.
+     * Returns a {@link SqlBuilder.PivotedBuiltQuery} carrying the
+     * {@code pivotResultColumns} metadata; the controller layer maps
+     * each into an {@code ExportColumn(field, header)} pair.
+     */
+    public SqlBuilder.PivotedBuiltQuery buildPivotedGroupedExportQuery(
+            ReportDefinition def,
+            AuthzMeResponse authz,
+            String groupColumn,
+            String pivotColumn,
+            List<com.example.report.registry.PivotValue> pivotValues,
+            List<SqlBuilder.GroupedAggregation> aggregations,
+            Map<String, Object> agGridFilter,
+            List<Map<String, String>> sortModel) {
+        List<String> visibleColumns = columnFilter.getVisibleColumns(def, authz);
+        RowFilterInjector.RlsResult rls = rowFilterInjector.buildRlsClause(def, authz);
+
+        YearlySchemaResolver.ResolvedSchemas schemas = resolveSchemas(def, authz, agGridFilter);
+
+        return sqlBuilder.buildPivotedGroupedExportQuery(
+                def, schemas, visibleColumns, groupColumn, pivotColumn,
+                pivotValues, aggregations, agGridFilter, sortModel,
+                rls.whereClause(), rls.params(), maxExportRows);
+    }
+
     public List<String> getVisibleColumns(ReportDefinition def, AuthzMeResponse authz) {
         return columnFilter.getVisibleColumns(def, authz);
     }

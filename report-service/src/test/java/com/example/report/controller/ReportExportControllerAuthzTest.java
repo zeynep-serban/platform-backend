@@ -140,6 +140,194 @@ class ReportExportControllerAuthzTest {
         assertEquals("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", contentType);
     }
 
+    // ── PR-0.5b POST /export — dispatch + validation parity with /query ──
+
+    @Test
+    void exportPost_pivotMissingPivotValues_400PivotNotConfigured() {
+        AuthzMeResponse authz = authzWith(true, List.of());
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("any")).thenReturn(Optional.of(reportWithGroupingPivot("any")));
+        when(queryEngine.getVisibleColumns(any(), any()))
+                .thenReturn(List.of("category", "ba", "amount"));
+
+        var dto = new com.example.report.dto.ReportExportRequestDto(
+                "csv",
+                List.of(new com.example.report.dto.ColumnVO("category", "Category", "category", null)),
+                List.of(new com.example.report.dto.ColumnVO("amount", "Amount", "amount", "sum")),
+                List.of(new com.example.report.dto.ColumnVO("ba", "B/A", "ba", null)),
+                true,
+                null, null);
+
+        var response = controller.exportReportPost("any", dto, null, testJwt("admin"));
+
+        assertEquals(400, response.getStatusCode().value());
+        var err = (com.example.report.dto.ReportQueryErrorDto) response.getBody();
+        assertEquals("PIVOT_NOT_CONFIGURED", err.code());
+    }
+
+    @Test
+    void exportPost_groupedNonAggregatableValue_400InvalidAggregation() {
+        AuthzMeResponse authz = authzWith(true, List.of());
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("any")).thenReturn(Optional.of(reportWithGrouping("any")));
+        when(queryEngine.getVisibleColumns(any(), any()))
+                .thenReturn(List.of("category", "note"));
+
+        var dto = new com.example.report.dto.ReportExportRequestDto(
+                "csv",
+                List.of(new com.example.report.dto.ColumnVO("category", "Category", "category", null)),
+                // note is not aggregatable in the registry → must 400
+                List.of(new com.example.report.dto.ColumnVO("note", "Note", "note", "sum")),
+                null, false, null, null);
+
+        var response = controller.exportReportPost("any", dto, null, testJwt("admin"));
+
+        assertEquals(400, response.getStatusCode().value());
+        var err = (com.example.report.dto.ReportQueryErrorDto) response.getBody();
+        assertEquals("INVALID_AGGREGATION_REQUEST", err.code());
+    }
+
+    @Test
+    void exportPost_duplicateValueCols_400InvalidAggregation() {
+        AuthzMeResponse authz = authzWith(true, List.of());
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("any")).thenReturn(Optional.of(reportWithGrouping("any")));
+        when(queryEngine.getVisibleColumns(any(), any()))
+                .thenReturn(List.of("category", "amount"));
+
+        var dto = new com.example.report.dto.ReportExportRequestDto(
+                "csv",
+                List.of(new com.example.report.dto.ColumnVO("category", "Category", "category", null)),
+                List.of(
+                        new com.example.report.dto.ColumnVO("amount", "Amount", "amount", "sum"),
+                        new com.example.report.dto.ColumnVO("amount", "Amount", "amount", "avg")),
+                null, false, null, null);
+
+        var response = controller.exportReportPost("any", dto, null, testJwt("admin"));
+
+        assertEquals(400, response.getStatusCode().value());
+        var err = (com.example.report.dto.ReportQueryErrorDto) response.getBody();
+        assertEquals("INVALID_AGGREGATION_REQUEST", err.code());
+    }
+
+    @Test
+    void exportPost_incompletePivot_400GroupingNotSupported() {
+        // pivotMode=true but no rowGroupCols → contradictory snapshot.
+        // Live /query path rejects this; export must too.
+        AuthzMeResponse authz = authzWith(true, List.of());
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("any")).thenReturn(Optional.of(reportWithGroupingPivot("any")));
+        when(queryEngine.getVisibleColumns(any(), any()))
+                .thenReturn(List.of("category", "ba", "amount"));
+
+        var dto = new com.example.report.dto.ReportExportRequestDto(
+                "csv",
+                null,
+                List.of(new com.example.report.dto.ColumnVO("amount", "Amount", "amount", "sum")),
+                List.of(new com.example.report.dto.ColumnVO("ba", "B/A", "ba", null)),
+                true,
+                null, null);
+
+        var response = controller.exportReportPost("any", dto, null, testJwt("admin"));
+
+        assertEquals(400, response.getStatusCode().value());
+        var err = (com.example.report.dto.ReportQueryErrorDto) response.getBody();
+        assertEquals("GROUPING_NOT_SUPPORTED", err.code());
+    }
+
+    @Test
+    void exportPost_nonGroupableColumn_400GroupingNotSupported() {
+        // The request marks `amount` as a row-group dim, but registry
+        // says it's not groupable → must reject.
+        AuthzMeResponse authz = authzWith(true, List.of());
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("any")).thenReturn(Optional.of(reportWithGrouping("any")));
+        when(queryEngine.getVisibleColumns(any(), any()))
+                .thenReturn(List.of("category", "amount"));
+
+        var dto = new com.example.report.dto.ReportExportRequestDto(
+                "csv",
+                List.of(new com.example.report.dto.ColumnVO("amount", "Amount", "amount", null)),
+                List.of(new com.example.report.dto.ColumnVO("category", "Category", "category", "count")),
+                null, false, null, null);
+
+        var response = controller.exportReportPost("any", dto, null, testJwt("admin"));
+
+        assertEquals(400, response.getStatusCode().value());
+        var err = (com.example.report.dto.ReportQueryErrorDto) response.getBody();
+        assertEquals("GROUPING_NOT_SUPPORTED", err.code());
+    }
+
+    @Test
+    void exportPost_validGroupedRequest_200Csv() {
+        AuthzMeResponse authz = authzWith(true, List.of());
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("any")).thenReturn(Optional.of(reportWithGrouping("any")));
+        when(queryEngine.getVisibleColumns(any(), any()))
+                .thenReturn(List.of("category", "amount"));
+        when(queryEngine.buildGroupedExportQuery(any(), any(), any(), any(), any(), any()))
+                .thenReturn(mock(SqlBuilder.BuiltQuery.class));
+
+        var dto = new com.example.report.dto.ReportExportRequestDto(
+                "csv",
+                List.of(new com.example.report.dto.ColumnVO("category", "Category", "category", null)),
+                List.of(new com.example.report.dto.ColumnVO("amount", "Amount", "amount", "sum")),
+                null, false, null, null);
+
+        var response = controller.exportReportPost("any", dto, null, testJwt("admin"));
+
+        assertEquals(200, response.getStatusCode().value());
+        var contentType = response.getHeaders().getFirst("Content-Type");
+        assertEquals("text/csv; charset=UTF-8", contentType);
+    }
+
+    @Test
+    void exportPost_flatRequest_dispatchesToFlatExporter() {
+        AuthzMeResponse authz = authzWith(true, List.of());
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("any")).thenReturn(Optional.of(reportWithGrouping("any")));
+        when(queryEngine.getVisibleColumns(any(), any()))
+                .thenReturn(List.of("category", "amount"));
+        when(queryEngine.buildExportQuery(any(), any(), any(), any()))
+                .thenReturn(mock(SqlBuilder.BuiltQuery.class));
+
+        // No grouping intent — must fall through to flat export.
+        var dto = new com.example.report.dto.ReportExportRequestDto(
+                "csv", null, null, null, false, null, null);
+
+        var response = controller.exportReportPost("any", dto, null, testJwt("admin"));
+
+        assertEquals(200, response.getStatusCode().value());
+    }
+
+    private static ReportDefinition reportWithGrouping(String key) {
+        return new ReportDefinition(
+                key, "1", "Report " + key, "desc", "category",
+                "dbo.fact_table", "dbo", "static", null, null,
+                List.of(
+                        new ColumnDefinition("category", "Category", "text", 150,
+                                false, true, false, null),
+                        new ColumnDefinition("amount", "Amount", "number", 120,
+                                false, false, true, "sum"),
+                        new ColumnDefinition("note", "Note", "text", 150,
+                                false, false, false, null)),
+                null, null, null);
+    }
+
+    private static ReportDefinition reportWithGroupingPivot(String key) {
+        return new ReportDefinition(
+                key, "1", "Report " + key, "desc", "category",
+                "dbo.fact_table", "dbo", "static", null, null,
+                List.of(
+                        new ColumnDefinition("category", "Category", "text", 150,
+                                false, true, false, null),
+                        new ColumnDefinition("ba", "B/A", "text", 100,
+                                false, true, false, null, null, true, null),
+                        new ColumnDefinition("amount", "Amount", "number", 120,
+                                false, false, true, "sum")),
+                null, null, null);
+    }
+
     // ---- helpers ---------------------------------------------------------
 
     private static ReportDefinition report(String key, String permission) {

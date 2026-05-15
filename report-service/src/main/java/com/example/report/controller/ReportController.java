@@ -667,9 +667,15 @@ public class ReportController {
      * gets a structured {@code PIVOT_NOT_CONFIGURED} 400 from the
      * dispatch path rather than silently degrading to grouped output.
      */
-    private static boolean singleLevelPivotRequest(ReportQueryRequestDto req,
-                                                    Set<String> groupableFields,
-                                                    Set<String> pivotableFields) {
+    /**
+     * PR-0.5b absorb (Codex thread {@code 019e2cd7}): visibility raised
+     * to package-private so {@link ReportExportController} can apply
+     * the same single-level pivot contract on the {@code POST /export}
+     * dispatch.
+     */
+    static boolean singleLevelPivotRequest(ReportQueryRequestDto req,
+                                            Set<String> groupableFields,
+                                            Set<String> pivotableFields) {
         if (req == null) return false;
         if (!Boolean.TRUE.equals(req.pivotMode())) return false;
         if (req.pivotCols() == null || req.pivotCols().size() != 1) return false;
@@ -938,8 +944,15 @@ public class ReportController {
      *   <li>Otherwise {@code count}.</li>
      * </ul>
      */
+    /**
+     * PR-0.5b absorb (Codex thread {@code 019e2cd7}): visibility raised
+     * from {@code private} to package-private so
+     * {@link ReportExportController} can reuse the same sanitiser /
+     * fail-closed contract on the {@code POST /export} path. The
+     * implementation is unchanged.
+     */
     @SuppressWarnings("unchecked")
-    private static List<SqlBuilder.GroupedAggregation> sanitizeAggregations(
+    static List<SqlBuilder.GroupedAggregation> sanitizeAggregations(
             List<ColumnVO> valueCols,
             Set<String> aggregatableFields,
             List<ColumnDefinition> visibleCols) {

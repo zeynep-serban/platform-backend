@@ -869,6 +869,321 @@ public class SqlBuilder {
         return new BuiltQuery(sql.toString(), params, fromResult.warnings());
     }
 
+    // ── Export queries (PR-0.5b grouped + pivoted export) ──────────────
+
+    /**
+     * PR-0.5b (Codex thread 019e2cd7): non-pivot multi-level grouped
+     * export. Emits leaf buckets (the bottom of the SSRM expansion
+     * tree) as a flat table, capped at {@code maxRows} via
+     * {@code SELECT TOP(:_maxRows)} — no {@code OFFSET/FETCH}.
+     *
+     * <p>Multi-level scope: every column in {@code groupColumns}
+     * participates in {@code GROUP BY}; the export ships one row per
+     * unique combination of group keys. This is the "leaf bucket
+     * table" semantic Codex 019e2cd7 §4 explicitly approved for
+     * PR-0.5b. UI expanded/collapsed tree snapshots are NOT replicated
+     * — that's a {@code GROUPING SETS}/{@code ROLLUP} story for a
+     * future PR.
+     *
+     * <p>Aggregate semantics mirror {@link #buildGroupedQuery}:
+     * <ul>
+     *   <li>{@code sum/avg/min/max/count/distinctcount/stddev/stddevp}
+     *       → native MSSQL aggregate.</li>
+     *   <li>{@code median/percentilecont} → PERCENTILE_CONT WITHIN
+     *       GROUP OVER (PARTITION BY group keys) + outer MAX collapse
+     *       (same wrapper as the live query).</li>
+     *   <li>{@code weightedavg} → null-safe ratio with weight column
+     *       projected through the FROM clause (PR-0.4c contract).</li>
+     * </ul>
+     *
+     * <p>The {@code COUNT(*) AS [_rowCount]} column is included so the
+     * exported file matches what SSRM shows on screen.
+     */
+    public BuiltQuery buildGroupedExportQuery(
+            ReportDefinition def,
+            YearlySchemaResolver.ResolvedSchemas resolvedSchemas,
+            List<String> visibleColumns,
+            List<String> groupColumns,
+            List<GroupedAggregation> aggregations,
+            Map<String, Object> agGridFilter,
+            List<Map<String, String>> sortModel,
+            String rlsWhereClause,
+            MapSqlParameterSource rlsParams,
+            int maxRows) {
+        Set<String> allowedCols = Set.copyOf(visibleColumns);
+        if (groupColumns == null || groupColumns.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "buildGroupedExportQuery requires at least one group column");
+        }
+        for (String gc : groupColumns) {
+            if (gc == null || !allowedCols.contains(gc)) {
+                throw new IllegalArgumentException(
+                        "groupColumns must be a subset of the visible columns, got: " + gc);
+            }
+        }
+
+        Set<String> groupColumnSet = new java.util.LinkedHashSet<>(groupColumns);
+        // Project group columns + aggregation targets through the FROM
+        // subquery so the outer GROUP BY/aggregate can resolve them.
+        Set<String> projected = new java.util.LinkedHashSet<>(groupColumnSet);
+        List<GroupedAggregation> sanitized = new java.util.ArrayList<>();
+        for (GroupedAggregation a : aggregations != null ? aggregations : List.<GroupedAggregation>of()) {
+            if (!allowedCols.contains(a.field())) continue;
+            if (groupColumnSet.contains(a.field())) continue;
+            projected.add(a.field());
+            // weightedavg weight projection (PR-0.4c contract) — same
+            // defensive validation as the live grouped query path.
+            if ("weightedavg".equals(a.func())) {
+                Object weightRef = a.params() != null ? a.params().get("weightField") : null;
+                if (!(weightRef instanceof String weight) || weight.isBlank()) {
+                    throw new IllegalArgumentException(
+                            "weightedavg aggregation requires params.weightField on field '"
+                                    + a.field() + "'");
+                }
+                if (!allowedCols.contains(weight)) {
+                    throw new IllegalArgumentException(
+                            "weightedavg params.weightField must be one of the visible "
+                                    + "columns, got: " + weight);
+                }
+                if (weight.equals(a.field())) {
+                    throw new IllegalArgumentException(
+                            "weightedavg params.weightField must differ from value field, "
+                                    + "got: " + weight + " for both on '" + a.field() + "'");
+                }
+                projected.add(weight);
+            }
+            sanitized.add(a);
+        }
+
+        String selectCols = projected.stream()
+                .map(c -> "[" + c + "]")
+                .collect(Collectors.joining(", "));
+        String groupByList = groupColumnSet.stream()
+                .map(c -> "[" + c + "]")
+                .collect(Collectors.joining(", "));
+        String partitionByList = groupByList; // window PARTITION BY mirrors GROUP BY
+
+        MapSqlParameterSource params = new MapSqlParameterSource();
+        FilterTranslator.FilterResult filterResult =
+                filterTranslator.translate(agGridFilter, allowedCols);
+        FromClauseResult fromResult = buildFromClause(def, resolvedSchemas, selectCols,
+                rlsWhereClause, rlsParams, filterResult, params);
+
+        boolean hasPercentileWindow = false;
+        for (GroupedAggregation a : sanitized) {
+            if (isPercentileWindowAgg(a)) {
+                hasPercentileWindow = true;
+                break;
+            }
+        }
+
+        StringBuilder sql = new StringBuilder();
+        // SELECT TOP applies the export cap deterministically; no OFFSET/FETCH.
+        sql.append("SELECT TOP(:_maxRows) ");
+        sql.append(groupColumnSet.stream()
+                .map(c -> "[" + c + "]")
+                .collect(Collectors.joining(", ")));
+        sql.append(", COUNT(*) AS [_rowCount]");
+        for (GroupedAggregation a : sanitized) {
+            if (hasPercentileWindow && isPercentileWindowAgg(a)) {
+                sql.append(", MAX([").append(internalPctAlias(a)).append("])")
+                   .append(" AS [").append(a.field()).append("]");
+            } else {
+                sql.append(", ").append(renderAggExpression(a))
+                   .append(" AS [").append(a.field()).append("]");
+            }
+        }
+        if (!hasPercentileWindow) {
+            sql.append(" FROM ").append(fromResult.sql());
+        } else {
+            // Inner SELECT projects raw columns + PERCENTILE_CONT window
+            // partitioned by every group column; outer GROUP BY collapses
+            // each bucket via MAX.
+            sql.append(" FROM (SELECT ").append(selectCols);
+            for (GroupedAggregation a : sanitized) {
+                if (isPercentileWindowAgg(a)) {
+                    sql.append(", PERCENTILE_CONT(")
+                       .append(percentileLiteral(a))
+                       .append(") WITHIN GROUP (ORDER BY [")
+                       .append(a.field()).append("])")
+                       .append(" OVER (PARTITION BY ").append(partitionByList).append(")")
+                       .append(" AS [").append(internalPctAlias(a)).append("]");
+                }
+            }
+            sql.append(" FROM ").append(fromResult.sql());
+            sql.append(") AS _med");
+        }
+        sql.append(" GROUP BY ").append(groupByList);
+        params.addValue("_maxRows", maxRows);
+
+        // Deterministic ORDER BY for reproducible exports: honour the
+        // caller's sortModel (allow list = group columns + agg aliases),
+        // then append every group column ASC chain so two runs over the
+        // same input produce byte-identical output.
+        Set<String> allowedSortCols = new java.util.HashSet<>(groupColumnSet);
+        for (GroupedAggregation a : sanitized) allowedSortCols.add(a.field());
+        StringBuilder orderBy = new StringBuilder();
+        Set<String> seenSortCols = new java.util.HashSet<>();
+        if (sortModel != null) {
+            for (Map<String, String> entry : sortModel) {
+                String colId = entry.get("colId");
+                String dir = entry.get("sort");
+                if (colId == null || !allowedSortCols.contains(colId)) continue;
+                if (!seenSortCols.add(colId)) continue;
+                String direction = "desc".equalsIgnoreCase(dir) ? "DESC" : "ASC";
+                if (orderBy.length() > 0) orderBy.append(", ");
+                orderBy.append("[").append(colId).append("] ").append(direction);
+            }
+        }
+        for (String gc : groupColumnSet) {
+            if (!seenSortCols.contains(gc)) {
+                if (orderBy.length() > 0) orderBy.append(", ");
+                orderBy.append("[").append(gc).append("] ASC");
+                seenSortCols.add(gc);
+            }
+        }
+        sql.append(" ORDER BY ").append(orderBy);
+
+        return new BuiltQuery(sql.toString(), params, fromResult.warnings());
+    }
+
+    /**
+     * PR-0.5b (Codex thread 019e2cd7): single-level pivot export. Emits
+     * the same {@code groupColumn + COUNT(*) + pivoted aggregations}
+     * shape as {@link #buildPivotedGroupedQuery} but pagination is
+     * removed and the row cap is enforced via {@code SELECT TOP}.
+     *
+     * <p>The returned {@link PivotedBuiltQuery} carries the
+     * {@code pivotResultColumns} metadata so the controller layer can
+     * build user-facing export headers
+     * ({@code <pivotLabel> / <AGG>(<valueField>)}) without re-deriving
+     * label/agg/value from the SQL alias string.
+     */
+    public PivotedBuiltQuery buildPivotedGroupedExportQuery(
+            ReportDefinition def,
+            YearlySchemaResolver.ResolvedSchemas resolvedSchemas,
+            List<String> visibleColumns,
+            String groupColumn,
+            String pivotColumn,
+            List<PivotValue> pivotValues,
+            List<GroupedAggregation> aggregations,
+            Map<String, Object> agGridFilter,
+            List<Map<String, String>> sortModel,
+            String rlsWhereClause,
+            MapSqlParameterSource rlsParams,
+            int maxRows) {
+        Set<String> allowedCols = Set.copyOf(visibleColumns);
+        if (groupColumn == null || !allowedCols.contains(groupColumn)) {
+            throw new IllegalArgumentException(
+                    "groupColumn must be one of the visible columns, got: " + groupColumn);
+        }
+        if (pivotColumn == null || !allowedCols.contains(pivotColumn)) {
+            throw new IllegalArgumentException(
+                    "pivotColumn must be one of the visible columns, got: " + pivotColumn);
+        }
+        if (pivotColumn.equals(groupColumn)) {
+            throw new IllegalArgumentException(
+                    "pivotColumn must differ from groupColumn (got "
+                            + pivotColumn + " for both)");
+        }
+        if (pivotValues == null || pivotValues.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "pivotValues must be non-empty for a pivot export query");
+        }
+
+        List<GroupedAggregation> sanitized = new java.util.ArrayList<>();
+        Set<String> projectedFields = new java.util.LinkedHashSet<>();
+        projectedFields.add(groupColumn);
+        projectedFields.add(pivotColumn);
+        for (GroupedAggregation a : aggregations != null
+                ? aggregations
+                : List.<GroupedAggregation>of()) {
+            if (!allowedCols.contains(a.field())) continue;
+            if (a.field().equals(groupColumn) || a.field().equals(pivotColumn)) {
+                continue;
+            }
+            if (!ALLOWED_PIVOT_AGG_FUNCS.contains(a.func())) {
+                throw new IllegalArgumentException(
+                        "Aggregation func '" + a.func() + "' is not supported "
+                                + "inside a pivot query (allowed: "
+                                + ALLOWED_PIVOT_AGG_FUNCS + ")");
+            }
+            projectedFields.add(a.field());
+            sanitized.add(a);
+        }
+        if (sanitized.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Pivot export query requires at least one valid aggregation "
+                            + "outside the group/pivot columns");
+        }
+        long totalOutputColumns = (long) pivotValues.size() * sanitized.size();
+        if (totalOutputColumns > MAX_PIVOT_OUTPUT_COLUMNS) {
+            throw new IllegalArgumentException(
+                    "Pivot output column budget exceeded: pivotValues("
+                            + pivotValues.size() + ") * valueCols("
+                            + sanitized.size() + ") = " + totalOutputColumns
+                            + " > " + MAX_PIVOT_OUTPUT_COLUMNS);
+        }
+
+        String selectCols = projectedFields.stream()
+                .map(c -> "[" + c + "]")
+                .collect(Collectors.joining(", "));
+
+        MapSqlParameterSource params = new MapSqlParameterSource();
+        FilterTranslator.FilterResult filterResult =
+                filterTranslator.translate(agGridFilter, allowedCols);
+        FromClauseResult fromResult = buildFromClause(def, resolvedSchemas,
+                selectCols, rlsWhereClause, rlsParams, filterResult, params);
+
+        StringBuilder sql = new StringBuilder();
+        sql.append("SELECT TOP(:_maxRows) [").append(groupColumn).append("]");
+        sql.append(", COUNT(*) AS [_rowCount]");
+
+        List<String> pivotResultFields = new ArrayList<>();
+        List<PivotResultColumn> pivotResultColumns = new ArrayList<>();
+        Set<String> seenAliases = new java.util.HashSet<>();
+        for (int pi = 0; pi < pivotValues.size(); pi++) {
+            PivotValue pv = pivotValues.get(pi);
+            String paramName = "_pivot_" + pi;
+            params.addValue(paramName, pv.value());
+            for (GroupedAggregation a : sanitized) {
+                String alias = pivotAlias(pivotColumn, pv.value(),
+                        a.func(), a.field());
+                if (!seenAliases.add(alias)) {
+                    throw new IllegalArgumentException(
+                            "Pivot alias collision detected: '" + alias
+                                    + "' — two registry pivotValues sanitise to "
+                                    + "the same identifier (raw value '"
+                                    + pv.value() + "'). Rename one entry so the "
+                                    + "alphanumeric+underscore reduction stays "
+                                    + "injective.");
+                }
+                pivotResultFields.add(alias);
+                pivotResultColumns.add(new PivotResultColumn(
+                        alias,
+                        pivotColumn,
+                        pv.value(),
+                        pv.label(),
+                        a.func(),
+                        a.field()));
+                sql.append(", ")
+                        .append(renderPivotAggExpression(a, pivotColumn, paramName))
+                        .append(" AS [").append(alias).append("]");
+            }
+        }
+
+        sql.append(" FROM ").append(fromResult.sql());
+        sql.append(" GROUP BY [").append(groupColumn).append("]");
+
+        String orderBy = translatePivotedSort(sortModel, groupColumn,
+                pivotResultFields);
+        sql.append(" ORDER BY ").append(orderBy);
+        params.addValue("_maxRows", maxRows);
+
+        return new PivotedBuiltQuery(sql.toString(), params,
+                fromResult.warnings(), pivotResultFields, pivotResultColumns);
+    }
+
     // ── Pivot queries (PR-0.4b single-level pivot) ──────────────────────
 
     /**

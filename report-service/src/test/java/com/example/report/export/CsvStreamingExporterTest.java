@@ -195,6 +195,112 @@ class CsvStreamingExporterTest {
         assertTrue(ex.getMessage().contains("CSV export failed") || ex.getMessage().contains("DB error"));
     }
 
+    // ── PR-0.5b: ExportColumn header/field split + CSV formula injection defence ──
+
+    @Test
+    void exportWithColumns_usesHeaderForRowOneAndFieldForResultSetKey() throws Exception {
+        // PR-0.5b: header is user-facing label (registered display
+        // name); field is the SQL alias used as ResultSet key.
+        doAnswer(invocation -> {
+            RowCallbackHandler handler = invocation.getArgument(2);
+            ResultSet rs = mock(ResultSet.class);
+            when(rs.getObject("amount")).thenReturn(1000.0);
+            when(rs.getObject("qty")).thenReturn(5);
+            handler.processRow(rs);
+            return null;
+        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        CsvStreamingExporter.exportWithColumns(jdbc, buildQuery(),
+                List.of(
+                        new ExportColumn("amount", "SUM(Tutar TL)"),
+                        new ExportColumn("qty", "AVG(Adet)")),
+                out);
+
+        String csv = extractCsvContent(out);
+        String[] lines = csv.split("\\r?\\n");
+        // Header uses display labels — must be escaped because of paren
+        assertEquals("SUM(Tutar TL);AVG(Adet)", lines[0]);
+        // Data row reads via SQL alias key
+        assertEquals("1000.0;5", lines[1]);
+    }
+
+    @Test
+    void exportWithColumns_leadingCRAndTabWrappedInQuotes() throws Exception {
+        // Codex 019e2cd7 post-impl Finding #5: CR/tab inside a value
+        // can break CSV record/cell boundaries even after the
+        // formula-injection prefix. The escape rule wraps them in
+        // double quotes too.
+        doAnswer(invocation -> {
+            RowCallbackHandler handler = invocation.getArgument(2);
+            ResultSet rs = mock(ResultSet.class);
+            when(rs.getObject("cr_first")).thenReturn("\rformula");
+            when(rs.getObject("tab_first")).thenReturn("\tformula");
+            when(rs.getObject("cr_mid")).thenReturn("a\rb");
+            handler.processRow(rs);
+            return null;
+        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        CsvStreamingExporter.exportWithColumns(jdbc, buildQuery(),
+                List.of(
+                        new ExportColumn("cr_first", "CRFirst"),
+                        new ExportColumn("tab_first", "TabFirst"),
+                        new ExportColumn("cr_mid", "CRMid")),
+                out);
+
+        String csv = extractCsvContent(out);
+        // Every CR / tab value is wrapped in quotes so the CSV record
+        // boundary stays intact even when the formula-injection
+        // single-quote prefix is the only leading defence.
+        assertTrue(csv.contains("\"'\rformula\""),
+                "leading CR value must be quote-wrapped (csv was: " + csv + ")");
+        assertTrue(csv.contains("\"'\tformula\""),
+                "leading tab value must be quote-wrapped");
+        assertTrue(csv.contains("\"a\rb\""),
+                "mid-string CR must trigger quote-wrap");
+    }
+
+    @Test
+    void exportWithColumns_csvFormulaInjectionPrefixedWithSingleQuote() throws Exception {
+        // PR-0.5b (Codex 019e2cd7 risk #5): leading =/+/-/@/tab/CR must
+        // be neutralised so Excel does not evaluate them as formulas.
+        doAnswer(invocation -> {
+            RowCallbackHandler handler = invocation.getArgument(2);
+            ResultSet rs = mock(ResultSet.class);
+            when(rs.getObject("note")).thenReturn("=cmd|'/c calc'!A1");
+            when(rs.getObject("plus")).thenReturn("+1+1");
+            when(rs.getObject("at")).thenReturn("@SUM(A1)");
+            when(rs.getObject("normal")).thenReturn("Hello");
+            handler.processRow(rs);
+            return null;
+        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        CsvStreamingExporter.exportWithColumns(jdbc, buildQuery(),
+                List.of(
+                        new ExportColumn("note", "Note"),
+                        new ExportColumn("plus", "Plus"),
+                        new ExportColumn("at", "At"),
+                        new ExportColumn("normal", "Normal")),
+                out);
+
+        String csv = extractCsvContent(out);
+        String[] lines = csv.split("\\r?\\n");
+        // Each formula-vulnerable value is prefixed with a single
+        // quote so Excel treats it as text, not a formula. Values
+        // without separator/quote/newline don't need extra
+        // quote-wrapping.
+        assertTrue(lines[1].startsWith("'=cmd"),
+                "leading '=' must be prefixed with single quote (line was: " + lines[1] + ")");
+        assertTrue(lines[1].contains(";'+1+1"),
+                "leading '+' must be prefixed with single quote");
+        assertTrue(lines[1].contains(";'@SUM(A1)"),
+                "leading '@' must be prefixed with single quote");
+        assertTrue(lines[1].endsWith("Hello"),
+                "non-formula value must round-trip unchanged");
+    }
+
     private ResultSet mockResultSet(Object id, String name, String city) throws SQLException {
         ResultSet rs = mock(ResultSet.class);
         when(rs.getObject("id")).thenReturn(id);
