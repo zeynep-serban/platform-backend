@@ -409,6 +409,14 @@ public class ReportController {
             // wrapping shape that PR-0.4b's CASE-WHEN renderer can't
             // express). Reject early so the SQL builder never has to
             // unwind a partial pivot SQL.
+            //
+            // PR-0.4c addition: weightedavg flat path is live but
+            // pivot composition is not yet wired — the CASE WHEN
+            // renderer would need to reference the weight column
+            // inside each bucket, and the budget-cap math has to
+            // account for the extra denominator scan. Deferred to a
+            // follow-up PR; reject for now so the SQL builder can't
+            // produce a half-correct pivot.
             for (SqlBuilder.GroupedAggregation a : aggregations) {
                 if ("median".equals(a.func()) || "percentilecont".equals(a.func())) {
                     return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
@@ -417,6 +425,13 @@ public class ReportController {
                                     + "inside a pivot query (PR-0.4b excludes "
                                     + "the percentile family; that work is "
                                     + "deferred to a follow-up PR)."));
+                }
+                if ("weightedavg".equals(a.func())) {
+                    return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
+                            "INVALID_AGGREGATION_REQUEST",
+                            "weightedavg aggregation is not yet supported inside "
+                                    + "a pivot query (PR-0.4c flat path only; pivot "
+                                    + "composition deferred to a follow-up PR)."));
                 }
             }
             // pivotValues * valueCols budget cap — matches the SQL builder's
@@ -964,6 +979,49 @@ public class ReportController {
                 }
             }
 
+            // PR-0.4c (2026-05): weightedavg cross-validation. The
+            // value field MUST be numeric (same MSSQL rationale as
+            // median / percentilecont — the SQL multiplies value *
+            // weight, both operands need numeric semantics). The
+            // weight column MUST be:
+            //   * Present in the visible-columns allow-list (no
+            //     hidden / restricted-column leak through aggregation
+            //     metadata).
+            //   * Marked type=number in the registry (text/date weight
+            //     would either fail at MSSQL or coerce silently).
+            //   * Distinct from the value field (sanitizeAggParams
+            //     already checks this for fast-fail, but the
+            //     numeric+visibility loop also runs here so an
+            //     ill-typed weight surfaces with a clearer error).
+            if ("weightedavg".equals(agg.func())) {
+                if (cd == null || cd.type() == null
+                        || !"number".equalsIgnoreCase(cd.type())) {
+                    throw new IllegalArgumentException(
+                            "weightedavg aggregation is only valid on numeric "
+                                    + "value fields; got field '" + vc.field()
+                                    + "' with type '"
+                                    + (cd != null ? cd.type() : "?") + "'");
+                }
+                Object weightRef = agg.params() != null ? agg.params().get("weightField") : null;
+                if (!(weightRef instanceof String weightField) || weightField.isBlank()) {
+                    throw new IllegalArgumentException(
+                            "weightedavg aggregation requires aggParams.weightField "
+                                    + "on field '" + vc.field() + "'");
+                }
+                ColumnDefinition weightCd = byField.get(weightField);
+                if (weightCd == null
+                        || weightCd.type() == null
+                        || !"number".equalsIgnoreCase(weightCd.type())) {
+                    throw new IllegalArgumentException(
+                            "weightedavg aggParams.weightField must reference a "
+                                    + "visible numeric column; got '" + weightField
+                                    + "' (type='"
+                                    + (weightCd != null ? weightCd.type() : "?") + "', "
+                                    + (weightCd == null ? "not in visible columns" : "ok")
+                                    + ")");
+                }
+            }
+
             out.add(agg);
         }
         return out;
@@ -993,16 +1051,20 @@ public class ReportController {
         Map<String, Object> params = vc.aggParams();
         // Codex 019e2695 iter-8 absorb: registry defaultAggParams
         // fallback applies ONLY when (a) the request did not supply
-        // its own aggParams, (b) the resolved func is `percentilecont`,
-        // AND (c) the registry's defaultAggFunc is also `percentilecont`
-        // — otherwise an explicit request `aggFunc=sum` would pick up
-        // a stray percentile default from the registry and fail the
+        // its own aggParams, (b) the resolved func matches a known
+        // parametric token (percentilecont / weightedavg), AND (c) the
+        // registry's defaultAggFunc is the same token — otherwise an
+        // explicit request `aggFunc=sum` would pick up a stray
+        // percentile default from the registry and fail the
         // "non-parametric + populated params" guard further down.
-        if ((params == null || params.isEmpty())
-                && "percentilecont".equals(func)
-                && cd != null
-                && "percentilecont".equals(cd.defaultAggFunc())
-                && cd.defaultAggParams() != null) {
+        boolean parametricFallbackApplies =
+                (params == null || params.isEmpty())
+                        && cd != null
+                        && cd.defaultAggFunc() != null
+                        && cd.defaultAggFunc().equals(func)
+                        && cd.defaultAggParams() != null
+                        && ("percentilecont".equals(func) || "weightedavg".equals(func));
+        if (parametricFallbackApplies) {
             params = cd.defaultAggParams();
         }
         if (params == null || params.isEmpty()) {
@@ -1026,12 +1088,41 @@ public class ReportController {
             }
             return Map.of("percentile", p);
         }
+        if ("weightedavg".equals(func)) {
+            // PR-0.4c: weight column reference is mandatory and must
+            // resolve to a numeric, visible column on the same report.
+            // We validate the string shape here; the
+            // sanitizeAggregations caller (outer scope) checks
+            // visibility + type after the per-field sanitisation
+            // returns. Failing closed with a structured 400 lets the
+            // frontend surface a meaningful error instead of the SQL
+            // builder later throwing IllegalStateException at execute
+            // time.
+            if (params == null || !params.containsKey("weightField")) {
+                throw new IllegalArgumentException(
+                        "weightedavg aggregation requires aggParams.weightField "
+                                + "(numeric column reference) on field '" + vc.field() + "'");
+            }
+            Object raw = params.get("weightField");
+            if (!(raw instanceof String s) || s.isBlank()) {
+                throw new IllegalArgumentException(
+                        "weightedavg aggParams.weightField must be a non-blank "
+                                + "string, got: " + raw);
+            }
+            if (s.equals(vc.field())) {
+                throw new IllegalArgumentException(
+                        "weightedavg aggParams.weightField must differ from the "
+                                + "value field; got '" + s + "' for both on '" + vc.field() + "'");
+            }
+            return Map.of("weightField", s);
+        }
         // Non-parametric agg + populated params → reject so config
         // mistakes surface loudly rather than being silently dropped.
         if (params != null) {
             throw new IllegalArgumentException(
-                    "aggParams is only supported for percentilecont; "
-                            + "got '" + func + "' on field '" + vc.field() + "'");
+                    "aggParams is only supported for percentilecont and "
+                            + "weightedavg; got '" + func + "' on field '"
+                            + vc.field() + "'");
         }
         return null;
     }

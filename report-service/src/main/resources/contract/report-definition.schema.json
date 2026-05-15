@@ -147,18 +147,24 @@
           "type": "boolean"
         },
         "defaultAggFunc": {
-          "description": "PR-0.2 + PR-0.4z + PR #6a + PR #6b: default aggregation function (sum/avg/min/max/count/stddev/stddevp/distinctcount/median/percentilecont). null → sum for numeric, count otherwise. weightedAvg deferred to PR-0.4.",
+          "description": "PR-0.2 + PR-0.4z + PR #6a + PR #6b + PR-0.4c: default aggregation function (sum/avg/min/max/count/stddev/stddevp/distinctcount/median/percentilecont/weightedavg). null → sum for numeric, count otherwise.",
           "type": ["string", "null"],
-          "enum": ["sum", "avg", "min", "max", "count", "stddev", "stddevp", "distinctcount", "median", "percentilecont", null]
+          "enum": ["sum", "avg", "min", "max", "count", "stddev", "stddevp", "distinctcount", "median", "percentilecont", "weightedavg", null]
         },
         "defaultAggParams": {
-          "description": "PR #6b: parametric aggregation defaults. percentilecont expects {\"percentile\": <double in [0,1]>}.",
+          "description": "PR #6b + PR-0.4c: parametric aggregation defaults. percentilecont expects {\"percentile\": <double in [0,1]>}. weightedavg expects {\"weightField\": <name of a visible numeric column>}.",
           "type": ["object", "null"],
           "properties": {
             "percentile": {
               "type": "number",
               "minimum": 0,
               "maximum": 1
+            },
+            "weightField": {
+              "description": "PR-0.4c: weighted-average weight column reference. Must name a visible numeric column on the same report; controller layer enforces type + visibility at request time.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
             }
           },
           "additionalProperties": false

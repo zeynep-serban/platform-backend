@@ -1967,6 +1967,173 @@ class ReportControllerQueryTest {
         }
     }
 
+    // ── PR-0.4c: weightedavg aggregator validation ──────────────
+
+    @Nested
+    class WeightedAverageValidation {
+
+        private ReportDefinition weightedReport() {
+            return new ReportDefinition(
+                    "fin-weighted", "1", "Weighted", "desc", "fin",
+                    "TXN", "dbo", "static", null, null,
+                    List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("price", "Price", "number",
+                                    120, false, false, true, "sum"),
+                            new ColumnDefinition("qty", "Qty", "number",
+                                    100, false, false, true, "sum"),
+                            // Non-numeric weight target — used by negative test.
+                            new ColumnDefinition("note", "Note", "text", 100, false)),
+                    null, null,
+                    new AccessConfig("REPORT_VIEW", null, null, null));
+        }
+
+        @Test
+        void wellFormedWeightedavgRouted() {
+            stubAuthz(true, List.of());
+            ReportDefinition def = weightedReport();
+            when(registry.get("fin-weighted")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+            when(queryEngine.executeGroupedQuery(
+                    any(), any(), eq("category"), any(), any(), any(),
+                    anyInt(), anyInt()))
+                    .thenReturn(new QueryEngine.PagedData(
+                            List.of(Map.of("category", "x", "price", 12.5)),
+                            1L, 1, 50));
+
+            var req = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("price", "Price", "price", "weightedavg",
+                            Map.of("weightField", "qty"))),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("fin-weighted", req, null, testJwt("admin"));
+
+            assertEquals(200, response.getStatusCode().value());
+            verify(queryEngine).executeGroupedQuery(
+                    any(), any(), eq("category"), any(), any(), any(), eq(1), eq(50));
+        }
+
+        @Test
+        void weightedavgMissingWeightFieldReturns400() {
+            stubAuthz(true, List.of());
+            ReportDefinition def = weightedReport();
+            when(registry.get("fin-weighted")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+
+            var req = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    // No aggParams → weightField missing.
+                    List.of(new ColumnVO("price", "Price", "price", "weightedavg")),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("fin-weighted", req, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            ReportQueryErrorDto err = assertInstanceOf(
+                    ReportQueryErrorDto.class, response.getBody());
+            assertEquals("INVALID_AGGREGATION_REQUEST", err.code());
+            assertTrue(err.message().contains("weightField"),
+                    "Error message must call out the missing weightField param");
+        }
+
+        @Test
+        void weightedavgNonNumericWeightReturns400() {
+            stubAuthz(true, List.of());
+            ReportDefinition def = weightedReport();
+            when(registry.get("fin-weighted")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+
+            var req = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    // "note" column is text — rejected as non-numeric weight.
+                    List.of(new ColumnVO("price", "Price", "price", "weightedavg",
+                            Map.of("weightField", "note"))),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("fin-weighted", req, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            ReportQueryErrorDto err = assertInstanceOf(
+                    ReportQueryErrorDto.class, response.getBody());
+            assertEquals("INVALID_AGGREGATION_REQUEST", err.code());
+            assertTrue(err.message().contains("numeric"),
+                    "Error message must explain why the weight column was rejected");
+        }
+
+        @Test
+        void weightedavgSameFieldForValueAndWeightReturns400() {
+            stubAuthz(true, List.of());
+            ReportDefinition def = weightedReport();
+            when(registry.get("fin-weighted")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+
+            var req = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("price", "Price", "price", "weightedavg",
+                            Map.of("weightField", "price"))),
+                    null, false, null, null, null);
+
+            var response = controller.queryReport("fin-weighted", req, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            ReportQueryErrorDto err = assertInstanceOf(
+                    ReportQueryErrorDto.class, response.getBody());
+            assertEquals("INVALID_AGGREGATION_REQUEST", err.code());
+        }
+
+        @Test
+        void weightedavgInsidePivotReturns400() {
+            // PR-0.4c (deliberate): flat path only; pivot composition
+            // deferred to a follow-up.
+            ReportDefinition def = new ReportDefinition(
+                    "fin-pivot-weighted", "1", "Pivot Weighted", "desc", "fin",
+                    "TXN", "dbo", "static", null, null,
+                    List.of(
+                            new ColumnDefinition("category", "Category", "text",
+                                    150, false, true, false, null),
+                            new ColumnDefinition("status", "Status", "text",
+                                    100, false, false, false, null, null, true,
+                                    List.of(new com.example.report.registry.PivotValue("A"))),
+                            new ColumnDefinition("price", "Price", "number",
+                                    120, false, false, true, "sum"),
+                            new ColumnDefinition("qty", "Qty", "number",
+                                    100, false, false, true, "sum")),
+                    null, null,
+                    new AccessConfig("REPORT_VIEW", null, null, null));
+            stubAuthz(true, List.of());
+            when(registry.get("fin-pivot-weighted")).thenReturn(Optional.of(def));
+            when(columnFilter.getVisibleColumnDefinitions(any(), any()))
+                    .thenReturn(def.columns());
+
+            var pivot = new ReportQueryRequestDto(
+                    0, 50,
+                    List.of(new ColumnVO("category", "Category", "category", null)),
+                    List.of(new ColumnVO("price", "Price", "price", "weightedavg",
+                            Map.of("weightField", "qty"))),
+                    List.of(new ColumnVO("status", "Status", "status", null)),
+                    true, null, null, null);
+
+            var response = controller.queryReport("fin-pivot-weighted", pivot, null, testJwt("admin"));
+
+            assertEquals(400, response.getStatusCode().value());
+            ReportQueryErrorDto err = assertInstanceOf(
+                    ReportQueryErrorDto.class, response.getBody());
+            assertEquals("INVALID_AGGREGATION_REQUEST", err.code());
+            assertTrue(err.message().contains("weightedavg"),
+                    "Pivot reject message must reference the weightedavg token");
+        }
+    }
+
     // ---- helpers ---------------------------------------------------------
 
     private void stubAuthz(boolean superAdmin, List<String> permissions) {

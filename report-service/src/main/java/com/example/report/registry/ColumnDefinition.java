@@ -142,10 +142,11 @@ public record ColumnDefinition(
                     && !normalized.equals("stddevp")
                     && !normalized.equals("distinctcount")
                     && !normalized.equals("median")
-                    && !normalized.equals("percentilecont")) {
+                    && !normalized.equals("percentilecont")
+                    && !normalized.equals("weightedavg")) {
                 throw new IllegalArgumentException(
                         "defaultAggFunc must be one of "
-                                + "sum/avg/min/max/count/stddev/stddevp/distinctcount/median/percentilecont, got: "
+                                + "sum/avg/min/max/count/stddev/stddevp/distinctcount/median/percentilecont/weightedavg, got: "
                                 + defaultAggFunc);
             }
             defaultAggFunc = normalized.isEmpty() ? null : normalized;

@@ -276,13 +276,21 @@ public class SqlBuilder {
      * {@link #renderAggExpression} helper rejects both tokens to make
      * the routing invariant explicit.
      *
-     * <p>Remaining roadmap function: {@code weightedAvg} (PR-0.4 with
-     * value+weight pair semantics).
+     * <p>PR-0.4c (2026-05): {@code weightedavg} accepts a paired
+     * weight column via {@code params.weightField}. The rendered SQL
+     * is the null-safe ratio {@code SUM(value * weight) / NULLIF(SUM(
+     * CASE WHEN value IS NOT NULL AND weight IS NOT NULL THEN weight
+     * END), 0)} — rows where either operand is null fall out of both
+     * numerator and denominator so the result honours the same
+     * "exclude nulls" semantic as MSSQL's plain {@code AVG}. Reports
+     * declare the weight column at registry time via
+     * {@code defaultAggParams.weightField}; per-request overrides go
+     * through {@code valueCols.aggParams.weightField}.
      */
     private static final Set<String> ALLOWED_AGG_FUNCS = Set.of(
             "sum", "avg", "min", "max", "count",
             "stddev", "stddevp", "distinctcount",
-            "median", "percentilecont");
+            "median", "percentilecont", "weightedavg");
 
     /**
      * Specifies a single value-column aggregation for
@@ -375,6 +383,25 @@ public class SqlBuilder {
             case "distinctcount" -> "COUNT(DISTINCT [" + a.field() + "])";
             case "stddev" -> "STDEV([" + a.field() + "])";
             case "stddevp" -> "STDEVP([" + a.field() + "])";
+            // PR-0.4c (2026-05): weighted-average aggregation. The
+            // SQL renders the null-safe ratio
+            //   SUM(value * weight) / NULLIF(SUM(CASE WHEN value IS
+            //     NOT NULL AND weight IS NOT NULL THEN weight END), 0)
+            // so the denominator only sums weights for rows where both
+            // operands are non-null (matches MSSQL AVG's null-exclusion
+            // semantic). NULLIF prevents divide-by-zero — when every
+            // row in the bucket has a null value or weight the cell
+            // resolves to NULL instead of erroring.
+            //
+            // The weight column reference is rendered as a bracketed
+            // identifier rather than a bind parameter because the
+            // controller layer (sanitizeAggParams) already validates
+            // weightField against the visible-columns allow-list +
+            // ColumnDefinition.type=='number'.
+            case "weightedavg" -> "SUM([" + a.field() + "] * [" + weightFieldOf(a) + "])"
+                    + " / NULLIF(SUM(CASE WHEN [" + a.field() + "] IS NOT NULL AND ["
+                    + weightFieldOf(a) + "] IS NOT NULL THEN [" + weightFieldOf(a)
+                    + "] END), 0)";
             // PR #6a (Codex 019e2695 iter-6): median and percentilecont
             // must never travel through the simple-render path.
             // PERCENTILE_CONT is a window function in MSSQL, so calling
@@ -389,6 +416,23 @@ public class SqlBuilder {
             default -> a.func().toUpperCase(java.util.Locale.ROOT)
                     + "([" + a.field() + "])";
         };
+    }
+
+    /**
+     * PR-0.4c: extract the canonical {@code weightField} for a
+     * weighted-average aggregation. The controller layer
+     * ({@code sanitizeAggParams}) guarantees the param is present,
+     * non-blank, and references a numeric column in the visible-columns
+     * allow-list — this helper just hands the validated string back to
+     * the SQL renderer without re-walking the map.
+     */
+    private static String weightFieldOf(GroupedAggregation a) {
+        Object raw = a.params() != null ? a.params().get("weightField") : null;
+        if (!(raw instanceof String s) || s.isBlank()) {
+            throw new IllegalStateException(
+                    "weightedavg aggregation requires params.weightField, got: " + raw);
+        }
+        return s;
     }
 
     /**
@@ -516,6 +560,37 @@ public class SqlBuilder {
             if (!allowedCols.contains(a.field())) continue;
             if (a.field().equals(groupColumn)) continue; // tautological
             projected.add(a.field());
+            // PR-0.4c iter-2 (Codex 019e2acc absorb): weightedavg's
+            // weight column must also be carried through the
+            // FROM-clause projection so the outer SUM(value * weight)
+            // can resolve it. Otherwise multi-schema UNION ALL
+            // (yearly) and percentile-wrapper inner SELECTs would
+            // emit "SELECT [category], [price]" while the outer
+            // aggregate references [qty] → MSSQL "Invalid column"
+            // error at execute time. Defence-in-depth: weight column
+            // visibility + distinctness re-validated here so a
+            // future caller that bypasses the controller still fails
+            // closed with a clear error before the SQL builder
+            // emits broken DDL.
+            if ("weightedavg".equals(a.func())) {
+                Object weightRef = a.params() != null ? a.params().get("weightField") : null;
+                if (!(weightRef instanceof String weight) || weight.isBlank()) {
+                    throw new IllegalArgumentException(
+                            "weightedavg aggregation requires params.weightField on field '"
+                                    + a.field() + "'");
+                }
+                if (!allowedCols.contains(weight)) {
+                    throw new IllegalArgumentException(
+                            "weightedavg params.weightField must be one of the visible "
+                                    + "columns, got: " + weight);
+                }
+                if (weight.equals(a.field())) {
+                    throw new IllegalArgumentException(
+                            "weightedavg params.weightField must differ from value field, "
+                                    + "got: " + weight + " for both on '" + a.field() + "'");
+                }
+                projected.add(weight);
+            }
             sanitized.add(a);
         }
 

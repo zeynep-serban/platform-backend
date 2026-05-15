@@ -661,6 +661,106 @@ class SqlBuilderMssqlIntegrationTest {
         assertThat(rows.get(1).get("name")).isEqualTo("alphabet");
     }
 
+    // ── PR-0.4c: weightedavg correctness against MSSQL ────────────
+
+    @Test
+    void buildGroupedQuery_weightedavgRendersNullSafeRatioOverRealMssql() {
+        // Three categories × two rows each. The weighted average
+        // formula is SUM(price * qty) / SUM(qty):
+        //   - A: (10*1 + 20*3) / (1+3) = 70/4 = 17.5
+        //   - B: (5*2 + 15*8) / (2+8) = 130/10 = 13.0
+        //   - C: only nulls → numerator + denominator both NULL,
+        //     SUM(NULL) → NULL, denominator NULLIF protects against
+        //     a degenerate zero-row bucket too.
+        ReportDefinition def = scratch(
+                "wavg",
+                List.of(
+                        new ColumnDefinition("category", "Category", "text", 80, false),
+                        new ColumnDefinition("price", "Price", "number", 100, false),
+                        new ColumnDefinition("qty", "Qty", "number", 100, false)),
+                "CREATE TABLE [{schema}].[wavg] ("
+                        + "category NVARCHAR(20) NOT NULL, "
+                        + "price DECIMAL(18,2) NULL, "
+                        + "qty DECIMAL(18,2) NULL)",
+                List.of(
+                        "INSERT INTO [{schema}].[wavg] VALUES ('A', 10.00, 1.00)",
+                        "INSERT INTO [{schema}].[wavg] VALUES ('A', 20.00, 3.00)",
+                        "INSERT INTO [{schema}].[wavg] VALUES ('B', 5.00,  2.00)",
+                        "INSERT INTO [{schema}].[wavg] VALUES ('B', 15.00, 8.00)",
+                        "INSERT INTO [{schema}].[wavg] VALUES ('C', NULL,  NULL)",
+                        "INSERT INTO [{schema}].[wavg] VALUES ('C', NULL,  NULL)"));
+
+        SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                def, null, List.of("category", "price", "qty"),
+                "category",
+                List.of(new SqlBuilder.GroupedAggregation(
+                        "price", "weightedavg", Map.of("weightField", "qty"))),
+                Collections.emptyMap(),
+                List.of(Map.of("colId", "category", "sort", "asc")),
+                null, null, 1, 50);
+
+        List<Map<String, Object>> rows = jdbc.queryForList(q.sql(), q.params());
+
+        assertThat(rows).hasSize(3);
+        assertThat(rows.get(0).get("category")).isEqualTo("A");
+        assertThat(((java.math.BigDecimal) rows.get(0).get("price")))
+                .isCloseTo(new java.math.BigDecimal("17.500000"),
+                        within(new java.math.BigDecimal("0.000001")));
+        assertThat(rows.get(1).get("category")).isEqualTo("B");
+        assertThat(((java.math.BigDecimal) rows.get(1).get("price")))
+                .isCloseTo(new java.math.BigDecimal("13.000000"),
+                        within(new java.math.BigDecimal("0.000001")));
+        assertThat(rows.get(2).get("category")).isEqualTo("C");
+        // All-null bucket: numerator NULL, denominator NULL via
+        // NULLIF(0, 0) → ratio NULL (no divide-by-zero error).
+        assertThat(rows.get(2).get("price")).isNull();
+    }
+
+    @Test
+    void buildGroupedQuery_weightedavgExcludesPartialNulls() {
+        // Null operand semantics: a row with price=NULL or qty=NULL
+        // contributes neither to numerator nor denominator, mirroring
+        // MSSQL AVG's behaviour. Otherwise the SUM-of-products would
+        // count the row in the numerator (with NULL → NULL pollution)
+        // while the SUM-of-weights would already exclude it,
+        // producing a biased result.
+        ReportDefinition def = scratch(
+                "wavg_null",
+                List.of(
+                        new ColumnDefinition("category", "Category", "text", 80, false),
+                        new ColumnDefinition("price", "Price", "number", 100, false),
+                        new ColumnDefinition("qty", "Qty", "number", 100, false)),
+                "CREATE TABLE [{schema}].[wavg_null] ("
+                        + "category NVARCHAR(20) NOT NULL, "
+                        + "price DECIMAL(18,2) NULL, "
+                        + "qty DECIMAL(18,2) NULL)",
+                List.of(
+                        // Real rows: (price=10, qty=1) + (price=20, qty=3) → 17.5
+                        "INSERT INTO [{schema}].[wavg_null] VALUES ('A', 10.00, 1.00)",
+                        "INSERT INTO [{schema}].[wavg_null] VALUES ('A', 20.00, 3.00)",
+                        // Row with NULL price — must NOT contribute weight (qty=5)
+                        // to the denominator, else avg would slide to
+                        // (10*1 + 20*3) / (1+3+5) = 70/9 ≈ 7.78.
+                        "INSERT INTO [{schema}].[wavg_null] VALUES ('A', NULL, 5.00)",
+                        // Row with NULL qty — must NOT contribute price.
+                        "INSERT INTO [{schema}].[wavg_null] VALUES ('A', 999.00, NULL)"));
+
+        SqlBuilder.BuiltQuery q = builder.buildGroupedQuery(
+                def, null, List.of("category", "price", "qty"),
+                "category",
+                List.of(new SqlBuilder.GroupedAggregation(
+                        "price", "weightedavg", Map.of("weightField", "qty"))),
+                Collections.emptyMap(), Collections.emptyList(),
+                null, null, 1, 50);
+
+        List<Map<String, Object>> rows = jdbc.queryForList(q.sql(), q.params());
+        assertThat(rows).hasSize(1);
+        assertThat(((java.math.BigDecimal) rows.get(0).get("price")))
+                // 17.5 — NULL operands excluded from both sides.
+                .isCloseTo(new java.math.BigDecimal("17.500000"),
+                        within(new java.math.BigDecimal("0.000001")));
+    }
+
     // ── PR-0.4b: pivot SQL correctness against MSSQL ─────────────
 
     @Test
