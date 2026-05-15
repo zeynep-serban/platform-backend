@@ -41,6 +41,8 @@ import uuid
 from dataclasses import dataclass
 
 from .audit import AuditWriter, build_event
+from .checkpoint import CheckpointFile, build_checkpoint, snapshot_signature_for_summary
+from .db import ReportsDbWriteError, ReportsDbWriter
 from .retry import RetryPolicy, Sleeper, call_with_retry
 from .schema_service_client import (
     SchemaContractVersionMismatch,
@@ -75,6 +77,9 @@ def run_fetch(
     sleeper: Sleeper,
     audit: AuditWriter | None = None,
     run_id: str | None = None,
+    db_writer: ReportsDbWriter | None = None,
+    checkpoint: CheckpointFile | None = None,
+    resume: bool = False,
 ) -> RunResult:
     """Fetch one schema-service snapshot honouring the retry policy.
 
@@ -114,6 +119,28 @@ def run_fetch(
     rid = run_id if run_id else uuid.uuid4().hex
     if audit is not None:
         audit.write(build_event(run_id=rid, event="run_started"))
+
+    # Resume cursor surface (PR-2b2b): load + emit ``checkpoint_loaded``
+    # but never short-circuit fetch/apply. Codex 019e2a5c REVISE absorb:
+    # load is **not** gated on the audit writer — operators relying on
+    # corrupt-checkpoint detection must see a ``CheckpointError`` even
+    # without ``--audit-path``. The audit event is best-effort
+    # telemetry on top of that.
+    if resume and checkpoint is not None:
+        loaded = checkpoint.load()
+        if loaded is not None and audit is not None:
+            audit.write(
+                build_event(
+                    run_id=rid,
+                    event="checkpoint_loaded",
+                    extra={
+                        "loaded_run_id": loaded.run_id,
+                        "last_successful_attempt": loaded.last_successful_attempt,
+                        "snapshot_signature": loaded.snapshot_signature,
+                        "written_at": loaded.written_at,
+                    },
+                )
+            )
 
     def _on_attempt(attempt: int) -> None:
         if audit is not None:
@@ -191,6 +218,89 @@ def run_fetch(
         "table_count": len(snapshot.tables),
         "column_count": column_count,
     }
+
+    # Compute the content-only snapshot signature once: shared by the
+    # DB writer (idempotency key) and the checkpoint (operator
+    # correlation). Codex 019e2a5c REVISE absorb: the signature is
+    # NOT computed inside ``build_checkpoint`` from the full summary
+    # because that would mix retry telemetry into the hash.
+    signature = snapshot_signature_for_summary(summary)
+    db_request_summary = {**summary, "snapshot_signature": signature}
+
+    # PR-2b2b/2b3 transaction boundary: DB upsert happens BEFORE the
+    # checkpoint write so we never persist "applied through this point"
+    # without an actually applied row. ``db_writer=None`` keeps PR-2b1
+    # / PR-2b2a byte-compat behaviour.
+    if db_writer is not None:
+        if audit is not None:
+            audit.write(
+                build_event(
+                    run_id=rid,
+                    event="db_upsert_started",
+                    attempt=attempts,
+                    extra={"snapshot_signature": signature},
+                )
+            )
+        try:
+            result = db_writer.upsert(db_request_summary)
+        except ReportsDbWriteError as exc:
+            if audit is not None:
+                audit.write(
+                    build_event(
+                        run_id=rid,
+                        event="db_upsert_failed",
+                        attempt=attempts,
+                        outcome="db_write_failure",
+                        error_class=type(exc).__name__,
+                        error_message=str(exc),
+                    )
+                )
+                audit.write(
+                    build_event(
+                        run_id=rid,
+                        event="run_failed",
+                        outcome="db_write_failure",
+                        error_class=type(exc).__name__,
+                        error_message=str(exc),
+                    )
+                )
+            raise
+        if audit is not None:
+            audit.write(
+                build_event(
+                    run_id=rid,
+                    event="db_upsert_completed",
+                    attempt=attempts,
+                    outcome="success",
+                    extra={"rows_written": result.rows_written},
+                )
+            )
+
+    # Checkpoint write happens AFTER successful DB upsert (transaction
+    # boundary). When ``db_writer`` is absent, the checkpoint captures
+    # "fetched + parsed through this point" — operationally useful as
+    # observability even without a real DB applied row.
+    if checkpoint is not None:
+        cp = build_checkpoint(
+            run_id=rid,
+            last_successful_attempt=attempts,
+            summary={**summary, "attempts": attempts},
+        )
+        checkpoint.write(cp)
+        if audit is not None:
+            audit.write(
+                build_event(
+                    run_id=rid,
+                    event="checkpoint_written",
+                    attempt=attempts,
+                    outcome="success",
+                    extra={
+                        "snapshot_signature": cp.snapshot_signature,
+                        "written_at": cp.written_at,
+                    },
+                )
+            )
+
     if audit is not None:
         audit.write(
             build_event(

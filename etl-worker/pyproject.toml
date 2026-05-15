@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "etl-worker"
-version = "0.4.0"
+version = "0.5.0"
 description = "Workcube reporting ETL worker — schema-service contract consumer. Adım 12 (reporting refactor plan)."
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
@@ -59,16 +59,20 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 "etl_worker/__init__.py" = ["RUF001", "RUF002"]
 "etl_worker/audit.py" = ["RUF001", "RUF002"]
+"etl_worker/checkpoint.py" = ["RUF001", "RUF002"]
 "etl_worker/cli.py" = ["RUF001", "RUF002"]
 "etl_worker/config.py" = ["RUF001", "RUF002"]
 "etl_worker/contracts.py" = ["RUF001", "RUF002"]
+"etl_worker/db.py" = ["RUF001", "RUF002"]
 "etl_worker/retry.py" = ["RUF001", "RUF002"]
 "etl_worker/runner.py" = ["RUF001", "RUF002"]
 "etl_worker/schema_service_client.py" = ["RUF001", "RUF002"]
 "tests/test_audit.py" = ["RUF001", "RUF002"]
+"tests/test_checkpoint.py" = ["RUF001", "RUF002"]
 "tests/test_cli.py" = ["RUF001", "RUF002"]
 "tests/test_cli_run.py" = ["RUF001", "RUF002"]
 "tests/test_config.py" = ["RUF001", "RUF002"]
+"tests/test_db.py" = ["RUF001", "RUF002"]
 "tests/test_retry.py" = ["RUF001", "RUF002"]
 "tests/test_runner.py" = ["RUF001", "RUF002"]
 "tests/test_schema_service_client.py" = ["RUF001", "RUF002"]

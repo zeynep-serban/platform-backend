@@ -646,6 +646,118 @@ def test_run_audit_write_oserror_maps_to_70_software() -> None:
 
     assert code == EX_SOFTWARE
     text = err.getvalue()
-    assert "audit error" in text
+    # Codex 019e2a5c REVISE absorb: runtime OSError surfaces with the
+    # neutral "persistence error" label so a checkpoint-write failure
+    # is not mis-reported as an audit failure.
+    assert "persistence error" in text
     assert "no space left on device" in text
+    assert "Traceback" not in text
+
+
+# ---- PR-2b2b/2b3 — CLI checkpoint + DB writer integration ---------------
+
+
+def test_run_resume_without_checkpoint_path_maps_to_64_usage() -> None:
+    """Codex 019e2a5c REVISE absorb: ``--resume`` without
+    ``--checkpoint-path`` is a misinvocation; CLI must fail-closed."""
+    _, factory = _factory([_good_snapshot()])
+    err = io.StringIO()
+
+    code = main(
+        ["run", "--resume"],
+        env=_good_env(),
+        stdout=io.StringIO(),
+        stderr=err,
+        client_factory=factory,
+        sleeper=_FakeSleeper(),
+    )
+
+    assert code == EX_USAGE
+    assert "--resume requires --checkpoint-path" in err.getvalue()
+
+
+def test_run_checkpoint_path_writes_file_on_success(tmp_path: object) -> None:
+    """End-to-end smoke: ``--checkpoint-path`` persists a checkpoint JSON
+    file after a successful fetch (without DB writer)."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    cp_file = _Path(str(tmp_path)) / "state.json"
+    _, factory = _factory([_good_snapshot()])
+
+    code = main(
+        ["run", "--checkpoint-path", str(cp_file), "--run-id", "smoke-cp"],
+        env=_good_env(),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        client_factory=factory,
+        sleeper=_FakeSleeper(),
+    )
+
+    assert code == EX_OK
+    assert cp_file.exists()
+    payload = _json.loads(cp_file.read_text())
+    assert payload["run_id"] == "smoke-cp"
+    assert payload["last_successful_attempt"] == 1
+    assert payload["schema_version"] == 1
+    assert isinstance(payload["snapshot_signature"], str)
+
+
+def test_run_resume_with_corrupt_checkpoint_maps_to_70_software(tmp_path: object) -> None:
+    """``--resume`` against a malformed checkpoint surfaces
+    ``CheckpointError`` as ``EX_SOFTWARE`` with no traceback leak."""
+    from pathlib import Path as _Path
+
+    cp_file = _Path(str(tmp_path)) / "corrupt.json"
+    cp_file.write_text("<<<not json>>>", encoding="utf-8")
+    _, factory = _factory([_good_snapshot()])
+    err = io.StringIO()
+
+    code = main(
+        [
+            "run",
+            "--resume",
+            "--checkpoint-path",
+            str(cp_file),
+        ],
+        env=_good_env(),
+        stdout=io.StringIO(),
+        stderr=err,
+        client_factory=factory,
+        sleeper=_FakeSleeper(),
+    )
+
+    assert code == EX_SOFTWARE
+    text = err.getvalue()
+    assert "checkpoint error" in text
+    assert "Traceback" not in text
+
+
+def test_run_db_writer_write_error_maps_to_75_tempfail(tmp_path: object) -> None:
+    """``ReportsDbWriteError`` from the wired ``db_writer`` surfaces as
+    ``EX_TEMPFAIL`` so an outer scheduler can re-queue."""
+    from etl_worker.db import ReportsDbWriteError as _Err
+    from etl_worker.db import ReportsDbWriteResult as _Result
+
+    class _BoomWriter:
+        def upsert(self, _summary: dict[str, object]) -> _Result:
+            raise _Err("db connection lost")
+
+    _, factory = _factory([_good_snapshot()])
+    err = io.StringIO()
+
+    code = main(
+        ["run"],
+        env=_good_env(),
+        stdout=io.StringIO(),
+        stderr=err,
+        client_factory=factory,
+        sleeper=_FakeSleeper(),
+        db_writer=_BoomWriter(),
+    )
+
+    assert code == EX_TEMPFAIL
+    text = err.getvalue()
+    assert "db write error" in text
+    assert "db connection lost" in text
     assert "Traceback" not in text

@@ -29,8 +29,10 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Protocol, TextIO
 
 from .audit import AuditWriter, JsonLinesAuditWriter
+from .checkpoint import CheckpointError, CheckpointFile
 from .config import Config, ConfigError
 from .contracts import SchemaSnapshot
+from .db import ReportsDbWriteError, ReportsDbWriter
 from .retry import RetryPolicy, Sleeper, SystemSleeper
 from .runner import RunResult, run_fetch
 from .schema_service_client import (
@@ -231,6 +233,27 @@ def _build_parser() -> _NonExitingParser:
             "Defaults to a freshly generated uuid4 hex."
         ),
     )
+    run.add_argument(
+        "--checkpoint-path",
+        default=None,
+        help=(
+            "Path to a JSON checkpoint file. When provided the runner "
+            "atomically writes a checkpoint after a successful DB upsert "
+            "(or after a successful fetch when no --db-writer is "
+            "configured). Absent (default) = no checkpoint side effect."
+        ),
+    )
+    run.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "When set together with --checkpoint-path, load the existing "
+            "checkpoint and emit a checkpoint_loaded audit event so "
+            "operators see the resume cursor. PR-2b2b scope: this flag "
+            "does NOT short-circuit fetch/apply — true idempotency is "
+            "deferred to a later slice once a real DB driver lands."
+        ),
+    )
     return parser
 
 
@@ -291,6 +314,8 @@ def main(
     client_factory: _ClientFactory = _default_client_factory,
     sleeper: Sleeper | None = None,
     audit_factory: Callable[[str], AuditWriter] | None = None,
+    checkpoint_factory: Callable[[str], CheckpointFile] | None = None,
+    db_writer: ReportsDbWriter | None = None,
 ) -> int:
     """Resolve config, parse CLI, fetch a snapshot, emit the JSON summary.
 
@@ -351,7 +376,15 @@ def main(
         return _handle_fetch_snapshot(client, schema_override, out, err)
     if args.command == "run":
         return _handle_run(
-            client, schema_override, args, sleeper, out, err, audit_factory
+            client,
+            schema_override,
+            args,
+            sleeper,
+            out,
+            err,
+            audit_factory,
+            checkpoint_factory,
+            db_writer,
         )
     # ``argparse`` with ``required=True`` should make this branch
     # unreachable; treat any other command as a usage failure.
@@ -390,6 +423,8 @@ def _handle_run(
     out: TextIO,
     err: TextIO,
     audit_factory: Callable[[str], AuditWriter] | None = None,
+    checkpoint_factory: Callable[[str], CheckpointFile] | None = None,
+    db_writer: ReportsDbWriter | None = None,
 ) -> int:
     try:
         policy = RetryPolicy(
@@ -426,6 +461,31 @@ def _handle_run(
             print(f"etl-worker: audit error: {exc}", file=err)
             return EX_SOFTWARE
 
+    # Codex 019e2a5c REVISE absorb: ``--resume`` without
+    # ``--checkpoint-path`` is a misinvocation; fail-closed with
+    # ``EX_USAGE=64`` so the operator sees the contract drift before
+    # any side effect.
+    if args.resume and args.checkpoint_path is None:
+        print(
+            "etl-worker: usage: --resume requires --checkpoint-path",
+            file=err,
+        )
+        return EX_USAGE
+
+    # Build the checkpoint file when the operator asks for one. Same
+    # OSError-handling discipline as the audit writer: typed
+    # ``EX_SOFTWARE`` exit + one-line stderr on construction failure.
+    checkpoint: CheckpointFile | None = None
+    if args.checkpoint_path is not None:
+        try:
+            if checkpoint_factory is not None:
+                checkpoint = checkpoint_factory(args.checkpoint_path)
+            else:
+                checkpoint = CheckpointFile(args.checkpoint_path)
+        except OSError as exc:
+            print(f"etl-worker: checkpoint error: {exc}", file=err)
+            return EX_SOFTWARE
+
     active_sleeper: Sleeper = sleeper if sleeper is not None else SystemSleeper()
     try:
         result: RunResult = run_fetch(
@@ -435,6 +495,9 @@ def _handle_run(
             sleeper=active_sleeper,
             audit=audit,
             run_id=args.run_id,
+            db_writer=db_writer,
+            checkpoint=checkpoint,
+            resume=args.resume,
         )
     except SchemaServiceUnavailable as exc:
         print(
@@ -449,11 +512,24 @@ def _handle_run(
     except SchemaServiceMalformedResponse as exc:
         print(f"etl-worker: malformed response: {exc}", file=err)
         return EX_SOFTWARE
+    except ReportsDbWriteError as exc:
+        # DB upsert failure is an operational failure: surface as
+        # ``EX_TEMPFAIL`` (75) so an outer scheduler can re-queue.
+        print(f"etl-worker: db write error: {exc}", file=err)
+        return EX_TEMPFAIL
+    except CheckpointError as exc:
+        # Malformed checkpoint at load time: terminal, fix-local-state.
+        print(f"etl-worker: checkpoint error: {exc}", file=err)
+        return EX_SOFTWARE
     except OSError as exc:
-        # Audit sink failure during a write surfaces as ``OSError``;
-        # trap with the same ``EX_SOFTWARE`` exit contract as the
-        # creation path so the CLI never leaks a traceback.
-        print(f"etl-worker: audit error: {exc}", file=err)
+        # Audit/checkpoint sink failure during a write surfaces as
+        # ``OSError``; trap with ``EX_SOFTWARE`` so the CLI never leaks
+        # a traceback. (The construction-time variant is already
+        # handled above where the sink is built.) Codex 019e2a5c
+        # REVISE absorb: use a neutral "persistence error" label rather
+        # than "audit error" so a checkpoint write failure is not
+        # mis-reported as an audit failure to the operator.
+        print(f"etl-worker: persistence error: {exc}", file=err)
         return EX_SOFTWARE
 
     summary = dict(result.summary)

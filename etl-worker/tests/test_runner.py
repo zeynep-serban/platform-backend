@@ -7,6 +7,8 @@ with audit-emission coverage. The runner is exercised via a fake
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from etl_worker.audit import AuditEvent
@@ -425,3 +427,108 @@ def test_audit_contract_mismatch_event_sequence() -> None:
     run_failed = audit.events[-1]
     assert run_failed.outcome == "contract_drift"
     assert run_failed.error_class == "SchemaContractVersionMismatch"
+
+
+# ---- PR-2b2b/2b3 — db_writer + checkpoint integration -------------------
+
+
+def test_audit_with_db_writer_emits_full_success_sequence(tmp_path: Path) -> None:
+    """Codex 019e2a5c REVISE absorb: pin the success sequence
+    ``... attempt_succeeded -> db_upsert_started -> db_upsert_completed
+    -> checkpoint_written -> run_succeeded`` with checkpoint persisted."""
+    from etl_worker.checkpoint import CheckpointFile
+    from etl_worker.db import NoopReportsDbWriter
+
+    client = _FakeClient(responses=[_good_snapshot()])
+    audit = _RecordingAuditWriter()
+    writer = NoopReportsDbWriter()
+    cp_file = CheckpointFile(tmp_path / "state.json")
+
+    result = run_fetch(
+        client=client,  # type: ignore[arg-type]
+        schema=None,
+        policy=RetryPolicy(max_attempts=1),
+        sleeper=_FakeSleeper(),
+        audit=audit,
+        run_id="success-r1",
+        db_writer=writer,
+        checkpoint=cp_file,
+    )
+
+    assert isinstance(result, RunResult)
+    assert audit.names() == [
+        "run_started",
+        "attempt_started",
+        "attempt_succeeded",
+        "db_upsert_started",
+        "db_upsert_completed",
+        "checkpoint_written",
+        "run_succeeded",
+    ]
+    # DB writer saw the summary + signature
+    assert len(writer.calls) == 1
+    assert "snapshot_signature" in writer.calls[0]
+    # Checkpoint persisted
+    loaded = cp_file.load()
+    assert loaded is not None
+    assert loaded.run_id == "success-r1"
+
+
+def test_db_writer_failure_emits_failed_events_and_skips_checkpoint(tmp_path: Path) -> None:
+    """Codex 019e2a5c REVISE absorb: ``ReportsDbWriteError`` surfaces
+    ``db_upsert_failed`` + ``run_failed``, and the checkpoint is **not**
+    persisted (transaction boundary contract)."""
+    from etl_worker.checkpoint import CheckpointFile
+    from etl_worker.db import ReportsDbWriteError, ReportsDbWriteResult
+
+    class _BoomWriter:
+        def upsert(self, _summary: dict[str, object]) -> ReportsDbWriteResult:
+            raise ReportsDbWriteError("db connection lost")
+
+    client = _FakeClient(responses=[_good_snapshot()])
+    audit = _RecordingAuditWriter()
+    cp_file = CheckpointFile(tmp_path / "state.json")
+
+    with pytest.raises(ReportsDbWriteError):
+        run_fetch(
+            client=client,  # type: ignore[arg-type]
+            schema=None,
+            policy=RetryPolicy(max_attempts=1),
+            sleeper=_FakeSleeper(),
+            audit=audit,
+            run_id="db-fail-r1",
+            db_writer=_BoomWriter(),
+            checkpoint=cp_file,
+        )
+
+    names = audit.names()
+    assert "db_upsert_failed" in names
+    assert names[-1] == "run_failed"
+    # Checkpoint NEVER written when DB upsert fails — transaction
+    # boundary contract.
+    assert not cp_file.exists()
+
+
+def test_resume_loads_checkpoint_even_without_audit(tmp_path: Path) -> None:
+    """Codex 019e2a5c REVISE absorb: ``resume=True`` is independent of
+    audit. A corrupt checkpoint at load time raises ``CheckpointError``
+    even when no audit writer is configured."""
+    from etl_worker.checkpoint import CheckpointError, CheckpointFile
+
+    cp_path = tmp_path / "corrupt.json"
+    cp_path.write_text("<<<not json>>>", encoding="utf-8")
+    cp_file = CheckpointFile(cp_path)
+
+    client = _FakeClient(responses=[_good_snapshot()])
+
+    with pytest.raises(CheckpointError):
+        run_fetch(
+            client=client,  # type: ignore[arg-type]
+            schema=None,
+            policy=RetryPolicy(max_attempts=1),
+            sleeper=_FakeSleeper(),
+            # audit=None — corrupt checkpoint must still surface
+            run_id="resume-r1",
+            checkpoint=cp_file,
+            resume=True,
+        )
