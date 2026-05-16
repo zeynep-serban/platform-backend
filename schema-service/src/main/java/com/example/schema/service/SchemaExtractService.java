@@ -50,35 +50,34 @@ public class SchemaExtractService {
 
     @Cacheable(value = "tables", key = "#schema")
     public Map<String, TableInfo> extractTables(String schema) {
-        String targetSchema = schema != null ? schema : defaultSchema;
-        log.info("Extracting tables from schema '{}'...", targetSchema);
+        return enrichTables(schema, extractBaseTables(schema));
+    }
 
-        // Phase B1-1 (capability M2 — Codex 019e2d7d): column metadata
-        // expansion. precision/scale/collation/sparse from sys.columns;
-        // identity seed/increment from sys.identity_columns; default
-        // expression from sys.default_constraints; computed expression +
-        // persisted flag from sys.computed_columns. All authoritative_mssql.
+    /**
+     * P1 (handoff §5 — Codex 019e32da / 019e3317): the mandatory, fatal half
+     * of {@link #extractTables}. Reads only the base catalog
+     * ({@code sys.tables / sys.schemas / sys.columns / sys.types}) plus the
+     * primary-key subquery. The B1-1 enrichment metadata (identity
+     * seed/increment, default + computed expressions) is layered on
+     * non-fatally by {@link #enrichTables} — splitting the single wide JOIN
+     * means an enrichment surface failing (timeout / permission) no longer
+     * collapses base extraction. If THIS query fails the snapshot genuinely
+     * cannot be built and the exception propagates (Q3 maps it to 503/504).
+     */
+    Map<String, TableInfo> extractBaseTables(String schema) {
+        String targetSchema = schema != null ? schema : defaultSchema;
+        log.info("Extracting base tables from schema '{}'...", targetSchema);
+
         String sql = """
             SELECT t.name AS table_name, c.name AS column_name, ty.name AS data_type,
                    c.max_length, c.precision, c.scale, c.collation_name,
                    c.is_nullable, c.is_identity, c.is_sparse,
-                   CONVERT(bigint, ic.seed_value)      AS identity_seed,
-                   CONVERT(bigint, ic.increment_value) AS identity_increment,
                    CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END AS is_pk,
-                   dc.definition  AS default_definition,
-                   cc.definition  AS computed_definition,
-                   cc.is_persisted AS computed_persisted,
                    c.column_id AS ordinal
             FROM sys.tables t
             JOIN sys.schemas s ON t.schema_id = s.schema_id
             JOIN sys.columns c ON c.object_id = t.object_id
             JOIN sys.types ty ON c.user_type_id = ty.user_type_id
-            LEFT JOIN sys.identity_columns ic
-                ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-            LEFT JOIN sys.default_constraints dc
-                ON dc.object_id = c.default_object_id
-            LEFT JOIN sys.computed_columns cc
-                ON cc.object_id = c.object_id AND cc.column_id = c.column_id
             LEFT JOIN (
                 SELECT pic.object_id, pic.column_id
                 FROM sys.index_columns pic
@@ -103,12 +102,12 @@ public class SchemaExtractService {
                     rs.getString("collation_name"),
                     rs.getBoolean("is_nullable"),
                     rs.getBoolean("is_identity"),
-                    nullableLong(rs, "identity_seed"),
-                    nullableLong(rs, "identity_increment"),
+                    null,                          // identitySeed — enrichTables
+                    null,                          // identityIncrement — enrichTables
                     rs.getBoolean("is_pk"),
-                    rs.getString("default_definition"),
-                    rs.getString("computed_definition"),
-                    rs.getBoolean("computed_persisted"),
+                    null,                          // defaultExpression — enrichTables
+                    null,                          // computedExpression — enrichTables
+                    false,                         // computedPersisted — enrichTables
                     rs.getBoolean("is_sparse"),
                     rs.getInt("ordinal")
                 ));
@@ -119,9 +118,148 @@ public class SchemaExtractService {
             result.put(name, new TableInfo(name, targetSchema, cols))
         );
 
-        log.info("Extracted {} tables, {} columns", result.size(),
+        log.info("Extracted {} base tables, {} columns", result.size(),
             result.values().stream().mapToInt(t -> t.columns().size()).sum());
         return result;
+    }
+
+    /**
+     * P1 (handoff §5 — Codex 019e3317): the non-fatal B1-1 enrichment layer.
+     * Identity seed/increment, default expressions and computed expressions
+     * each come from a separate {@code sys.*} query in its own try-catch —
+     * one surface failing (timeout / permission) must not drop the others,
+     * and total enrichment failure degrades to base columns rather than
+     * collapsing the snapshot. Merge key is table name + column name, unique
+     * within a single schema; a key absent from {@code base} is a no-op.
+     */
+    Map<String, TableInfo> enrichTables(String schema, Map<String, TableInfo> base) {
+        String targetSchema = schema != null ? schema : defaultSchema;
+
+        Map<String, IdentityEnrich> identity = Map.of();
+        try {
+            identity = extractIdentityEnrichment(targetSchema);
+        } catch (Exception e) {
+            log.warn("Column identity enrichment failed for schema '{}': {}",
+                targetSchema, e.getMessage());
+        }
+        Map<String, String> defaults = Map.of();
+        try {
+            defaults = extractDefaultEnrichment(targetSchema);
+        } catch (Exception e) {
+            log.warn("Column default enrichment failed for schema '{}': {}",
+                targetSchema, e.getMessage());
+        }
+        Map<String, ComputedEnrich> computed = Map.of();
+        try {
+            computed = extractComputedEnrichment(targetSchema);
+        } catch (Exception e) {
+            log.warn("Column computed enrichment failed for schema '{}': {}",
+                targetSchema, e.getMessage());
+        }
+        log.info("Column enrichment for schema '{}': {} identity, {} default, {} computed",
+            targetSchema, identity.size(), defaults.size(), computed.size());
+
+        if (identity.isEmpty() && defaults.isEmpty() && computed.isEmpty()) {
+            return base;   // nothing extracted — base columns already correct
+        }
+
+        Map<String, IdentityEnrich> idMap = identity;
+        Map<String, String> defMap = defaults;
+        Map<String, ComputedEnrich> compMap = computed;
+        Map<String, TableInfo> enriched = new LinkedHashMap<>();
+        base.forEach((tableName, table) -> {
+            List<ColumnInfo> cols = table.columns().stream()
+                .map(c -> {
+                    String key = enrichKey(tableName, c.name());
+                    IdentityEnrich id = idMap.get(key);
+                    ComputedEnrich cmp = compMap.get(key);
+                    if (id == null && cmp == null && !defMap.containsKey(key)) {
+                        return c;   // no enrichment row for this column — keep base
+                    }
+                    return new ColumnInfo(
+                        c.name(), c.dataType(), c.maxLength(), c.precision(), c.scale(),
+                        c.collation(), c.nullable(), c.identity(),
+                        id != null ? id.seed() : null,
+                        id != null ? id.increment() : null,
+                        c.pk(),
+                        defMap.get(key),
+                        cmp != null ? cmp.definition() : null,
+                        cmp != null && cmp.persisted(),
+                        c.sparse(), c.ordinal());
+                })
+                .toList();
+            enriched.put(tableName, new TableInfo(tableName, table.schema(), cols));
+        });
+        return enriched;
+    }
+
+    private static String enrichKey(String table, String column) {
+        // NUL separator: MSSQL identifiers cannot contain U+0000, so the
+        // (table, column) pair always maps to a collision-free String key.
+        return table + '\u0000' + column;
+    }
+
+    /** Identity seed/increment enrichment pair (P1). */
+    private record IdentityEnrich(Long seed, Long increment) {}
+
+    /** Computed-column expression + persisted-flag enrichment pair (P1). */
+    private record ComputedEnrich(String definition, boolean persisted) {}
+
+    private Map<String, IdentityEnrich> extractIdentityEnrichment(String schema) {
+        String sql = """
+            SELECT t.name AS table_name, ic.name AS column_name,
+                   CONVERT(bigint, ic.seed_value)      AS identity_seed,
+                   CONVERT(bigint, ic.increment_value) AS identity_increment
+            FROM sys.identity_columns ic
+            JOIN sys.tables t  ON t.object_id = ic.object_id
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE s.name = :schema
+            """;
+        Map<String, IdentityEnrich> map = new HashMap<>();
+        jdbc.query(sql, Map.of("schema", schema), rs -> {
+            map.put(enrichKey(rs.getString("table_name"), rs.getString("column_name")),
+                new IdentityEnrich(nullableLong(rs, "identity_seed"),
+                                   nullableLong(rs, "identity_increment")));
+        });
+        return map;
+    }
+
+    private Map<String, String> extractDefaultEnrichment(String schema) {
+        String sql = """
+            SELECT t.name AS table_name, c.name AS column_name,
+                   dc.definition AS default_definition
+            FROM sys.default_constraints dc
+            JOIN sys.columns c ON c.object_id = dc.parent_object_id
+                              AND c.column_id = dc.parent_column_id
+            JOIN sys.tables t  ON t.object_id = dc.parent_object_id
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE s.name = :schema
+            """;
+        Map<String, String> map = new HashMap<>();
+        jdbc.query(sql, Map.of("schema", schema), rs -> {
+            map.put(enrichKey(rs.getString("table_name"), rs.getString("column_name")),
+                rs.getString("default_definition"));
+        });
+        return map;
+    }
+
+    private Map<String, ComputedEnrich> extractComputedEnrichment(String schema) {
+        String sql = """
+            SELECT t.name AS table_name, cc.name AS column_name,
+                   cc.definition AS computed_definition,
+                   cc.is_persisted AS computed_persisted
+            FROM sys.computed_columns cc
+            JOIN sys.tables t  ON t.object_id = cc.object_id
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE s.name = :schema
+            """;
+        Map<String, ComputedEnrich> map = new HashMap<>();
+        jdbc.query(sql, Map.of("schema", schema), rs -> {
+            map.put(enrichKey(rs.getString("table_name"), rs.getString("column_name")),
+                new ComputedEnrich(rs.getString("computed_definition"),
+                                   rs.getBoolean("computed_persisted")));
+        });
+        return map;
     }
 
     /**
