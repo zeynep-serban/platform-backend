@@ -1,5 +1,6 @@
 package com.example.schema.service;
 
+import com.example.schema.model.ChangeDataInfo;
 import com.example.schema.model.CheckConstraintInfo;
 import com.example.schema.model.ColumnInfo;
 import com.example.schema.model.DefaultConstraintInfo;
@@ -631,6 +632,98 @@ public class SchemaExtractService {
         return result;
     }
 
+    /**
+     * Phase B1-7 (capability M13 — Codex 019e32aa, ADR-0020 §2.3): authoritative
+     * per-table change-data feature inventory — Change Data Capture, Change
+     * Tracking, system-versioned temporal tables and replication. Only tables
+     * bearing at least one feature are returned (a filtered, sparse inventory);
+     * an empty result from a successful run means the schema uses none.
+     *
+     * <p>Two queries: the base read (CDC / Change Tracking / replication) uses
+     * only SQL Server 2008+ catalog columns; the temporal enrichment
+     * ({@code temporal_type_desc} / {@code history_table_id}) is 2016+ and runs
+     * in its own try/catch, so a pre-2016 engine still yields CDC / Change
+     * Tracking / replication results instead of collapsing all of M13.
+     */
+    @Cacheable(value = "changeData", key = "#schema")
+    public List<ChangeDataInfo> extractChangeData(String schema) {
+        String targetSchema = schema != null ? schema : defaultSchema;
+
+        // Base — CDC / Change Tracking / replication (SQL Server 2008+ catalog).
+        String baseSql = """
+            SELECT t.name AS table_name, sch.name AS schema_name,
+                   t.is_tracked_by_cdc AS cdc_enabled,
+                   t.is_replicated, t.is_merge_published,
+                   t.has_replication_filter, t.is_sync_tran_subscribed,
+                   CASE WHEN ctt.object_id IS NOT NULL THEN 1 ELSE 0 END AS ct_enabled,
+                   ctt.is_track_columns_updated_on,
+                   ctt.min_valid_version, ctt.begin_version, ctt.cleanup_version
+            FROM sys.tables t
+            JOIN sys.schemas sch ON sch.schema_id = t.schema_id
+            LEFT JOIN sys.change_tracking_tables ctt ON ctt.object_id = t.object_id
+            WHERE sch.name = :schema
+            ORDER BY t.name
+            """;
+
+        Map<String, ChangeDataAccumulator> acc = new LinkedHashMap<>();
+        jdbc.query(baseSql, Map.of("schema", targetSchema), rs -> {
+            String table = rs.getString("table_name");
+            ChangeDataAccumulator a = new ChangeDataAccumulator(table, rs.getString("schema_name"));
+            a.cdcEnabled = rs.getBoolean("cdc_enabled");
+            a.changeTrackingEnabled = rs.getBoolean("ct_enabled");
+            a.trackColumnsUpdated = rs.getBoolean("is_track_columns_updated_on");
+            a.ctMinValidVersion = nullableLong(rs, "min_valid_version");
+            a.ctBeginVersion = nullableLong(rs, "begin_version");
+            a.ctCleanupVersion = nullableLong(rs, "cleanup_version");
+            a.transactionalReplicationEnabled = rs.getBoolean("is_replicated");
+            a.mergePublished = rs.getBoolean("is_merge_published");
+            a.replicationFilterEnabled = rs.getBoolean("has_replication_filter");
+            a.syncTranSubscribed = rs.getBoolean("is_sync_tran_subscribed");
+            acc.put(table, a);
+        });
+
+        // Temporal enrichment — SQL Server 2016+ only. Isolated so a pre-2016
+        // "Invalid column name" failure preserves the base results above.
+        try {
+            String temporalSql = """
+                SELECT t.name AS table_name,
+                       t.temporal_type_desc AS temporal_type,
+                       hsch.name AS history_schema, ht.name AS history_table
+                FROM sys.tables t
+                JOIN sys.schemas sch ON sch.schema_id = t.schema_id
+                LEFT JOIN sys.tables ht ON ht.object_id = t.history_table_id
+                LEFT JOIN sys.schemas hsch ON hsch.schema_id = ht.schema_id
+                WHERE sch.name = :schema
+                """;
+            jdbc.query(temporalSql, Map.of("schema", targetSchema), rs -> {
+                ChangeDataAccumulator a = acc.get(rs.getString("table_name"));
+                if (a != null) {
+                    a.temporalType = rs.getString("temporal_type");
+                    a.historySchema = rs.getString("history_schema");
+                    a.historyTable = rs.getString("history_table");
+                }
+            });
+        } catch (Exception e) {
+            log.warn("Temporal enrichment failed (SQL Server < 2016?) — CDC / "
+                + "Change Tracking / replication preserved: {}", e.getMessage());
+        }
+
+        List<ChangeDataInfo> result = new ArrayList<>();
+        acc.values().forEach(a -> {
+            if (a.isFeatureBearing()) {
+                result.add(new ChangeDataInfo(
+                    a.table, a.schema, a.cdcEnabled, a.changeTrackingEnabled,
+                    a.trackColumnsUpdated, a.ctMinValidVersion, a.ctBeginVersion,
+                    a.ctCleanupVersion, a.temporalType, a.historySchema, a.historyTable,
+                    a.transactionalReplicationEnabled, a.mergePublished,
+                    a.replicationFilterEnabled, a.syncTranSubscribed));
+            }
+        });
+        log.info("Extracted {} change-data feature tables from schema '{}' ({} scanned)",
+            result.size(), targetSchema, acc.size());
+        return result;
+    }
+
     /** Mutable accumulator — groups multi-column FK rows by constraint name. */
     private static final class FkAccumulator {
         final String name;
@@ -735,6 +828,37 @@ public class SchemaExtractService {
             this.owner = owner;
             this.createDate = createDate;
             this.modifyDate = modifyDate;
+        }
+    }
+
+    /** Mutable accumulator — one change-data feature row, base + temporal merge. */
+    private static final class ChangeDataAccumulator {
+        final String table;
+        final String schema;
+        boolean cdcEnabled;
+        boolean changeTrackingEnabled;
+        boolean trackColumnsUpdated;
+        Long ctMinValidVersion;
+        Long ctBeginVersion;
+        Long ctCleanupVersion;
+        String temporalType = "NON_TEMPORAL_TABLE";
+        String historySchema;
+        String historyTable;
+        boolean transactionalReplicationEnabled;
+        boolean mergePublished;
+        boolean replicationFilterEnabled;
+        boolean syncTranSubscribed;
+
+        ChangeDataAccumulator(String table, String schema) {
+            this.table = table;
+            this.schema = schema;
+        }
+
+        boolean isFeatureBearing() {
+            return cdcEnabled || changeTrackingEnabled
+                || !"NON_TEMPORAL_TABLE".equals(temporalType)
+                || transactionalReplicationEnabled || mergePublished
+                || replicationFilterEnabled || syncTranSubscribed;
         }
     }
 }

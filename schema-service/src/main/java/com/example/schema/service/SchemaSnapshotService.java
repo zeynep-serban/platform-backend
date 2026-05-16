@@ -1,5 +1,6 @@
 package com.example.schema.service;
 
+import com.example.schema.model.ChangeDataInfo;
 import com.example.schema.model.CheckConstraintInfo;
 import com.example.schema.model.DefaultConstraintInfo;
 import com.example.schema.model.ForeignKeyInfo;
@@ -103,6 +104,15 @@ public class SchemaSnapshotService {
         } catch (Exception e) {
             log.warn("Storage extraction failed: {}", e.getMessage());
         }
+        // Authoritative change-data feature inventory (B1-7 — M13): CDC /
+        // Change Tracking / temporal / replication. Non-fatal — a failed read
+        // yields an empty inventory (degraded, not "no features").
+        List<ChangeDataInfo> changeData = List.of();
+        try {
+            changeData = extractService.extractChangeData(schema);
+        } catch (Exception e) {
+            log.warn("Change-data extraction failed: {}", e.getMessage());
+        }
 
         // 3. Discover relationships (heuristic + authoritative FK compat layer)
         List<Relationship> relationships = discoveryService.discoverAll(tables, viewDefs, foreignKeys);
@@ -167,6 +177,7 @@ public class SchemaSnapshotService {
             .indexes(indexes)
             .objects(objects)
             .storage(storage)
+            .changeData(changeData)
             .domains(domains)
             .analysis(new SchemaSnapshot.Analysis(deadTables, hubTables))
             .build();

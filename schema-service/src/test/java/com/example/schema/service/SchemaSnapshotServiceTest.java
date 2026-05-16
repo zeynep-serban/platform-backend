@@ -17,10 +17,10 @@ import org.junit.jupiter.api.Test;
  * Phase B1-5 (capability M1 — Codex 019e3270): {@code SchemaSnapshotService}
  * integration guard for the B1 authoritative inventories. Each {@code sys.*}
  * extraction is wrapped in a non-fatal try/catch — a failing read must NOT
- * break the snapshot. This pins that contract for {@code extractObjects} and
- * {@code extractStorage}: a failed extraction → empty inventory + snapshot
- * still built; success → the inventory is carried through. Other collaborators
- * are left as Mockito defaults (empty collections).
+ * break the snapshot. This pins that contract for {@code extractObjects},
+ * {@code extractStorage} and {@code extractChangeData}: a failed extraction →
+ * empty inventory + snapshot still built; success → the inventory is carried
+ * through. Other collaborators are left as Mockito defaults (empty collections).
  */
 class SchemaSnapshotServiceTest {
 
@@ -65,5 +65,16 @@ class SchemaSnapshotServiceTest {
 
         assertThat(snap).isNotNull();
         assertThat(snap.storage()).isEmpty();
+    }
+
+    @Test
+    void extractChangeDataThrows_snapshotStillBuilt_changeDataEmpty() {
+        when(extract.extractChangeData(anyString()))
+                .thenThrow(new RuntimeException("sys.change_tracking_tables unavailable"));
+
+        SchemaSnapshot snap = service.buildSnapshot("workcube_mikrolink");
+
+        assertThat(snap).isNotNull();
+        assertThat(snap.changeData()).isEmpty();
     }
 }

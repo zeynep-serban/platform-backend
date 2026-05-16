@@ -80,11 +80,11 @@ class SchemaSnapshotColumnMirrorTest {
 
     @Test
     void b1TopLevelInventoryFields_ignoredByMirror() throws Exception {
-        // schema-service B1-2..B1-6 add top-level `foreignKeys` /
+        // schema-service B1-2..B1-7 add top-level `foreignKeys` /
         // `uniqueConstraints` / `checkConstraints` / `defaultConstraints` /
-        // `indexes` / `objects` / `storage`. The mirror only reads `tables`,
-        // so these new top-level fields must be silently ignored — no mirror
-        // code change required (@JsonIgnoreProperties(ignoreUnknown=true)).
+        // `indexes` / `objects` / `storage` / `changeData`. The mirror only
+        // reads `tables`, so these new top-level fields must be silently
+        // ignored — no mirror code change required (@JsonIgnoreProperties).
         String json = """
             {"version":"1.1",
              "tables":{"ORDERS":{"name":"ORDERS","schema":"workcube_mikrolink",
@@ -115,6 +115,13 @@ class SchemaSnapshotColumnMirrorTest {
              "storage":[{"table":"ORDERS","schema":"dbo","rowCount":9000,
                "reservedKb":2048,"usedKb":1900,"dataKb":1500,"indexKb":300,
                "lobKb":80,"rowOverflowKb":20}],
+             "changeData":[{"table":"EMPLOYEE","schema":"dbo","cdcEnabled":false,
+               "changeTrackingEnabled":true,"trackColumnsUpdated":false,
+               "ctMinValidVersion":900,"ctBeginVersion":100,"ctCleanupVersion":80,
+               "temporalType":"NON_TEMPORAL_TABLE","historySchema":null,
+               "historyTable":null,"transactionalReplicationEnabled":false,
+               "mergePublished":false,"replicationFilterEnabled":false,
+               "syncTranSubscribed":false}],
              "domains":{}}
             """;
 
