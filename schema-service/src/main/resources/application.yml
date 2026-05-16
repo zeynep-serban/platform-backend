@@ -54,6 +54,12 @@ schema:
   default-schema: ${SCHEMA_DEFAULT_SCHEMA:workcube_mikrolink}
   cache-ttl-minutes: ${SCHEMA_CACHE_TTL:60}
   max-tables: ${SCHEMA_MAX_TABLES:5000}
+  mssql:
+    # MSSQL JDBC query timeout (saniye) — sys.* katalog okumaları için
+    # (extractTables geniş JOIN). Hard-coded 60s büyük şemalarda
+    # (workcube_mikrolink: 1509 tablo) yetersizdi, snapshot'ı 500'lüyordu.
+    # Cluster SCHEMA_MSSQL_QUERY_TIMEOUT_SECONDS env ile override eder.
+    query-timeout-seconds: ${SCHEMA_MSSQL_QUERY_TIMEOUT_SECONDS:60}
   discovery:
     enable-view-parsing: ${SCHEMA_ENABLE_VIEW_PARSE:true}
     enable-sp-parsing: ${SCHEMA_ENABLE_SP_PARSE:false}
