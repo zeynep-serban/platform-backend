@@ -33,8 +33,11 @@ import java.util.List;
  *   <li>Deterministic ordering: tables sorted by {@code (schema, name)},
  *       columns by ordinal. Codex S2 trap: never rely on
  *       {@code Set} iteration order.</li>
- *   <li>{@code dataType → type} mapping happens here, in the projection;
- *       the legacy {@link ColumnInfo} record is untouched (Codex S4).</li>
+ *   <li>{@code dataType → type} mapping happens here, in the projection.
+ *       The {@link ColumnInfo} source record may carry additional
+ *       metadata (B1-1 onwards: precision, scale, defaults, ...), but the
+ *       reporting-contract projection stays a narrow {@code name/type/
+ *       nullable} subset (Codex S4).</li>
  * </ul>
  *
  * <p>Empty-intersection handling: this service returns a snapshot whose

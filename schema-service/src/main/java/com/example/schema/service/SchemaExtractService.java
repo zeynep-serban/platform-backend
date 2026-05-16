@@ -9,6 +9,8 @@ import org.springframework.cache.annotation.Cacheable;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.*;
 
 @Service
@@ -39,19 +41,36 @@ public class SchemaExtractService {
         String targetSchema = schema != null ? schema : defaultSchema;
         log.info("Extracting tables from schema '{}'...", targetSchema);
 
+        // Phase B1-1 (capability M2 — Codex 019e2d7d): column metadata
+        // expansion. precision/scale/collation/sparse from sys.columns;
+        // identity seed/increment from sys.identity_columns; default
+        // expression from sys.default_constraints; computed expression +
+        // persisted flag from sys.computed_columns. All authoritative_mssql.
         String sql = """
             SELECT t.name AS table_name, c.name AS column_name, ty.name AS data_type,
-                   c.max_length, c.is_nullable, c.is_identity,
+                   c.max_length, c.precision, c.scale, c.collation_name,
+                   c.is_nullable, c.is_identity, c.is_sparse,
+                   CONVERT(bigint, ic.seed_value)      AS identity_seed,
+                   CONVERT(bigint, ic.increment_value) AS identity_increment,
                    CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END AS is_pk,
+                   dc.definition  AS default_definition,
+                   cc.definition  AS computed_definition,
+                   cc.is_persisted AS computed_persisted,
                    c.column_id AS ordinal
             FROM sys.tables t
             JOIN sys.schemas s ON t.schema_id = s.schema_id
             JOIN sys.columns c ON c.object_id = t.object_id
             JOIN sys.types ty ON c.user_type_id = ty.user_type_id
+            LEFT JOIN sys.identity_columns ic
+                ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+            LEFT JOIN sys.default_constraints dc
+                ON dc.object_id = c.default_object_id
+            LEFT JOIN sys.computed_columns cc
+                ON cc.object_id = c.object_id AND cc.column_id = c.column_id
             LEFT JOIN (
-                SELECT ic.object_id, ic.column_id
-                FROM sys.index_columns ic
-                JOIN sys.indexes i ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                SELECT pic.object_id, pic.column_id
+                FROM sys.index_columns pic
+                JOIN sys.indexes i ON i.object_id = pic.object_id AND i.index_id = pic.index_id
                 WHERE i.is_primary_key = 1
             ) pk ON pk.object_id = t.object_id AND pk.column_id = c.column_id
             WHERE s.name = :schema
@@ -67,9 +86,18 @@ public class SchemaExtractService {
                     rs.getString("column_name"),
                     rs.getString("data_type"),
                     rs.getInt("max_length"),
+                    rs.getInt("precision"),
+                    rs.getInt("scale"),
+                    rs.getString("collation_name"),
                     rs.getBoolean("is_nullable"),
                     rs.getBoolean("is_identity"),
+                    nullableLong(rs, "identity_seed"),
+                    nullableLong(rs, "identity_increment"),
                     rs.getBoolean("is_pk"),
+                    rs.getString("default_definition"),
+                    rs.getString("computed_definition"),
+                    rs.getBoolean("computed_persisted"),
+                    rs.getBoolean("is_sparse"),
                     rs.getInt("ordinal")
                 ));
         });
@@ -82,6 +110,15 @@ public class SchemaExtractService {
         log.info("Extracted {} tables, {} columns", result.size(),
             result.values().stream().mapToInt(t -> t.columns().size()).sum());
         return result;
+    }
+
+    /**
+     * Reads a nullable BIGINT column, distinguishing a real SQL NULL
+     * (no identity → null seed/increment) from a genuine 0.
+     */
+    private static Long nullableLong(ResultSet rs, String column) throws SQLException {
+        long value = rs.getLong(column);
+        return rs.wasNull() ? null : value;
     }
 
     @Cacheable(value = "rowCounts", key = "#schema")
