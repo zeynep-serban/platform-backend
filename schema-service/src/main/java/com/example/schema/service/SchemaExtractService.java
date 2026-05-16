@@ -5,6 +5,7 @@ import com.example.schema.model.ColumnInfo;
 import com.example.schema.model.DefaultConstraintInfo;
 import com.example.schema.model.ForeignKeyInfo;
 import com.example.schema.model.IndexInfo;
+import com.example.schema.model.ObjectInfo;
 import com.example.schema.model.TableInfo;
 import com.example.schema.model.UniqueConstraintInfo;
 import com.example.schema.model.UniqueConstraintType;
@@ -17,6 +18,8 @@ import org.springframework.stereotype.Service;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.LocalDateTime;
 import java.util.*;
 
 @Service
@@ -495,6 +498,82 @@ public class SchemaExtractService {
         return result;
     }
 
+    /**
+     * Phase B1-5 (capability M1 — Codex 019e3270, ADR-0020 §2.3): authoritative
+     * object catalog from {@code sys.objects} + {@code sys.extended_properties}.
+     * Covers user tables / views / procedures / functions / triggers / synonyms
+     * ({@code is_ms_shipped = 0}) — metadata only; programmability bodies are
+     * capability M8 (B2). The object owner falls back to the schema owner when
+     * {@code sys.objects.principal_id} is null (the common case). ALL
+     * object-level extended properties are collected (key-sorted for a
+     * deterministic snapshot; a {@code NULL} property value is preserved),
+     * not only {@code MS_Description}.
+     */
+    @Cacheable(value = "objects", key = "#schema")
+    public List<ObjectInfo> extractObjects(String schema) {
+        String targetSchema = schema != null ? schema : defaultSchema;
+        String sql = """
+            SELECT o.name AS object_name, sch.name AS schema_name,
+                   o.type_desc AS object_type, o.object_id,
+                   o.create_date, o.modify_date,
+                   prin.name AS owner_name,
+                   ep.name AS ep_name,
+                   CAST(ep.value AS NVARCHAR(MAX)) AS ep_value
+            FROM sys.objects o
+            JOIN sys.schemas sch ON sch.schema_id = o.schema_id
+            LEFT JOIN sys.database_principals prin
+                ON prin.principal_id = COALESCE(o.principal_id, sch.principal_id)
+            LEFT JOIN sys.extended_properties ep
+                ON ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0
+            WHERE sch.name = :schema
+              AND o.is_ms_shipped = 0
+              AND o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'TR', 'SN')
+            ORDER BY sch.name, o.name
+            """;
+
+        Map<String, ObjectAccumulator> acc = new LinkedHashMap<>();
+        jdbc.query(sql, Map.of("schema", targetSchema), rs -> {
+            // Read every column up-front: the computeIfAbsent mapping
+            // function is a plain Function and cannot throw SQLException.
+            String objectName = rs.getString("object_name");
+            String schemaName = rs.getString("schema_name");
+            String objectType = rs.getString("object_type");
+            int objectId = rs.getInt("object_id");
+            LocalDateTime createDate = toLocalDateTime(rs, "create_date");
+            LocalDateTime modifyDate = toLocalDateTime(rs, "modify_date");
+            String owner = rs.getString("owner_name");
+            String epName = rs.getString("ep_name");
+            String epValue = rs.getString("ep_value");
+            ObjectAccumulator a = acc.computeIfAbsent(
+                schemaName + "." + objectName,
+                k -> new ObjectAccumulator(objectName, schemaName, objectType,
+                    objectId, owner, createDate, modifyDate));
+            // LEFT JOIN → ep_name is null when the object has no extended
+            // property; only real rows are collected.
+            if (epName != null) {
+                a.extendedProperties.put(epName, epValue);
+            }
+        });
+
+        List<ObjectInfo> result = new ArrayList<>();
+        acc.values().forEach(a -> result.add(new ObjectInfo(
+            a.name, a.schema, a.objectType, a.objectId, a.owner,
+            a.createDate, a.modifyDate,
+            // Unmodifiable TreeMap: deterministic key order for stable
+            // snapshot artifacts, and tolerates a null extended-property
+            // value (sql_variant NULL) — Map.copyOf would reject it and
+            // collapse the whole object inventory via the non-fatal catch.
+            Collections.unmodifiableMap(new TreeMap<>(a.extendedProperties)))));
+        log.info("Extracted {} objects from schema '{}'", result.size(), targetSchema);
+        return result;
+    }
+
+    /** Reads a SQL Server {@code datetime} as a timezone-free {@link LocalDateTime}. */
+    private static LocalDateTime toLocalDateTime(ResultSet rs, String column) throws SQLException {
+        Timestamp ts = rs.getTimestamp(column);
+        return ts != null ? ts.toLocalDateTime() : null;
+    }
+
     /** Mutable accumulator — groups multi-column FK rows by constraint name. */
     private static final class FkAccumulator {
         final String name;
@@ -576,6 +655,29 @@ public class SchemaExtractService {
             this.fillFactor = fillFactor;
             this.isDisabled = isDisabled;
             this.isHypothetical = isHypothetical;
+        }
+    }
+
+    /** Mutable accumulator — collects an object's extended-property rows. */
+    private static final class ObjectAccumulator {
+        final String name;
+        final String schema;
+        final String objectType;
+        final Integer objectId;
+        final String owner;
+        final LocalDateTime createDate;
+        final LocalDateTime modifyDate;
+        final Map<String, String> extendedProperties = new LinkedHashMap<>();
+
+        ObjectAccumulator(String name, String schema, String objectType, Integer objectId,
+                          String owner, LocalDateTime createDate, LocalDateTime modifyDate) {
+            this.name = name;
+            this.schema = schema;
+            this.objectType = objectType;
+            this.objectId = objectId;
+            this.owner = owner;
+            this.createDate = createDate;
+            this.modifyDate = modifyDate;
         }
     }
 }
