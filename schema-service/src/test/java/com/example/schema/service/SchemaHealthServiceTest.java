@@ -37,10 +37,14 @@ class SchemaHealthServiceTest {
             new Relationship("ORDERS", "USER_ID", "USERS", "USER_ID", 0.95, "common_fk")
         );
 
-        var snapshot = new SchemaSnapshot("1.0",
-            new SchemaSnapshot.Metadata("mssql", "", "", "dbo", Instant.now(), 2, 4, 1, 1),
-            tables, rels, Map.of("MAIN", List.of("USERS", "ORDERS")),
-            new SchemaSnapshot.Analysis(List.of(), List.of()));
+        var snapshot = SchemaSnapshot.builder()
+            .version("1.0")
+            .metadata(new SchemaSnapshot.Metadata("mssql", "", "", "dbo", Instant.now(), 2, 4, 1, 1))
+            .tables(tables)
+            .relationships(rels)
+            .domains(Map.of("MAIN", List.of("USERS", "ORDERS")))
+            .analysis(new SchemaSnapshot.Analysis(List.of(), List.of()))
+            .build();
 
         HealthReport report = service.evaluate(snapshot);
         assertTrue(report.score() > 50, "Healthy schema should score > 50, got " + report.score());
@@ -58,10 +62,13 @@ class SchemaHealthServiceTest {
             ))
         );
 
-        var snapshot = new SchemaSnapshot("1.0",
-            new SchemaSnapshot.Metadata("mssql", "", "", "dbo", Instant.now(), 2, 2, 0, 1),
-            tables, List.of(), Map.of("MAIN", List.of("ORPHAN1", "ORPHAN2")),
-            new SchemaSnapshot.Analysis(List.of(), List.of()));
+        var snapshot = SchemaSnapshot.builder()
+            .version("1.0")
+            .metadata(new SchemaSnapshot.Metadata("mssql", "", "", "dbo", Instant.now(), 2, 2, 0, 1))
+            .tables(tables)
+            .domains(Map.of("MAIN", List.of("ORPHAN1", "ORPHAN2")))
+            .analysis(new SchemaSnapshot.Analysis(List.of(), List.of()))
+            .build();
 
         HealthReport report = service.evaluate(snapshot);
         assertTrue(report.totalIssues() >= 2, "Should have orphan issues");
@@ -76,9 +83,12 @@ class SchemaHealthServiceTest {
             ))
         );
 
-        var snapshot = new SchemaSnapshot("1.0",
-            new SchemaSnapshot.Metadata("mssql", "", "", "dbo", Instant.now(), 1, 1, 0, 1),
-            tables, List.of(), Map.of(), new SchemaSnapshot.Analysis(List.of(), List.of()));
+        var snapshot = SchemaSnapshot.builder()
+            .version("1.0")
+            .metadata(new SchemaSnapshot.Metadata("mssql", "", "", "dbo", Instant.now(), 1, 1, 0, 1))
+            .tables(tables)
+            .analysis(new SchemaSnapshot.Analysis(List.of(), List.of()))
+            .build();
 
         HealthReport report = service.evaluate(snapshot);
         assertTrue(report.issues().stream().anyMatch(i -> i.rule().equals("temp_table")));

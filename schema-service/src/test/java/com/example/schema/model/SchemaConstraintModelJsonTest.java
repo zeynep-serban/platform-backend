@@ -17,8 +17,8 @@ import org.junit.jupiter.api.Test;
  *       round-trip incl. composite column order;</li>
  *   <li>derived {@code isComposite()} / {@code isFiltered()} stay out of
  *       the JSON ({@code @JsonIgnore});</li>
- *   <li>{@link SchemaSnapshot} legacy 6-arg constructor → empty inventory;</li>
- *   <li>8-arg snapshot serializes the inventory additively.</li>
+ *   <li>{@link SchemaSnapshot.Builder} defaults → empty inventory;</li>
+ *   <li>a builder-set snapshot serializes the inventory additively.</li>
  * </ul>
  */
 class SchemaConstraintModelJsonTest {
@@ -60,12 +60,12 @@ class SchemaConstraintModelJsonTest {
     }
 
     @Test
-    void schemaSnapshot_legacyConstructor_yieldsEmptyInventories() {
-        SchemaSnapshot snap = new SchemaSnapshot(
-                "1.0",
-                new SchemaSnapshot.Metadata("mssql", "", "", "s", Instant.now(), 0, 0, 0, 0),
-                Map.of(), List.of(), Map.of(),
-                new SchemaSnapshot.Analysis(List.of(), List.of()));
+    void schemaSnapshot_builderDefaults_yieldEmptyInventories() {
+        SchemaSnapshot snap = SchemaSnapshot.builder()
+                .version("1.0")
+                .metadata(new SchemaSnapshot.Metadata("mssql", "", "", "s", Instant.now(), 0, 0, 0, 0))
+                .analysis(new SchemaSnapshot.Analysis(List.of(), List.of()))
+                .build();
 
         assertThat(snap.foreignKeys()).isEmpty();
         assertThat(snap.uniqueConstraints()).isEmpty();
@@ -83,11 +83,13 @@ class SchemaConstraintModelJsonTest {
         UniqueConstraintInfo uc = new UniqueConstraintInfo(
                 "UQ_1", "dbo", "COMPANY", List.of("CODE"),
                 UniqueConstraintType.UNIQUE_CONSTRAINT, null);
-        SchemaSnapshot snap = new SchemaSnapshot(
-                "1.1",
-                new SchemaSnapshot.Metadata("mssql", "", "", "s", Instant.now(), 0, 0, 0, 0),
-                Map.of(), List.of(), List.of(fk), List.of(uc), Map.of(),
-                new SchemaSnapshot.Analysis(List.of(), List.of()));
+        SchemaSnapshot snap = SchemaSnapshot.builder()
+                .version("1.1")
+                .metadata(new SchemaSnapshot.Metadata("mssql", "", "", "s", Instant.now(), 0, 0, 0, 0))
+                .foreignKeys(List.of(fk))
+                .uniqueConstraints(List.of(uc))
+                .analysis(new SchemaSnapshot.Analysis(List.of(), List.of()))
+                .build();
 
         String json = mapper.writeValueAsString(snap);
         assertThat(json).contains("\"foreignKeys\"").contains("\"uniqueConstraints\"");
@@ -137,12 +139,13 @@ class SchemaConstraintModelJsonTest {
                 "CK_AMOUNT", "dbo", "INVOICE", "AMOUNT", "([AMOUNT]>=(0))", false, false);
         DefaultConstraintInfo dc = new DefaultConstraintInfo(
                 "DF_STATUS", "dbo", "INVOICE", "STATUS", "((1))");
-        SchemaSnapshot snap = new SchemaSnapshot(
-                "1.1",
-                new SchemaSnapshot.Metadata("mssql", "", "", "s", Instant.now(), 0, 0, 0, 0),
-                Map.of(), List.of(), List.of(), List.of(),
-                List.of(cc), List.of(dc), Map.of(),
-                new SchemaSnapshot.Analysis(List.of(), List.of()));
+        SchemaSnapshot snap = SchemaSnapshot.builder()
+                .version("1.1")
+                .metadata(new SchemaSnapshot.Metadata("mssql", "", "", "s", Instant.now(), 0, 0, 0, 0))
+                .checkConstraints(List.of(cc))
+                .defaultConstraints(List.of(dc))
+                .analysis(new SchemaSnapshot.Analysis(List.of(), List.of()))
+                .build();
 
         String json = mapper.writeValueAsString(snap);
         assertThat(json).contains("\"checkConstraints\"").contains("\"defaultConstraints\"");

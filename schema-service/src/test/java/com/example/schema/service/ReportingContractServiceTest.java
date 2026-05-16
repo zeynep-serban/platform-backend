@@ -38,15 +38,14 @@ class ReportingContractServiceTest {
     }
 
     private static SchemaSnapshot snapshotOf(Map<String, TableInfo> tables) {
-        return new SchemaSnapshot(
-            "1.0",
-            new SchemaSnapshot.Metadata("mssql", "h", "d", "s", Instant.now(),
-                tables.size(), 0, 0, 0),
-            tables,
-            List.<Relationship>of(),
-            Map.of(),
-            new SchemaSnapshot.Analysis(List.of(), List.of())
-        );
+        return SchemaSnapshot.builder()
+            .version("1.0")
+            .metadata(new SchemaSnapshot.Metadata("mssql", "h", "d", "s", Instant.now(),
+                tables.size(), 0, 0, 0))
+            .tables(tables)
+            .relationships(List.<Relationship>of())
+            .analysis(new SchemaSnapshot.Analysis(List.of(), List.of()))
+            .build();
     }
 
     private ReportingContractService serviceReturning(Map<String, TableInfo> tables) {

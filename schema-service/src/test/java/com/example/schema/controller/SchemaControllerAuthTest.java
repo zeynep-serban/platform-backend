@@ -40,14 +40,15 @@ class SchemaControllerAuthTest {
     @BeforeEach
     void setUp() {
         snapshotService = mock(SchemaSnapshotService.class);
-        SchemaSnapshot fakeSnapshot = new SchemaSnapshot(
-                "v1",
-                new SchemaSnapshot.Metadata("mssql", "host", "db", "schema",
-                        Instant.now(), 0, 0, 0, 0),
-                Map.of(),
-                List.of(),
-                Map.of(),
-                new SchemaSnapshot.Analysis(List.of(), List.of()));
+        SchemaSnapshot fakeSnapshot = SchemaSnapshot.builder()
+                .version("v1")
+                .metadata(new SchemaSnapshot.Metadata("mssql", "host", "db", "schema",
+                        Instant.now(), 0, 0, 0, 0))
+                .tables(Map.of())
+                .relationships(List.of())
+                .domains(Map.of())
+                .analysis(new SchemaSnapshot.Analysis(List.of(), List.of()))
+                .build();
         when(snapshotService.buildSnapshot(org.mockito.ArgumentMatchers.anyString()))
                 .thenReturn(fakeSnapshot);
 
