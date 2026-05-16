@@ -77,4 +77,31 @@ class SchemaSnapshotColumnMirrorTest {
         assertThat(mirror.dataType()).isEqualTo("nvarchar");
         assertThat(mirror.nullable()).isTrue();
     }
+
+    @Test
+    void b1_2TopLevelInventoryFields_ignoredByMirror() throws Exception {
+        // schema-service B1-2 adds top-level `foreignKeys` /
+        // `uniqueConstraints`. The mirror only reads `tables`, so these
+        // new top-level fields must be silently ignored — no mirror
+        // code change required (@JsonIgnoreProperties(ignoreUnknown=true)).
+        String json = """
+            {"version":"1.1",
+             "tables":{"ORDERS":{"name":"ORDERS","schema":"workcube_mikrolink",
+               "columns":[{"name":"ID","dataType":"int","maxLength":4,
+                "nullable":false,"identity":true,"pk":true,"ordinal":1}]}},
+             "relationships":[],
+             "foreignKeys":[{"name":"FK_1","fromSchema":"dbo","fromTable":"ORDERS",
+               "fromColumns":["COMPANY_ID"],"toSchema":"dbo","toTable":"COMPANY",
+               "toColumns":["ID"],"isDisabled":false,"isNotTrusted":false,
+               "deleteAction":"NO_ACTION","updateAction":"NO_ACTION"}],
+             "uniqueConstraints":[{"name":"UQ_1","schema":"dbo","table":"COMPANY",
+               "columns":["CODE"],"constraintType":"UNIQUE_INDEX","filterDefinition":null}],
+             "domains":{}}
+            """;
+
+        SchemaSnapshot snap = mapper.readValue(json, SchemaSnapshot.class);
+
+        assertThat(snap.tables()).containsKey("ORDERS");
+        assertThat(snap.tables().get("ORDERS").columns()).hasSize(1);
+    }
 }

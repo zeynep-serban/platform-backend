@@ -1,7 +1,10 @@
 package com.example.schema.service;
 
 import com.example.schema.model.ColumnInfo;
+import com.example.schema.model.ForeignKeyInfo;
 import com.example.schema.model.TableInfo;
+import com.example.schema.model.UniqueConstraintInfo;
+import com.example.schema.model.UniqueConstraintType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -212,5 +215,173 @@ public class SchemaExtractService {
         });
         log.info("Found {} schemas matching {} patterns", schemas.size(), patterns.length);
         return schemas;
+    }
+
+    /**
+     * Phase B1-2 (capability R1 — Codex 019e2d7d, ADR-0020 §2.3):
+     * authoritative foreign-key extraction from {@code sys.foreign_keys} +
+     * {@code sys.foreign_key_columns}. A composite FK yields a single
+     * {@link ForeignKeyInfo} with column lists in declared order
+     * ({@code constraint_column_id}).
+     */
+    @Cacheable(value = "foreignKeys", key = "#schema")
+    public List<ForeignKeyInfo> extractForeignKeys(String schema) {
+        String targetSchema = schema != null ? schema : defaultSchema;
+        String sql = """
+            SELECT fk.name AS fk_name,
+                   sch_from.name AS from_schema, t_from.name AS from_table,
+                   c_from.name AS from_column,
+                   sch_to.name AS to_schema, t_to.name AS to_table,
+                   c_to.name AS to_column,
+                   fk.is_disabled, fk.is_not_trusted,
+                   fk.delete_referential_action_desc AS delete_action,
+                   fk.update_referential_action_desc AS update_action
+            FROM sys.foreign_keys fk
+            JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+            JOIN sys.tables t_from ON t_from.object_id = fk.parent_object_id
+            JOIN sys.schemas sch_from ON sch_from.schema_id = t_from.schema_id
+            JOIN sys.columns c_from ON c_from.object_id = fkc.parent_object_id
+                AND c_from.column_id = fkc.parent_column_id
+            JOIN sys.tables t_to ON t_to.object_id = fk.referenced_object_id
+            JOIN sys.schemas sch_to ON sch_to.schema_id = t_to.schema_id
+            JOIN sys.columns c_to ON c_to.object_id = fkc.referenced_object_id
+                AND c_to.column_id = fkc.referenced_column_id
+            WHERE sch_from.name = :schema
+            ORDER BY fk.name, fkc.constraint_column_id
+            """;
+
+        Map<String, FkAccumulator> acc = new LinkedHashMap<>();
+        jdbc.query(sql, Map.of("schema", targetSchema), rs -> {
+            // Read every column up-front: the computeIfAbsent mapping
+            // function is a plain Function and cannot throw SQLException.
+            String fkName = rs.getString("fk_name");
+            String fromSchema = rs.getString("from_schema");
+            String fromTable = rs.getString("from_table");
+            String fromColumn = rs.getString("from_column");
+            String toSchema = rs.getString("to_schema");
+            String toTable = rs.getString("to_table");
+            String toColumn = rs.getString("to_column");
+            boolean disabled = rs.getBoolean("is_disabled");
+            boolean notTrusted = rs.getBoolean("is_not_trusted");
+            String deleteAction = rs.getString("delete_action");
+            String updateAction = rs.getString("update_action");
+            FkAccumulator a = acc.computeIfAbsent(fkName, k -> new FkAccumulator(
+                fkName, fromSchema, fromTable, toSchema, toTable,
+                disabled, notTrusted, deleteAction, updateAction));
+            a.fromColumns.add(fromColumn);
+            a.toColumns.add(toColumn);
+        });
+
+        List<ForeignKeyInfo> result = new ArrayList<>();
+        acc.values().forEach(a -> result.add(new ForeignKeyInfo(
+            a.name, a.fromSchema, a.fromTable, List.copyOf(a.fromColumns),
+            a.toSchema, a.toTable, List.copyOf(a.toColumns),
+            a.isDisabled, a.isNotTrusted, a.deleteAction, a.updateAction)));
+        log.info("Extracted {} foreign keys from schema '{}'", result.size(), targetSchema);
+        return result;
+    }
+
+    /**
+     * Phase B1-2 (capability R2 — Codex 019e2d7d, ADR-0020 §2.3):
+     * authoritative unique-constraint / unique-index extraction from
+     * {@code sys.indexes} ({@code is_unique=1}). Primary-key indexes are
+     * excluded ({@code is_primary_key=0}) — PK is already on
+     * {@link ColumnInfo#pk()}. Included (non-key) columns are skipped.
+     */
+    @Cacheable(value = "uniqueConstraints", key = "#schema")
+    public List<UniqueConstraintInfo> extractUniqueConstraints(String schema) {
+        String targetSchema = schema != null ? schema : defaultSchema;
+        String sql = """
+            SELECT i.name AS index_name,
+                   sch.name AS schema_name, t.name AS table_name,
+                   col.name AS column_name,
+                   i.is_unique_constraint, i.filter_definition
+            FROM sys.indexes i
+            JOIN sys.tables t ON t.object_id = i.object_id
+            JOIN sys.schemas sch ON sch.schema_id = t.schema_id
+            JOIN sys.index_columns ic ON ic.object_id = i.object_id
+                AND ic.index_id = i.index_id
+            JOIN sys.columns col ON col.object_id = ic.object_id
+                AND col.column_id = ic.column_id
+            WHERE sch.name = :schema
+              AND i.is_unique = 1
+              AND i.is_primary_key = 0
+              AND ic.is_included_column = 0
+            ORDER BY t.name, i.name, ic.key_ordinal
+            """;
+
+        Map<String, UqAccumulator> acc = new LinkedHashMap<>();
+        jdbc.query(sql, Map.of("schema", targetSchema), rs -> {
+            // Read every column up-front: the computeIfAbsent mapping
+            // function is a plain Function and cannot throw SQLException.
+            String table = rs.getString("table_name");
+            String indexName = rs.getString("index_name");
+            String schemaName = rs.getString("schema_name");
+            String column = rs.getString("column_name");
+            boolean isUniqueConstraint = rs.getBoolean("is_unique_constraint");
+            String filter = rs.getString("filter_definition");
+            UqAccumulator a = acc.computeIfAbsent(table + "." + indexName, k -> new UqAccumulator(
+                indexName, schemaName, table,
+                isUniqueConstraint
+                    ? UniqueConstraintType.UNIQUE_CONSTRAINT
+                    : UniqueConstraintType.UNIQUE_INDEX,
+                filter));
+            a.columns.add(column);
+        });
+
+        List<UniqueConstraintInfo> result = new ArrayList<>();
+        acc.values().forEach(a -> result.add(new UniqueConstraintInfo(
+            a.name, a.schema, a.table, List.copyOf(a.columns),
+            a.constraintType, a.filterDefinition)));
+        log.info("Extracted {} unique constraints from schema '{}'", result.size(), targetSchema);
+        return result;
+    }
+
+    /** Mutable accumulator — groups multi-column FK rows by constraint name. */
+    private static final class FkAccumulator {
+        final String name;
+        final String fromSchema;
+        final String fromTable;
+        final String toSchema;
+        final String toTable;
+        final boolean isDisabled;
+        final boolean isNotTrusted;
+        final String deleteAction;
+        final String updateAction;
+        final List<String> fromColumns = new ArrayList<>();
+        final List<String> toColumns = new ArrayList<>();
+
+        FkAccumulator(String name, String fromSchema, String fromTable,
+                      String toSchema, String toTable, boolean isDisabled,
+                      boolean isNotTrusted, String deleteAction, String updateAction) {
+            this.name = name;
+            this.fromSchema = fromSchema;
+            this.fromTable = fromTable;
+            this.toSchema = toSchema;
+            this.toTable = toTable;
+            this.isDisabled = isDisabled;
+            this.isNotTrusted = isNotTrusted;
+            this.deleteAction = deleteAction;
+            this.updateAction = updateAction;
+        }
+    }
+
+    /** Mutable accumulator — groups multi-column unique index rows. */
+    private static final class UqAccumulator {
+        final String name;
+        final String schema;
+        final String table;
+        final UniqueConstraintType constraintType;
+        final String filterDefinition;
+        final List<String> columns = new ArrayList<>();
+
+        UqAccumulator(String name, String schema, String table,
+                      UniqueConstraintType constraintType, String filterDefinition) {
+            this.name = name;
+            this.schema = schema;
+            this.table = table;
+            this.constraintType = constraintType;
+            this.filterDefinition = filterDefinition;
+        }
     }
 }

@@ -1,8 +1,10 @@
 package com.example.schema.service;
 
+import com.example.schema.model.ForeignKeyInfo;
 import com.example.schema.model.Relationship;
 import com.example.schema.model.SchemaSnapshot;
 import com.example.schema.model.TableInfo;
+import com.example.schema.model.UniqueConstraintInfo;
 import com.example.schema.service.discovery.RelationshipDiscoveryService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,8 +48,23 @@ public class SchemaSnapshotService {
             log.warn("View extraction failed: {}", e.getMessage());
         }
 
-        // 3. Discover relationships
-        List<Relationship> relationships = discoveryService.discoverAll(tables, viewDefs);
+        // Authoritative FK + unique constraint extraction (B1-2 — Codex
+        // 019e2d7d). Non-fatal: snapshot continues with empty inventory.
+        List<ForeignKeyInfo> foreignKeys = List.of();
+        try {
+            foreignKeys = extractService.extractForeignKeys(schema);
+        } catch (Exception e) {
+            log.warn("Foreign key extraction failed: {}", e.getMessage());
+        }
+        List<UniqueConstraintInfo> uniqueConstraints = List.of();
+        try {
+            uniqueConstraints = extractService.extractUniqueConstraints(schema);
+        } catch (Exception e) {
+            log.warn("Unique constraint extraction failed: {}", e.getMessage());
+        }
+
+        // 3. Discover relationships (heuristic + authoritative FK compat layer)
+        List<Relationship> relationships = discoveryService.discoverAll(tables, viewDefs, foreignKeys);
 
         // 4. Domain clustering
         Map<String, List<String>> domains = clusteringService.detectDomains(
@@ -96,13 +113,15 @@ public class SchemaSnapshotService {
         int totalCols = tables.values().stream().mapToInt(t -> t.columns().size()).sum();
 
         SchemaSnapshot snapshot = new SchemaSnapshot(
-            "1.0",
+            "1.1",
             new SchemaSnapshot.Metadata(
                 "mssql", "", "", schema, Instant.now(),
                 tables.size(), totalCols, relationships.size(), domains.size()
             ),
             tables,
             relationships,
+            foreignKeys,
+            uniqueConstraints,
             domains,
             new SchemaSnapshot.Analysis(deadTables, hubTables)
         );
