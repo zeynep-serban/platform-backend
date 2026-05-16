@@ -80,10 +80,10 @@ class SchemaSnapshotColumnMirrorTest {
 
     @Test
     void b1TopLevelInventoryFields_ignoredByMirror() throws Exception {
-        // schema-service B1-2/B1-3 add top-level `foreignKeys` /
-        // `uniqueConstraints` / `checkConstraints` / `defaultConstraints`.
-        // The mirror only reads `tables`, so these new top-level fields
-        // must be silently ignored — no mirror code change required
+        // schema-service B1-2/B1-3/B1-4 add top-level `foreignKeys` /
+        // `uniqueConstraints` / `checkConstraints` / `defaultConstraints` /
+        // `indexes`. The mirror only reads `tables`, so these new top-level
+        // fields must be silently ignored — no mirror code change required
         // (@JsonIgnoreProperties(ignoreUnknown=true)).
         String json = """
             {"version":"1.1",
@@ -102,6 +102,12 @@ class SchemaSnapshotColumnMirrorTest {
                "isDisabled":false,"isNotTrusted":false}],
              "defaultConstraints":[{"name":"DF_1","schema":"dbo","table":"ORDERS",
                "columnName":"STATUS","definition":"((1))"}],
+             "indexes":[{"name":"IX_1","schema":"dbo","table":"ORDERS",
+               "indexType":"NONCLUSTERED",
+               "keyColumns":[{"name":"ORDER_DATE","ordinal":1,"descending":false}],
+               "includedColumns":["TOTAL"],"isUnique":false,"isPrimaryKey":false,
+               "isUniqueConstraint":false,"hasFilter":false,"filterDefinition":null,
+               "fillFactor":0,"isDisabled":false,"isHypothetical":false}],
              "domains":{}}
             """;
 

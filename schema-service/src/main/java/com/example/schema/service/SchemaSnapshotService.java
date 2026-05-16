@@ -3,6 +3,7 @@ package com.example.schema.service;
 import com.example.schema.model.CheckConstraintInfo;
 import com.example.schema.model.DefaultConstraintInfo;
 import com.example.schema.model.ForeignKeyInfo;
+import com.example.schema.model.IndexInfo;
 import com.example.schema.model.Relationship;
 import com.example.schema.model.SchemaSnapshot;
 import com.example.schema.model.TableInfo;
@@ -77,6 +78,13 @@ public class SchemaSnapshotService {
         } catch (Exception e) {
             log.warn("Default constraint extraction failed: {}", e.getMessage());
         }
+        // Authoritative physical (rowstore) index inventory (B1-4 — M4).
+        List<IndexInfo> indexes = List.of();
+        try {
+            indexes = extractService.extractIndexes(schema);
+        } catch (Exception e) {
+            log.warn("Index extraction failed: {}", e.getMessage());
+        }
 
         // 3. Discover relationships (heuristic + authoritative FK compat layer)
         List<Relationship> relationships = discoveryService.discoverAll(tables, viewDefs, foreignKeys);
@@ -139,6 +147,7 @@ public class SchemaSnapshotService {
             uniqueConstraints,
             checkConstraints,
             defaultConstraints,
+            indexes,
             domains,
             new SchemaSnapshot.Analysis(deadTables, hubTables)
         );

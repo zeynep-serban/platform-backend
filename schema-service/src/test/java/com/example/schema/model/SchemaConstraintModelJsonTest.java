@@ -71,6 +71,7 @@ class SchemaConstraintModelJsonTest {
         assertThat(snap.uniqueConstraints()).isEmpty();
         assertThat(snap.checkConstraints()).isEmpty();
         assertThat(snap.defaultConstraints()).isEmpty();
+        assertThat(snap.indexes()).isEmpty();
     }
 
     @Test

@@ -4,6 +4,7 @@ import com.example.schema.model.CheckConstraintInfo;
 import com.example.schema.model.ColumnInfo;
 import com.example.schema.model.DefaultConstraintInfo;
 import com.example.schema.model.ForeignKeyInfo;
+import com.example.schema.model.IndexInfo;
 import com.example.schema.model.TableInfo;
 import com.example.schema.model.UniqueConstraintInfo;
 import com.example.schema.model.UniqueConstraintType;
@@ -412,6 +413,88 @@ public class SchemaExtractService {
         return result;
     }
 
+    /**
+     * Phase B1-4 (capability M4 — Codex 019e325a, ADR-0020 §2.3):
+     * authoritative physical index extraction from {@code sys.indexes} +
+     * {@code sys.index_columns}. Heap ({@code index_id = 0}) and non-rowstore
+     * index types are excluded ({@code type IN (1,2)} — clustered /
+     * nonclustered) because the key-vs-included column split is only well
+     * defined for rowstore indexes. PK- and unique-constraint-backed indexes
+     * ARE included, flagged ({@code is_primary_key} / {@code is_unique_constraint})
+     * so a consumer can deduplicate against {@link ColumnInfo#pk()} /
+     * {@link UniqueConstraintInfo} rather than double-count (B0 §5.3 — physical
+     * inventory, "ayrı işaret"). Disabled / hypothetical indexes are carried
+     * with a flag, never silently dropped.
+     */
+    @Cacheable(value = "indexes", key = "#schema")
+    public List<IndexInfo> extractIndexes(String schema) {
+        String targetSchema = schema != null ? schema : defaultSchema;
+        String sql = """
+            SELECT i.name AS index_name, sch.name AS schema_name, t.name AS table_name,
+                   i.type_desc AS index_type, i.is_unique, i.is_primary_key,
+                   i.is_unique_constraint, i.has_filter, i.filter_definition,
+                   i.fill_factor, i.is_disabled, i.is_hypothetical,
+                   col.name AS column_name,
+                   ic.is_included_column, ic.is_descending_key, ic.key_ordinal
+            FROM sys.indexes i
+            JOIN sys.tables t ON t.object_id = i.object_id
+            JOIN sys.schemas sch ON sch.schema_id = t.schema_id
+            JOIN sys.index_columns ic ON ic.object_id = i.object_id
+                AND ic.index_id = i.index_id
+            JOIN sys.columns col ON col.object_id = ic.object_id
+                AND col.column_id = ic.column_id
+            WHERE sch.name = :schema
+              AND i.index_id > 0
+              AND i.type IN (1, 2)
+            ORDER BY t.name, i.name, ic.is_included_column, ic.key_ordinal,
+                     ic.index_column_id
+            """;
+
+        Map<String, IndexAccumulator> acc = new LinkedHashMap<>();
+        jdbc.query(sql, Map.of("schema", targetSchema), rs -> {
+            // Read every column up-front: the computeIfAbsent mapping
+            // function is a plain Function and cannot throw SQLException.
+            String table = rs.getString("table_name");
+            String indexName = rs.getString("index_name");
+            String schemaName = rs.getString("schema_name");
+            String indexType = rs.getString("index_type");
+            boolean isUnique = rs.getBoolean("is_unique");
+            boolean isPrimaryKey = rs.getBoolean("is_primary_key");
+            boolean isUniqueConstraint = rs.getBoolean("is_unique_constraint");
+            boolean hasFilter = rs.getBoolean("has_filter");
+            String filter = rs.getString("filter_definition");
+            int fillFactor = rs.getInt("fill_factor");
+            boolean isDisabled = rs.getBoolean("is_disabled");
+            boolean isHypothetical = rs.getBoolean("is_hypothetical");
+            String column = rs.getString("column_name");
+            boolean included = rs.getBoolean("is_included_column");
+            boolean descending = rs.getBoolean("is_descending_key");
+            int keyOrdinal = rs.getInt("key_ordinal");
+            IndexAccumulator a = acc.computeIfAbsent(
+                schemaName + "." + table + "." + indexName,
+                k -> new IndexAccumulator(indexName, schemaName, table, indexType,
+                    isUnique, isPrimaryKey, isUniqueConstraint, hasFilter, filter,
+                    fillFactor, isDisabled, isHypothetical));
+            if (included) {
+                a.includedColumns.add(column);
+            } else if (keyOrdinal > 0) {
+                a.keyColumns.add(new IndexInfo.KeyColumn(column, keyOrdinal, descending));
+            }
+            // key_ordinal = 0 && !included is not expected for rowstore
+            // (type IN (1,2)) — defensively skipped rather than mis-mapped.
+        });
+
+        List<IndexInfo> result = new ArrayList<>();
+        acc.values().forEach(a -> result.add(new IndexInfo(
+            a.name, a.schema, a.table, a.indexType,
+            List.copyOf(a.keyColumns), List.copyOf(a.includedColumns),
+            a.isUnique, a.isPrimaryKey, a.isUniqueConstraint,
+            a.hasFilter, a.filterDefinition, a.fillFactor,
+            a.isDisabled, a.isHypothetical)));
+        log.info("Extracted {} indexes from schema '{}'", result.size(), targetSchema);
+        return result;
+    }
+
     /** Mutable accumulator — groups multi-column FK rows by constraint name. */
     private static final class FkAccumulator {
         final String name;
@@ -457,6 +540,42 @@ public class SchemaExtractService {
             this.table = table;
             this.constraintType = constraintType;
             this.filterDefinition = filterDefinition;
+        }
+    }
+
+    /** Mutable accumulator — groups multi-column index rows by index name. */
+    private static final class IndexAccumulator {
+        final String name;
+        final String schema;
+        final String table;
+        final String indexType;
+        final boolean isUnique;
+        final boolean isPrimaryKey;
+        final boolean isUniqueConstraint;
+        final boolean hasFilter;
+        final String filterDefinition;
+        final int fillFactor;
+        final boolean isDisabled;
+        final boolean isHypothetical;
+        final List<IndexInfo.KeyColumn> keyColumns = new ArrayList<>();
+        final List<String> includedColumns = new ArrayList<>();
+
+        IndexAccumulator(String name, String schema, String table, String indexType,
+                         boolean isUnique, boolean isPrimaryKey, boolean isUniqueConstraint,
+                         boolean hasFilter, String filterDefinition, int fillFactor,
+                         boolean isDisabled, boolean isHypothetical) {
+            this.name = name;
+            this.schema = schema;
+            this.table = table;
+            this.indexType = indexType;
+            this.isUnique = isUnique;
+            this.isPrimaryKey = isPrimaryKey;
+            this.isUniqueConstraint = isUniqueConstraint;
+            this.hasFilter = hasFilter;
+            this.filterDefinition = filterDefinition;
+            this.fillFactor = fillFactor;
+            this.isDisabled = isDisabled;
+            this.isHypothetical = isHypothetical;
         }
     }
 }
