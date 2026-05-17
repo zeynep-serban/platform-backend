@@ -31,6 +31,18 @@ public class ImpersonationSessionService {
 
     private static final Logger log = LoggerFactory.getLogger(ImpersonationSessionService.class);
 
+    /**
+     * {@code impersonation_sessions.ended_reason} is a short-code column
+     * (VARCHAR(50)) — see the V19 column comment: {@code USER_STOP, LOGOUT,
+     * TOKEN_EXPIRED, ADMIN_REVOKE, SYSTEM_SWEEP}. The admin force-revoke path
+     * must persist this fixed code, NOT the operator's free-text reason: a
+     * reason longer than 50 chars overflowed the column and surfaced as an
+     * HTTP 500 (DataIntegrityViolationException) instead of completing the
+     * revoke. The operator's free-text reason is still captured in full by
+     * the {@code IMPERSONATION_REVOKED} audit event.
+     */
+    private static final String ENDED_REASON_ADMIN_REVOKE = "ADMIN_REVOKE";
+
     private final ImpersonationSessionRepository sessionRepository;
     private final ImpersonationAuditWriter auditWriter;
 
@@ -159,7 +171,10 @@ public class ImpersonationSessionService {
                                  String correlationId) {
         Instant now = Instant.now();
         Optional<ImpersonationSession> snapshot = sessionRepository.findById(sessionId);
-        int updated = sessionRepository.stopSession(sessionId, now, revokeReason);
+        // ended_reason gets the fixed short code; the operator's free-text
+        // revokeReason flows to the IMPERSONATION_REVOKED audit event below
+        // (see ENDED_REASON_ADMIN_REVOKE javadoc).
+        int updated = sessionRepository.stopSession(sessionId, now, ENDED_REASON_ADMIN_REVOKE);
         if (updated > 0) {
             log.warn("Impersonation session revoked: id={} reason={} operator_user_id={}",
                     sessionId, revokeReason, operatorUserId);

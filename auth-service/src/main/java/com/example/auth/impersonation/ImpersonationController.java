@@ -544,7 +544,7 @@ public class ImpersonationController {
     public ResponseEntity<Void> revoke(
             @AuthenticationPrincipal Jwt jwt,
             @org.springframework.web.bind.annotation.PathVariable UUID sessionId,
-            @RequestBody(required = false) RevokeRequest request,
+            @Valid @RequestBody(required = false) RevokeRequest request,
             HttpServletRequest httpRequest) {
 
         Long operatorUserId = extractUserIdClaim(jwt);
