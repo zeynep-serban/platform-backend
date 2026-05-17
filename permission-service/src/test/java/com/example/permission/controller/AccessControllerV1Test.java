@@ -42,6 +42,12 @@ class AccessControllerV1Test {
     @Autowired
     private MockMvc mockMvc;
 
+    // ImpersonationContextFilter (@Component) is auto-picked up by the
+    // @WebMvcTest slice and transitively requires ImpersonationContextExtractor;
+    // mock it so the slice ApplicationContext loads.
+    @MockitoBean
+    private com.example.permission.security.ImpersonationContextExtractor impersonationContextExtractor;
+
     @MockitoBean
     private AccessRoleService accessRoleService;
 
