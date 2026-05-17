@@ -123,8 +123,9 @@ class PermissionDataInitializerImpersonationAdminSeedTest {
         // Pre-seed every granule the initializer would otherwise insert: the
         // 12 dashboards (HR + Finans) + 4 report_group keys (R16 PR-B-2:
         // reports.FINANCE_REPORTS / HR_REPORTS / SALES_REPORTS /
-        // ANALYTICS_REPORTS) + IMPERSONATION_AUDIT MANAGE. This makes the
-        // entire granule pass for ADMIN a no-op.
+        // ANALYTICS_REPORTS) + IMPERSONATION_AUDIT / SUGGESTIONS / ETHIC
+        // MANAGE module granules. This makes the entire granule pass for
+        // ADMIN a no-op.
         for (String key : List.of(
                 "HR_ANALYTICS", "HR_FINANSAL", "HR_EQUITY_RISK",
                 "HR_BENEFITS_LITE", "HR_COMPENSATION", "HR_SALARY_ANALYTICS",
@@ -143,6 +144,14 @@ class PermissionDataInitializerImpersonationAdminSeedTest {
         }
         admin.addRolePermission(new RolePermission(
                 admin, PermissionType.MODULE, "IMPERSONATION_AUDIT", GrantType.MANAGE));
+        // SUGGESTIONS / ETHIC MANAGE module granules are also seeded onto
+        // ADMIN by buildAdminGranules(); pre-seed them so this pass stays a
+        // true no-op (otherwise the granule loop inserts them and fires a
+        // RoleChangeEvent for ADMIN, failing the assertions below).
+        admin.addRolePermission(new RolePermission(
+                admin, PermissionType.MODULE, "SUGGESTIONS", GrantType.MANAGE));
+        admin.addRolePermission(new RolePermission(
+                admin, PermissionType.MODULE, "ETHIC", GrantType.MANAGE));
         when(roleRepository.findAll()).thenReturn(List.of(admin));
 
         initializer.run();
@@ -186,6 +195,34 @@ class PermissionDataInitializerImpersonationAdminSeedTest {
         assertThat(impersonationGrant.getPermission())
                 .as("granule shortcut row must have permission_id NULL (FGA tuple-driven)")
                 .isNull();
+    }
+
+    @Test
+    void run_freshAdminRole_seedsSuggestionsAndEthicManageModuleGranules() throws Exception {
+        // The Öneriler / Etik remote MFEs are permission-gated; ADMIN keeps
+        // access via these default MODULE:MANAGE granule seeds so admins do
+        // not lose the routes once the frontend nav + route guards start
+        // enforcing the SUGGESTIONS / ETHIC modules.
+        Role admin = adminRoleWithGranuleMarker(99L);
+        when(roleRepository.findAll()).thenReturn(List.of(admin));
+
+        initializer.run();
+
+        ArgumentCaptor<RolePermission> rpCaptor = ArgumentCaptor.forClass(RolePermission.class);
+        verify(rolePermissionRepository, atLeastOnce()).save(rpCaptor.capture());
+        for (String moduleKey : List.of("SUGGESTIONS", "ETHIC")) {
+            RolePermission grant = rpCaptor.getAllValues().stream()
+                    .filter(rp -> rp.getPermissionType() == PermissionType.MODULE
+                            && moduleKey.equals(rp.getPermissionKey()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError(
+                            "ADMIN must get MODULE:" + moduleKey + ":MANAGE granule"));
+            assertThat(grant.getGrantType()).isEqualTo(GrantType.MANAGE);
+            assertThat(grant.getRole()).isSameAs(admin);
+            assertThat(grant.getPermission())
+                    .as("granule shortcut row must have permission_id NULL")
+                    .isNull();
+        }
     }
 
     // ---------- helpers ----------

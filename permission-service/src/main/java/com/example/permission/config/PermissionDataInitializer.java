@@ -136,6 +136,21 @@ public class PermissionDataInitializer implements CommandLineRunner {
     private static final GranuleSeed IMPERSONATION_AUDIT_ADMIN_GRANULE = new GranuleSeed(
             PermissionType.MODULE, "IMPERSONATION_AUDIT", GrantType.MANAGE);
 
+    /**
+     * Suggestions / Ethic modules — the Öneriler and Etik remote MFEs are
+     * permission-gated features (not org-wide). Seeded onto the ADMIN role
+     * at MANAGE so the existing "ADMIN has every core platform module"
+     * contract is preserved when the frontend nav + route guards start
+     * enforcing these modules; non-admin roles get them only via explicit
+     * grant. Same granule-managed seeding path as
+     * {@link #IMPERSONATION_AUDIT_ADMIN_GRANULE}.
+     */
+    private static final GranuleSeed SUGGESTIONS_ADMIN_GRANULE = new GranuleSeed(
+            PermissionType.MODULE, "SUGGESTIONS", GrantType.MANAGE);
+
+    private static final GranuleSeed ETHIC_ADMIN_GRANULE = new GranuleSeed(
+            PermissionType.MODULE, "ETHIC", GrantType.MANAGE);
+
     private static final Map<String, List<GranuleSeed>> DEFAULT_ROLE_GRANULES = Map.ofEntries(
             Map.entry("ADMIN",           buildAdminGranules()),
             Map.entry("REPORT_MANAGER",  combine(
@@ -169,7 +184,7 @@ public class PermissionDataInitializer implements CommandLineRunner {
     /**
      * ADMIN granule seed list = dashboard MANAGE (HR + Finans) + report_group
      * MANAGE (R16 PR-B-2) + dedicated IMPERSONATION_AUDIT MANAGE module
-     * grant (PR-D2).
+     * grant (PR-D2) + SUGGESTIONS / ETHIC MANAGE module grants.
      */
     private static List<GranuleSeed> buildAdminGranules() {
         List<GranuleSeed> out = new ArrayList<>(buildDashboardGranules(
@@ -177,6 +192,8 @@ public class PermissionDataInitializer implements CommandLineRunner {
         // R16 PR-B-2: ADMIN tüm report_group'lar için MANAGE
         out.addAll(buildReportGroupGranules(GrantType.MANAGE, DEFAULT_REPORT_GROUP_KEYS));
         out.add(IMPERSONATION_AUDIT_ADMIN_GRANULE);
+        out.add(SUGGESTIONS_ADMIN_GRANULE);
+        out.add(ETHIC_ADMIN_GRANULE);
         return List.copyOf(out);
     }
 

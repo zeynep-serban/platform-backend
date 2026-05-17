@@ -29,7 +29,13 @@ public class PermissionCatalogService {
             new ModuleCatalogItem("REPORT", "Raporlama", List.of("VIEW", "MANAGE")),
             new ModuleCatalogItem("WAREHOUSE", "Depo", List.of("VIEW", "MANAGE")),
             new ModuleCatalogItem("PURCHASE", "Satın Alma", List.of("VIEW", "MANAGE")),
-            new ModuleCatalogItem("THEME", "Tema", List.of("VIEW", "MANAGE"))
+            new ModuleCatalogItem("THEME", "Tema", List.of("VIEW", "MANAGE")),
+            // Öneri/Fikir ve Etik Raporlama remote MFE'leri ayrı ürün
+            // sınırlarıdır — her biri kendi modülüyle gate'lenir. İK/HR
+            // mega-menü yalnız bir UI gruplamasıdır, authorization boundary
+            // değil; bu yüzden tek HR modülü değil iki ayrı modül kullanılır.
+            new ModuleCatalogItem("SUGGESTIONS", "Öneri ve Fikir", List.of("VIEW", "MANAGE")),
+            new ModuleCatalogItem("ETHIC", "Etik Raporlama", List.of("VIEW", "MANAGE"))
     );
 
     private static final List<ActionCatalogItem> ACTIONS = List.of(
