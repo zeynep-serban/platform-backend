@@ -85,13 +85,149 @@ class UserControllerV1Test {
                 .andExpect(status().isUnauthorized());
     }
 
+    /**
+     * Keycloak user lazy-provision bridge: an M365 first-login (allow-listed
+     * issuer + {@code entra_tid} marker) with no backend profile is now
+     * auto-provisioned and the request proceeds, instead of the old
+     * {@code 403 PROFILE_MISSING}. This test was previously
+     * {@code listUsers_missingLocalProfile_returns403}.
+     */
     @Test
-    void listUsers_missingLocalProfile_returns403() throws Exception {
+    void listUsers_m365FirstLogin_autoProvisionsAndReturns200() throws Exception {
+        String email = "m365-first@example.com";
+        Assertions.assertThat(userRepository.findByEmail(email)).isEmpty();
+
+        String token = issueM365Token(email, "11111111-1111-1111-1111-111111111111");
+        mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk());
+
+        User provisioned = userRepository.findByEmail(email).orElseThrow();
+        Assertions.assertThat(provisioned.getRole()).isEqualTo("USER");      // least-privilege
+        Assertions.assertThat(provisioned.isEnabled()).isTrue();
+        Assertions.assertThat(provisioned.getCompanyId()).isNull();
+        Assertions.assertThat(provisioned.getKcSubject()).isEqualTo("kc-sub-m365-first");
+    }
+
+    /**
+     * Gate fail-closed: a JWT whose issuer is NOT on the auto-provision
+     * allowlist still yields {@code 403 PROFILE_MISSING} when no backend
+     * profile exists. The default test {@code issueToken(...)} uses issuer
+     * {@code auth-service}, which is not allow-listed.
+     */
+    @Test
+    void listUsers_missingProfile_disallowedIssuer_returns403() throws Exception {
         String token = issueToken("missing@example.com");
         mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
                 .andExpect(status().isForbidden())
                 .andExpect(content().string(containsString("PROFILE_MISSING")));
+    }
+
+    /**
+     * Gate fail-closed: an allow-listed issuer but NO {@code entra_tid}
+     * marker claim (local Keycloak-native account) is not auto-provisioned
+     * while {@code auto-provision.allow-local-keycloak} stays false, so a
+     * missing profile still yields {@code 403 PROFILE_MISSING}.
+     */
+    @Test
+    void listUsers_missingProfile_allowedIssuerButNoEntraTid_returns403() throws Exception {
+        String token = issueTokenWithIssuer("local-kc@example.com", "platform-test", null, null);
+        mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isForbidden())
+                .andExpect(content().string(containsString("PROFILE_MISSING")));
+    }
+
+    /**
+     * {@code email_verified=false} blocks auto-provision even with an
+     * allow-listed issuer and the {@code entra_tid} marker.
+     */
+    @Test
+    void listUsers_m365FirstLogin_emailNotVerified_returns403() throws Exception {
+        String token = issueTokenWithIssuer("unverified@example.com", "platform-test",
+                "22222222-2222-2222-2222-222222222222", Boolean.FALSE);
+        mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isForbidden())
+                .andExpect(content().string(containsString("PROFILE_MISSING")));
+    }
+
+    /**
+     * A numeric {@code userId} claim that no longer maps to a row is a
+     * stale token / deleted profile — fail closed with
+     * {@code 403 PROFILE_MISSING}; it must NOT be treated as a first login
+     * and auto-provisioned.
+     */
+    @Test
+    void listUsers_staleNumericUserId_returns403_notAutoProvisioned() throws Exception {
+        Instant now = Instant.now();
+        JwtClaimsSet claims = JwtClaimsSet.builder()
+                .subject("kc-sub-stale")
+                .issuer("platform-test")
+                .audience(List.of("user-service"))
+                .issuedAt(now)
+                .expiresAt(now.plusSeconds(600))
+                .claim("email", "stale@example.com")
+                .claim("entra_tid", "33333333-3333-3333-3333-333333333333")
+                .claim("userId", 999999)
+                .claim("permissions", List.of("VIEW_USERS", "MANAGE_USERS"))
+                .build();
+        String token = jwtEncoder.encode(JwtEncoderParameters.from(claims)).getTokenValue();
+
+        mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isForbidden())
+                .andExpect(content().string(containsString("PROFILE_MISSING")));
+
+        Assertions.assertThat(userRepository.findByEmail("stale@example.com")).isEmpty();
+    }
+
+    /**
+     * Auto-provision is idempotent: a second M365 request for the same
+     * subject reuses the row created on the first request — no duplicate.
+     */
+    @Test
+    void listUsers_m365SecondLogin_reusesSameRow() throws Exception {
+        String email = "m365-repeat@example.com";
+        String token = issueM365Token(email, "44444444-4444-4444-4444-444444444444");
+
+        mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk());
+        Long firstId = userRepository.findByEmail(email).orElseThrow().getId();
+
+        mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk());
+
+        Assertions.assertThat(userRepository.findAll().stream()
+                        .filter(u -> email.equals(u.getEmail())).count())
+                .isEqualTo(1L);
+        Assertions.assertThat(userRepository.findByEmail(email).orElseThrow().getId())
+                .isEqualTo(firstId);
+    }
+
+    /**
+     * Email case-normalization: a token whose email is mixed-case
+     * provisions a row with the canonical lowercase email, and a
+     * subsequent request with different casing resolves the same row.
+     */
+    @Test
+    void listUsers_m365FirstLogin_normalizesEmailCase() throws Exception {
+        String mixedCaseEmail = "Mixed.Case@Example.com";
+        String token = issueM365Token(mixedCaseEmail, "55555555-5555-5555-5555-555555555555");
+
+        mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk());
+
+        Assertions.assertThat(userRepository.findByEmail("Mixed.Case@Example.com")).isEmpty();
+        User provisioned = userRepository.findByEmailIgnoreCase("mixed.case@example.com").orElseThrow();
+        Assertions.assertThat(provisioned.getEmail()).isEqualTo("mixed.case@example.com");
+        Assertions.assertThat(userRepository.findAll().stream()
+                        .filter(u -> "mixed.case@example.com".equals(u.getEmail())).count())
+                .isEqualTo(1L);
     }
 
     @Test
@@ -703,5 +839,46 @@ class UserControllerV1Test {
                 .claim("permissions", List.of("VIEW_USERS", "MANAGE_USERS"))
                 .build();
         return jwtEncoder.encode(JwtEncoderParameters.from(claims)).getTokenValue();
+    }
+
+    /**
+     * Issues a token simulating an M365 first-login: allow-listed issuer
+     * ({@code platform-test}), the {@code entra_tid} marker claim and a
+     * deterministic {@code sub} derived from the email local-part
+     * ({@code kc-sub-<local-part>}). No numeric {@code userId} claim — this
+     * is a brand-new identity with no backend profile.
+     */
+    private String issueM365Token(String email, String entraTid) {
+        return issueTokenWithIssuer(email, "platform-test", entraTid, Boolean.TRUE);
+    }
+
+    /**
+     * Issues a token with an explicit issuer and optional {@code entra_tid}
+     * / {@code email_verified} claims, used to exercise the auto-provision
+     * gate. {@code sub} is {@code kc-sub-<email-local-part>}.
+     *
+     * @param email         the email / preferred_username claim value
+     * @param issuer        the JWT {@code iss}
+     * @param entraTid      the M365 marker claim; omitted when null
+     * @param emailVerified the {@code email_verified} claim; omitted when null
+     */
+    private String issueTokenWithIssuer(String email, String issuer, String entraTid, Boolean emailVerified) {
+        Instant now = Instant.now();
+        String localPart = email.contains("@") ? email.substring(0, email.indexOf('@')) : email;
+        JwtClaimsSet.Builder builder = JwtClaimsSet.builder()
+                .subject("kc-sub-" + localPart.toLowerCase())
+                .issuer(issuer)
+                .audience(List.of("user-service"))
+                .issuedAt(now)
+                .expiresAt(now.plusSeconds(600))
+                .claim("email", email)
+                .claim("permissions", List.of("VIEW_USERS", "MANAGE_USERS"));
+        if (entraTid != null) {
+            builder.claim("entra_tid", entraTid);
+        }
+        if (emailVerified != null) {
+            builder.claim("email_verified", emailVerified);
+        }
+        return jwtEncoder.encode(JwtEncoderParameters.from(builder.build())).getTokenValue();
     }
 }

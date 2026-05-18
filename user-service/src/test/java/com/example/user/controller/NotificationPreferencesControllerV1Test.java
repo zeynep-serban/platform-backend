@@ -84,8 +84,36 @@ class NotificationPreferencesControllerV1Test {
                 .andExpect(status().isUnauthorized());
     }
 
+    /**
+     * Keycloak user lazy-provision bridge: an M365 first-login (allow-listed
+     * issuer + {@code entra_tid} marker) with no backend profile is now
+     * auto-provisioned and the preferences request proceeds (returns the
+     * default channel set), instead of the old {@code 403 PROFILE_MISSING}.
+     * Previously {@code getPreferences_missingLocalProfile_returns403}.
+     */
     @Test
-    void getPreferences_missingLocalProfile_returns403() throws Exception {
+    void getPreferences_m365FirstLogin_autoProvisionsAndReturnsDefaults() throws Exception {
+        String email = "m365-prefs@example.com";
+        org.assertj.core.api.Assertions.assertThat(userRepository.findByEmail(email)).isEmpty();
+
+        String token = issueM365Token(email, "66666666-6666-6666-6666-666666666666");
+        mockMvc.perform(get("/api/v1/notification-preferences")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.preferences", hasSize(4)));
+
+        User provisioned = userRepository.findByEmail(email).orElseThrow();
+        org.assertj.core.api.Assertions.assertThat(provisioned.getRole()).isEqualTo("USER");
+        org.assertj.core.api.Assertions.assertThat(provisioned.isEnabled()).isTrue();
+    }
+
+    /**
+     * Gate fail-closed: a JWT whose issuer is NOT on the auto-provision
+     * allowlist (the default {@code issueToken(...)} uses {@code auth-service})
+     * still yields {@code 403 PROFILE_MISSING} when no profile exists.
+     */
+    @Test
+    void getPreferences_missingProfile_disallowedIssuer_returns403() throws Exception {
         String token = issueToken("missing@example.com");
         mockMvc.perform(get("/api/v1/notification-preferences")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
@@ -266,6 +294,30 @@ class NotificationPreferencesControllerV1Test {
                 .issuedAt(now)
                 .expiresAt(now.plusSeconds(600))
                 .claim("email", email)
+                .claim("permissions", List.of("VIEW_USERS", "MANAGE_USERS"))
+                .build();
+        return jwtEncoder.encode(JwtEncoderParameters.from(claims)).getTokenValue();
+    }
+
+    /**
+     * Issues a token simulating an M365 first-login: allow-listed issuer
+     * ({@code platform-test}), the {@code entra_tid} marker claim,
+     * {@code email_verified=true} and a deterministic {@code sub}
+     * ({@code kc-sub-<email-local-part>}). No backend profile is created
+     * up front — the auto-provision bridge is expected to create it.
+     */
+    private String issueM365Token(String email, String entraTid) {
+        Instant now = Instant.now();
+        String localPart = email.contains("@") ? email.substring(0, email.indexOf('@')) : email;
+        JwtClaimsSet claims = JwtClaimsSet.builder()
+                .subject("kc-sub-" + localPart.toLowerCase())
+                .issuer("platform-test")
+                .audience(List.of("user-service"))
+                .issuedAt(now)
+                .expiresAt(now.plusSeconds(600))
+                .claim("email", email)
+                .claim("entra_tid", entraTid)
+                .claim("email_verified", Boolean.TRUE)
                 .claim("permissions", List.of("VIEW_USERS", "MANAGE_USERS"))
                 .build();
         return jwtEncoder.encode(JwtEncoderParameters.from(claims)).getTokenValue();

@@ -27,6 +27,7 @@ import com.example.commonauth.AuthorizationContext;
 import com.example.user.authz.AuthorizationContextService;
 import com.example.user.model.User;
 import com.example.user.permission.PermissionActions;
+import com.example.user.service.CurrentUserResolver;
 import com.example.user.service.UserAuditEventService;
 import com.example.user.service.UserService;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -69,16 +70,19 @@ public class UserControllerV1 {
     private final UserService userService;
     private final UserAuditEventService userAuditEventService;
     private final AuthorizationContextService authorizationContextService;
+    private final CurrentUserResolver currentUserResolver;
     private final MeterRegistry meterRegistry;
     private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(UserControllerV1.class);
 
     public UserControllerV1(UserService userService,
                             UserAuditEventService userAuditEventService,
                             AuthorizationContextService authorizationContextService,
+                            CurrentUserResolver currentUserResolver,
                             MeterRegistry meterRegistry) {
         this.userService = userService;
         this.userAuditEventService = userAuditEventService;
         this.authorizationContextService = authorizationContextService;
+        this.currentUserResolver = currentUserResolver;
         this.meterRegistry = meterRegistry;
     }
 
@@ -597,59 +601,19 @@ public class UserControllerV1 {
         return ResponseEntity.ok(UserDtoMapper.toDetail(user));
     }
 
+    /**
+     * Resolves the current request's backend {@link User} profile.
+     *
+     * <p>Delegates to the shared {@link CurrentUserResolver} — the single
+     * source of truth shared with the legacy {@code UserController} and
+     * {@code NotificationPreferencesControllerV1}. The resolver also acts
+     * as the safety net for the Keycloak user lazy-provision bridge: an
+     * M365 first-login with a valid JWT but no profile is auto-provisioned
+     * (when the gate allows) instead of failing with
+     * {@code 403 PROFILE_MISSING}.
+     */
     private User requireCurrentUser() {
-        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-        if (authentication == null
-                || !authentication.isAuthenticated()
-                || authentication instanceof AnonymousAuthenticationToken) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Kimlik doğrulaması gerekli");
-        }
-        Object principal = authentication.getPrincipal();
-        if (principal instanceof User u) {
-            return u;
-        }
-
-        String username;
-        if (principal instanceof Jwt jwt) {
-            Object rawUserId = jwt.getClaim("userId");
-            Long userId = null;
-            if (rawUserId instanceof Number num) {
-                userId = num.longValue();
-            } else if (rawUserId instanceof String str) {
-                try {
-                    userId = Long.parseLong(str);
-                } catch (NumberFormatException ignored) {
-                    userId = null;
-                }
-            }
-            if (userId != null) {
-                try {
-                    return userService.findRequiredById(userId);
-                } catch (ResponseStatusException ex) {
-                    if (ex.getStatusCode() == HttpStatus.NOT_FOUND) {
-                        LOGGER.warn("JWT userId mevcut ancak yerel profil yok: {}", userId);
-                        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "PROFILE_MISSING");
-                    }
-                    throw ex;
-                }
-            }
-
-            username = firstNonBlank(
-                    jwt.getClaimAsString("email"),
-                    jwt.getClaimAsString("preferred_username"),
-                    authentication.getName());
-        } else {
-            username = authentication.getName();
-        }
-
-        if (!StringUtils.hasText(username)) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Kimlik doğrulaması gerekli");
-        }
-        return userService.findByEmail(username)
-                .orElseThrow(() -> {
-                    LOGGER.warn("Keycloak kullanıcısı bulundu ancak yerel profil yok: {}", username);
-                    return new ResponseStatusException(HttpStatus.FORBIDDEN, "PROFILE_MISSING");
-                });
+        return currentUserResolver.resolveCurrentUser();
     }
 
     private org.springframework.data.jpa.domain.Specification<User> buildAdvancedFilterSpecSafe(String advancedFilter) {
@@ -828,18 +792,6 @@ public class UserControllerV1 {
         if (!hasAuthority) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Yetersiz servis yetkisi");
         }
-    }
-
-    private static String firstNonBlank(String... values) {
-        if (values == null) {
-            return null;
-        }
-        for (String value : values) {
-            if (StringUtils.hasText(value)) {
-                return value;
-            }
-        }
-        return null;
     }
 
     private void requirePermissionWithCompanyScope(String permission, Long companyId) {

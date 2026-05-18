@@ -8,14 +8,10 @@ import com.example.user.dto.v1.UpdateNotificationPreferenceRequestDto;
 import com.example.user.dto.v1.UpdateNotificationPreferencesRequestDto;
 import com.example.user.model.User;
 import com.example.user.model.UserNotificationPreference;
+import com.example.user.service.CurrentUserResolver;
 import com.example.user.service.NotificationPreferencesService;
-import com.example.user.service.UserService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.authentication.AnonymousAuthenticationToken;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -32,14 +28,13 @@ import java.util.List;
 @RequestMapping("/api/v1/notification-preferences")
 public class NotificationPreferencesControllerV1 {
 
-    private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(NotificationPreferencesControllerV1.class);
-
     private final NotificationPreferencesService notificationPreferencesService;
-    private final UserService userService;
+    private final CurrentUserResolver currentUserResolver;
 
-    public NotificationPreferencesControllerV1(NotificationPreferencesService notificationPreferencesService, UserService userService) {
+    public NotificationPreferencesControllerV1(NotificationPreferencesService notificationPreferencesService,
+                                               CurrentUserResolver currentUserResolver) {
         this.notificationPreferencesService = notificationPreferencesService;
-        this.userService = userService;
+        this.currentUserResolver = currentUserResolver;
     }
 
     @GetMapping
@@ -159,43 +154,15 @@ public class NotificationPreferencesControllerV1 {
         return version;
     }
 
+    /**
+     * Resolves the current request's backend {@link User} profile.
+     *
+     * <p>Delegates to the shared {@link CurrentUserResolver}; see
+     * {@code UserControllerV1#requireCurrentUser()} for the rationale
+     * (single source of truth + Keycloak user lazy-provision bridge
+     * safety net).
+     */
     private User requireCurrentUser() {
-        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-        if (authentication == null
-                || !authentication.isAuthenticated()
-                || authentication instanceof AnonymousAuthenticationToken) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Kimlik doğrulaması gerekli");
-        }
-        Object principal = authentication.getPrincipal();
-        if (principal instanceof User u) {
-            return u;
-        }
-
-        String username;
-        if (principal instanceof Jwt jwt) {
-            username = firstNonBlank(
-                    jwt.getClaimAsString("email"),
-                    jwt.getClaimAsString("preferred_username"),
-                    authentication.getName());
-        } else {
-            username = authentication.getName();
-        }
-
-        if (!StringUtils.hasText(username)) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Kimlik doğrulaması gerekli");
-        }
-        return userService.findByEmail(username)
-                .orElseThrow(() -> {
-                    LOGGER.warn("Keycloak kullanıcısı bulundu ancak yerel profil yok: {}", username);
-                    return new ResponseStatusException(HttpStatus.FORBIDDEN, "PROFILE_MISSING");
-                });
-    }
-
-    private static String firstNonBlank(String... values) {
-        if (values == null) return null;
-        for (String v : values) {
-            if (v != null && !v.isBlank()) return v;
-        }
-        return null;
+        return currentUserResolver.resolveCurrentUser();
     }
 }

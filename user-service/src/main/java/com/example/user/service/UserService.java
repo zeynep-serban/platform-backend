@@ -21,12 +21,16 @@ import jakarta.persistence.criteria.CriteriaQuery;
 import jakarta.persistence.criteria.Predicate;
 import jakarta.persistence.criteria.Root;
 import jakarta.persistence.criteria.Expression;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.context.event.EventListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -78,6 +82,15 @@ public class UserService implements UserDetailsService { // UserDetailsService a
     private final UserAuditEventService userAuditEventService;
     private final AuthorizationContextService authorizationContextService;
     private final int maxSessionTimeoutMinutes;
+    /**
+     * REQUIRES_NEW transaction template used exclusively by the
+     * concurrency-safe lazy-provision insert. Running the insert in its
+     * own transaction means a {@link DataIntegrityViolationException}
+     * (lost insert race) only rolls back that inner transaction — the
+     * caller can then re-fetch in a fresh transaction instead of being
+     * trapped in a rolled-back one.
+     */
+    private final TransactionTemplate requiresNewTransactionTemplate;
 
     public record SessionTimeoutSyncResult(String status,
                                            Integer sessionTimeoutMinutes,
@@ -148,12 +161,16 @@ public class UserService implements UserDetailsService { // UserDetailsService a
                        PasswordEncoder passwordEncoder,
                        UserAuditEventService userAuditEventService,
                        AuthorizationContextService authorizationContextService,
+                       PlatformTransactionManager transactionManager,
                        @Value("${user.session-timeout.max-minutes:1440}") int configuredMaxSessionTimeoutMinutes) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.userAuditEventService = userAuditEventService;
         this.authorizationContextService = authorizationContextService;
         this.maxSessionTimeoutMinutes = Math.max(User.DEFAULT_SESSION_TIMEOUT_MINUTES, configuredMaxSessionTimeoutMinutes);
+        TransactionTemplate template = new TransactionTemplate(transactionManager);
+        template.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.requiresNewTransactionTemplate = template;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -323,6 +340,262 @@ public class UserService implements UserDetailsService { // UserDetailsService a
         }
 
         return userRepository.save(target);
+    }
+
+    /**
+     * Immutable command object describing the Keycloak identity that the
+     * lazy-provision bridge wants to materialise as a backend profile.
+     * All fields are already gate-validated by
+     * {@link com.example.user.security.KeycloakUserAutoProvisionFilter}
+     * (or {@link CurrentUserResolver}); this service only normalises and
+     * persists.
+     *
+     * @param kcSubject        the Keycloak {@code sub} claim (never blank)
+     * @param email            the canonical email (already lower-cased)
+     * @param displayName      the resolved display name (never blank)
+     */
+    public record LazyProvisionCommand(String kcSubject, String email, String displayName) {
+    }
+
+    /**
+     * Concurrency-safe lazy-provision of a backend {@code users} row for a
+     * first-login Keycloak identity (Keycloak user auto-provision bridge).
+     *
+     * <p>This method is the <em>single</em> implementation of the
+     * subject-aware identity resolution; {@link CurrentUserResolver}
+     * delegates here instead of duplicating the branching.
+     *
+     * <h2>Resolution order</h2>
+     * <ol>
+     *   <li>{@link UserRepository#findByKcSubject(String)} — if found,
+     *       return it (the row is already linked to this Keycloak
+     *       identity; an email change in Keycloak is not reconciled
+     *       here — that stays a deliberate admin action).</li>
+     *   <li>else {@link UserRepository#findByEmailIgnoreCase(String)} —
+     *       if found:
+     *       <ul>
+     *         <li>{@code kcSubject} blank/null → <strong>backfill</strong>:
+     *             set {@code kcSubject = sub} and save, so the JWT
+     *             {@code sub} is persisted on the previously
+     *             subject-less profile. The backfill runs in a
+     *             {@code REQUIRES_NEW} transaction; if a concurrent
+     *             writer wins and the unique {@code kc_subject}
+     *             constraint raises
+     *             {@link DataIntegrityViolationException}, that is
+     *             caught and the winner is re-fetched by
+     *             {@code kcSubject}.</li>
+     *         <li>{@code kcSubject} equals {@code sub} → return it
+     *             (already linked).</li>
+     *         <li>{@code kcSubject} differs from {@code sub} →
+     *             <strong>fail closed</strong> with
+     *             {@code 403 IDENTITY_LINK_CONFLICT}; no row is created
+     *             or mutated. A different Keycloak identity must never
+     *             be silently bound to an existing profile.</li>
+     *       </ul></li>
+     *   <li>else (no match) → the race-safe insert path below.</li>
+     * </ol>
+     *
+     * <p>Insert race handling: the INSERT runs in its own
+     * {@code REQUIRES_NEW} transaction. If a concurrent request wins the
+     * race the unique constraint on {@code email} / {@code kc_subject}
+     * raises {@link DataIntegrityViolationException}; that only rolls back
+     * the inner transaction, after which this method re-fetches the
+     * now-committed row in a fresh transaction. The caller is never left
+     * executing inside a rolled-back transaction.
+     *
+     * <p>The created row is least-privilege: {@code role=USER},
+     * {@code enabled=true}, {@code companyId=null}, no modules/permissions
+     * granted. Role is deliberately NOT derived from JWT realm roles.
+     *
+     * @param command the gate-validated Keycloak identity to materialise
+     * @return the existing, backfilled or newly-created backend
+     *         {@link User} row
+     * @throws ResponseStatusException {@code 403 IDENTITY_LINK_CONFLICT}
+     *         when the email-matched row is bound to a different
+     *         {@code kcSubject}
+     */
+    public User lazyProvisionFromJwt(LazyProvisionCommand command) {
+        String kcSubject = command.kcSubject() == null ? null : command.kcSubject().trim();
+        String canonicalEmail = canonicalEmail(command.email());
+        String displayName = StringUtils.hasText(command.displayName())
+                ? command.displayName().trim()
+                : canonicalEmail;
+
+        // 1+2. kcSubject / subject-aware email match — the single
+        //       implementation of the resolution branching, reused by
+        //       CurrentUserResolver. Throws 403 IDENTITY_LINK_CONFLICT
+        //       when the email-matched row is bound to a different sub.
+        Optional<User> existing = resolveExistingByJwtIdentity(kcSubject, canonicalEmail);
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+
+        // 3. No match — race-safe insert in its own REQUIRES_NEW
+        //    transaction so a lost race rolls back only this insert,
+        //    not the caller's transaction.
+        try {
+            return requiresNewTransactionTemplate.execute(status -> {
+                User fresh = new User();
+                fresh.setEmail(canonicalEmail);
+                fresh.setName(displayName);
+                fresh.setRole("USER");
+                fresh.setEnabled(true);
+                fresh.setCompanyId(null);
+                fresh.setKcSubject(kcSubject);
+                fresh.setPassword(passwordEncoder.encode(UUID.randomUUID().toString()));
+                fresh.setSessionTimeoutMinutes(User.DEFAULT_SESSION_TIMEOUT_MINUTES);
+                fresh.setLocale(User.DEFAULT_LOCALE);
+                fresh.setTimezone(User.DEFAULT_TIMEZONE);
+                fresh.setDateFormat(User.DEFAULT_DATE_FORMAT);
+                fresh.setTimeFormat(User.DEFAULT_TIME_FORMAT);
+                return userRepository.saveAndFlush(fresh);
+            });
+        } catch (DataIntegrityViolationException race) {
+            // Concurrent first request won — re-fetch the committed row
+            // through the subject-aware resolver (so a row another writer
+            // created under the same email but a different sub still
+            // fails closed rather than being returned).
+            log.info("Lazy-provision insert race for kcSubject={} email={}; re-fetching winner row",
+                    kcSubject, canonicalEmail);
+            return resolveExistingByJwtIdentity(kcSubject, canonicalEmail)
+                    .orElseThrow(() -> new ResponseStatusException(
+                            HttpStatus.FORBIDDEN, "PROFILE_MISSING"));
+        }
+    }
+
+    /**
+     * The <em>single</em> subject-aware identity resolution for the
+     * Keycloak lazy-provision bridge. Both the main hook
+     * ({@code KeycloakUserAutoProvisionFilter}) and the safety net
+     * ({@link CurrentUserResolver}) reach this branching through
+     * {@link #lazyProvisionFromJwt} — the decision lives here exactly
+     * once and is never duplicated. It NEVER creates a new {@code users}
+     * row; it only resolves an <em>existing</em> one (and may backfill a
+     * missing {@code kcSubject} on it).
+     *
+     * <ol>
+     *   <li>{@link UserRepository#findByKcSubject(String)} → present →
+     *       return it (already linked to this Keycloak identity).</li>
+     *   <li>else {@link UserRepository#findByEmailIgnoreCase(String)} →
+     *       present:
+     *       <ul>
+     *         <li>row has no {@code kcSubject} → backfill {@code sub}
+     *             (race-safe, see {@link #backfillKcSubject}) and
+     *             return;</li>
+     *         <li>row's {@code kcSubject} equals {@code sub} → return
+     *             as-is;</li>
+     *         <li>row's {@code kcSubject} differs → fail closed with
+     *             {@code 403 IDENTITY_LINK_CONFLICT}, no mutation.</li>
+     *       </ul></li>
+     *   <li>else → {@link Optional#empty()} (caller decides whether to
+     *       insert).</li>
+     * </ol>
+     *
+     * @param kcSubject      the JWT {@code sub}, may be blank/null
+     * @param canonicalEmail the canonical (lower-cased) email, may be
+     *                       blank/null
+     * @return the resolved existing row, or empty when none matches
+     * @throws ResponseStatusException {@code 403 IDENTITY_LINK_CONFLICT}
+     *         when the email-matched row is bound to a different
+     *         {@code kcSubject}
+     */
+    private Optional<User> resolveExistingByJwtIdentity(String kcSubject, String canonicalEmail) {
+        String subject = StringUtils.hasText(kcSubject) ? kcSubject.trim() : null;
+        String email = canonicalEmail(canonicalEmail);
+
+        // 1. kcSubject match — the row is already linked to this identity.
+        if (subject != null) {
+            Optional<User> bySubject = userRepository.findByKcSubject(subject);
+            if (bySubject.isPresent()) {
+                return bySubject;
+            }
+        }
+
+        // 2. Email match — subject-aware: backfill, accept, or fail closed.
+        if (StringUtils.hasText(email)) {
+            Optional<User> byEmail = userRepository.findByEmailIgnoreCase(email);
+            if (byEmail.isPresent()) {
+                return Optional.of(resolveEmailMatchedRow(byEmail.get(), subject, email));
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Applies the subject-aware decision for a profile matched by
+     * canonical email — case 2 of {@link #resolveExistingByJwtIdentity}.
+     *
+     * <ul>
+     *   <li>row has no {@code kcSubject} → backfill {@code sub} and
+     *       return (race-safe);</li>
+     *   <li>row's {@code kcSubject} equals {@code sub} → return as-is;</li>
+     *   <li>row's {@code kcSubject} differs → {@code 403
+     *       IDENTITY_LINK_CONFLICT}, no mutation.</li>
+     * </ul>
+     */
+    private User resolveEmailMatchedRow(User emailRow, String kcSubject, String canonicalEmail) {
+        // Defensive: every caller currently supplies a non-blank,
+        // gate-certified sub (the JwtAutoProvisionGate denies a blank
+        // `sub` with `missing-sub`), but if none is available there is
+        // nothing to link/backfill — return the email-matched row as-is.
+        if (!StringUtils.hasText(kcSubject)) {
+            return emailRow;
+        }
+        String existingSubject = emailRow.getKcSubject();
+        if (!StringUtils.hasText(existingSubject)) {
+            return backfillKcSubject(emailRow, kcSubject, canonicalEmail);
+        }
+        if (existingSubject.trim().equals(kcSubject)) {
+            // Already linked to this exact Keycloak identity.
+            return emailRow;
+        }
+        // A DIFFERENT Keycloak identity already owns this email/profile —
+        // fail closed, never silently rebind it.
+        log.warn("Auto-provision identity link conflict: email={} is bound to kcSubject={} "
+                        + "but the token carries a different sub; failing closed",
+                canonicalEmail, existingSubject);
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "IDENTITY_LINK_CONFLICT");
+    }
+
+    /**
+     * Race-safe backfill of the {@code kcSubject} on an email-matched row
+     * that has none. Runs in a {@code REQUIRES_NEW} transaction so a lost
+     * race only rolls back the backfill; a concurrent writer that wins
+     * the unique {@code kc_subject} constraint raises
+     * {@link DataIntegrityViolationException}, which is caught and the
+     * winning row re-fetched by {@code kcSubject}.
+     */
+    private User backfillKcSubject(User emailRow, String kcSubject, String canonicalEmail) {
+        try {
+            return requiresNewTransactionTemplate.execute(status -> {
+                User row = userRepository.findById(emailRow.getId()).orElse(emailRow);
+                if (!StringUtils.hasText(row.getKcSubject())) {
+                    row.setKcSubject(kcSubject);
+                    return userRepository.saveAndFlush(row);
+                }
+                // A concurrent writer backfilled it between our read and
+                // this transaction — honour the subject-aware contract:
+                // same sub → accept, different sub → fail closed.
+                if (row.getKcSubject().trim().equals(kcSubject)) {
+                    return row;
+                }
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "IDENTITY_LINK_CONFLICT");
+            });
+        } catch (DataIntegrityViolationException race) {
+            // Concurrent writer linked the same kc_subject first — the
+            // unique constraint rejected this backfill. Re-fetch the
+            // committed winner row by subject.
+            log.info("kcSubject backfill race for email={} kcSubject={}; re-fetching winner row",
+                    canonicalEmail, kcSubject);
+            return userRepository.findByKcSubject(kcSubject)
+                    .orElseThrow(() -> new ResponseStatusException(
+                            HttpStatus.FORBIDDEN, "PROFILE_MISSING"));
+        }
+    }
+
+    /** Canonical email form used for storage and lookup — trimmed + lower-cased. */
+    public static String canonicalEmail(String email) {
+        return email == null ? null : email.trim().toLowerCase(Locale.ROOT);
     }
 
     /**

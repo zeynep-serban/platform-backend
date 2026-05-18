@@ -82,18 +82,30 @@ class UserSecurityIntegrationTest {
     }
 
     private String issueToken(String audience) {
-        long userId = userIdSequence.getAndIncrement();
-        String email = "admin+" + userId + "@example.com";
-        return issueToken(audience, email, userId);
+        // The `seq` only varies the email so each test gets a distinct
+        // user; the JWT `userId` claim is set to the real persisted row
+        // id by issueToken(audience, email) below.
+        long seq = userIdSequence.getAndIncrement();
+        String email = "admin+" + seq + "@example.com";
+        return issueToken(audience, email);
     }
 
-    private String issueToken(String audience, long userId) {
-        String email = "admin+" + userId + "@example.com";
-        return issueToken(audience, email, userId);
+    private String issueToken(String audience, long seq) {
+        String email = "admin+" + seq + "@example.com";
+        return issueToken(audience, email);
     }
 
-    private String issueToken(String audience, String email, long userId) {
-        ensureUserExists(email);
+    /**
+     * Issues an RS256 token whose {@code userId} claim is the real id of
+     * the (created-if-absent) {@code users} row for {@code email}.
+     *
+     * <p>This mirrors how auth-service mints tokens — the {@code userId}
+     * claim is the authoritative backend user id. The unified
+     * {@code CurrentUserResolver} resolves a numeric {@code userId} via
+     * {@code findById}, so the claim must match the persisted id.
+     */
+    private String issueToken(String audience, String email) {
+        User user = ensureUserExists(email);
         Instant now = Instant.now();
         JwtClaimsSet claims = JwtClaimsSet.builder()
                 .subject(email)
@@ -102,7 +114,7 @@ class UserSecurityIntegrationTest {
                 .issuedAt(now)
                 .expiresAt(now.plusSeconds(600))
                 .claim("email", email)
-                .claim("userId", userId)
+                .claim("userId", user.getId())
                 .claim("role", "ADMIN")
                 .claim("permissions", List.of("VIEW_USERS"))
                 .build();
@@ -110,8 +122,8 @@ class UserSecurityIntegrationTest {
         return jwtEncoder.encode(JwtEncoderParameters.from(headers, claims)).getTokenValue();
     }
 
-    private void ensureUserExists(String email) {
-        userRepository.findByEmail(email).orElseGet(() -> {
+    private User ensureUserExists(String email) {
+        return userRepository.findByEmail(email).orElseGet(() -> {
             User u = new User();
             u.setName(email);
             u.setEmail(email);
@@ -145,7 +157,7 @@ class UserSecurityIntegrationTest {
 
     @Test
     void users_all_should_return_200_when_authorized_party_matches() throws Exception {
-        ensureUserExists("azp@example.com");
+        User azpUser = ensureUserExists("azp@example.com");
         Instant now = Instant.now();
         JwtClaimsSet claims = JwtClaimsSet.builder()
                 .subject("azp@example.com")
@@ -154,7 +166,7 @@ class UserSecurityIntegrationTest {
                 .issuedAt(now)
                 .expiresAt(now.plusSeconds(600))
                 .claim("email", "azp@example.com")
-                .claim("userId", 99L)
+                .claim("userId", azpUser.getId())
                 .claim("azp", "frontend")
                 .build();
         var headers = JwsHeader.with(SignatureAlgorithm.RS256).build();
@@ -167,7 +179,7 @@ class UserSecurityIntegrationTest {
 
     @Test
     void users_all_should_return_200_for_secondary_public_issuer() throws Exception {
-        ensureUserExists("public-issuer@example.com");
+        User publicIssuerUser = ensureUserExists("public-issuer@example.com");
         Instant now = Instant.now();
         JwtClaimsSet claims = JwtClaimsSet.builder()
                 .subject("public-issuer@example.com")
@@ -176,7 +188,7 @@ class UserSecurityIntegrationTest {
                 .issuedAt(now)
                 .expiresAt(now.plusSeconds(600))
                 .claim("email", "public-issuer@example.com")
-                .claim("userId", 100L)
+                .claim("userId", publicIssuerUser.getId())
                 .build();
         var headers = JwsHeader.with(SignatureAlgorithm.RS256).build();
         String token = jwtEncoder.encode(JwtEncoderParameters.from(headers, claims)).getTokenValue();

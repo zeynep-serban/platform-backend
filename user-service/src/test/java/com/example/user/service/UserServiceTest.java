@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
@@ -24,6 +25,11 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.SimpleTransactionStatus;
+import org.springframework.web.server.ResponseStatusException;
 import java.util.Collection;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -85,7 +91,8 @@ class UserServiceTest {
 
         userAuditEventService = new UserAuditEventService(userAuditEventRepository, userAuditMirrorClient);
         authorizationContextService = new FakeAuthzService();
-        userService = new UserService(userRepository, passwordEncoder, userAuditEventService, authorizationContextService, 1440);
+        userService = new UserService(userRepository, passwordEncoder, userAuditEventService,
+                authorizationContextService, new InlineTransactionManager(), 1440);
         SecurityContextHolder.clearContext();
     }
 
@@ -298,6 +305,212 @@ class UserServiceTest {
         // register path learns about Keycloak subject seeding.
         assertNull(savedUser.getValue().getKcSubject());
     }
+
+    // ------------------------------------------------------------------
+    // Keycloak user lazy-provision bridge — UserService.lazyProvisionFromJwt
+    // idempotency + concurrency contract.
+    // ------------------------------------------------------------------
+
+    @Test
+    void lazyProvisionFromJwt_createsLeastPrivilegeUser_whenNoExistingRow() {
+        when(userRepository.findByKcSubject("sub-1")).thenReturn(java.util.Optional.empty());
+        when(userRepository.findByEmailIgnoreCase("new@example.com")).thenReturn(java.util.Optional.empty());
+        when(passwordEncoder.encode(any(String.class))).thenReturn("encoded");
+        ArgumentCaptor<User> saved = ArgumentCaptor.forClass(User.class);
+        when(userRepository.saveAndFlush(saved.capture())).thenAnswer(inv -> inv.getArgument(0));
+
+        User result = userService.lazyProvisionFromJwt(
+                new UserService.LazyProvisionCommand("sub-1", "new@example.com", "New Person"));
+
+        User created = saved.getValue();
+        assertEquals("new@example.com", created.getEmail());
+        assertEquals("New Person", created.getName());
+        assertEquals("USER", created.getRole());          // least-privilege, not derived from JWT
+        assertTrue(created.isEnabled());
+        assertNull(created.getCompanyId());                 // companyId stays null
+        assertEquals("sub-1", created.getKcSubject());
+        assertEquals("New Person", result.getName());
+    }
+
+    @Test
+    void lazyProvisionFromJwt_returnsExistingRow_foundByKcSubject_noNewRow() {
+        User existing = new User();
+        existing.setId(7L);
+        existing.setEmail("known@example.com");
+        existing.setName("Known");
+        existing.setKcSubject("sub-known");
+        when(userRepository.findByKcSubject("sub-known")).thenReturn(java.util.Optional.of(existing));
+
+        User result = userService.lazyProvisionFromJwt(
+                new UserService.LazyProvisionCommand("sub-known", "known@example.com", "Known"));
+
+        assertEquals(7L, result.getId());
+        // kcSubject match short-circuits — no email lookup, no insert.
+        verify(userRepository, never()).findByEmailIgnoreCase(any());
+        verify(userRepository, never()).saveAndFlush(any());
+    }
+
+    @Test
+    void lazyProvisionFromJwt_existingKcSubjectWithDifferentEmail_returnsExisting_doesNotRewriteEmail() {
+        User existing = new User();
+        existing.setId(9L);
+        existing.setEmail("old-canonical@example.com");
+        existing.setName("Drifted");
+        existing.setKcSubject("sub-drift");
+        when(userRepository.findByKcSubject("sub-drift")).thenReturn(java.util.Optional.of(existing));
+
+        // Token now carries a different email for the same subject.
+        User result = userService.lazyProvisionFromJwt(
+                new UserService.LazyProvisionCommand("sub-drift", "new-email@example.com", "Drifted"));
+
+        assertEquals(9L, result.getId());
+        assertEquals("old-canonical@example.com", result.getEmail()); // email NOT rewritten
+        verify(userRepository, never()).saveAndFlush(any());
+    }
+
+    @Test
+    void lazyProvisionFromJwt_normalizesEmailToLowercase() {
+        when(userRepository.findByKcSubject("sub-case")).thenReturn(java.util.Optional.empty());
+        when(userRepository.findByEmailIgnoreCase("mixed@example.com")).thenReturn(java.util.Optional.empty());
+        when(passwordEncoder.encode(any(String.class))).thenReturn("encoded");
+        ArgumentCaptor<User> saved = ArgumentCaptor.forClass(User.class);
+        when(userRepository.saveAndFlush(saved.capture())).thenAnswer(inv -> inv.getArgument(0));
+
+        // Command carries the canonical (lowercase) email — the gate
+        // canonicalises before constructing the command; assert storage
+        // keeps it lowercase regardless.
+        userService.lazyProvisionFromJwt(
+                new UserService.LazyProvisionCommand("sub-case", "Mixed@Example.com", "Case Test"));
+
+        assertEquals("mixed@example.com", saved.getValue().getEmail());
+    }
+
+    @Test
+    void lazyProvisionFromJwt_insertRace_refetchesWinnerRow_noDuplicate() {
+        // First lookups miss → attempt insert. The insert loses the race
+        // and raises DataIntegrityViolationException. The re-fetch then
+        // finds the row the concurrent winner committed.
+        User winner = new User();
+        winner.setId(11L);
+        winner.setEmail("race@example.com");
+        winner.setName("Race Winner");
+        winner.setKcSubject("sub-race");
+
+        when(userRepository.findByKcSubject("sub-race"))
+                .thenReturn(java.util.Optional.empty())   // pre-insert lookup
+                .thenReturn(java.util.Optional.of(winner)); // post-conflict re-fetch
+        when(userRepository.findByEmailIgnoreCase("race@example.com"))
+                .thenReturn(java.util.Optional.empty());
+        when(passwordEncoder.encode(any(String.class))).thenReturn("encoded");
+        when(userRepository.saveAndFlush(any(User.class)))
+                .thenThrow(new DataIntegrityViolationException("duplicate key value violates unique constraint"));
+
+        User result = userService.lazyProvisionFromJwt(
+                new UserService.LazyProvisionCommand("sub-race", "race@example.com", "Race Loser"));
+
+        assertEquals(11L, result.getId());
+        assertEquals("Race Winner", result.getName()); // winner's row, not the loser's payload
+    }
+
+    // ------------------------------------------------------------------
+    // FINDING 1 — subject-aware email fallback. An existing row matched
+    // by email must NOT be returned as-is: a blank kcSubject is
+    // backfilled with the JWT sub, and a DIFFERENT kcSubject fails
+    // closed (IDENTITY_LINK_CONFLICT) instead of silently binding a
+    // foreign Keycloak identity to the profile.
+    // ------------------------------------------------------------------
+
+    @Test
+    void lazyProvisionFromJwt_existingEmail_nullKcSubject_backfillsSub() {
+        // Email-matched row has NO kcSubject — the JWT sub must be
+        // persisted onto it (backfill), not left null.
+        User existing = new User();
+        existing.setId(31L);
+        existing.setEmail("backfill@example.com");
+        existing.setName("Backfill Target");
+        existing.setKcSubject(null);
+
+        when(userRepository.findByKcSubject("sub-backfill")).thenReturn(java.util.Optional.empty());
+        when(userRepository.findByEmailIgnoreCase("backfill@example.com"))
+                .thenReturn(java.util.Optional.of(existing));
+        // The REQUIRES_NEW backfill re-reads the row by id, then saves.
+        when(userRepository.findById(31L)).thenReturn(java.util.Optional.of(existing));
+        ArgumentCaptor<User> saved = ArgumentCaptor.forClass(User.class);
+        when(userRepository.saveAndFlush(saved.capture())).thenAnswer(inv -> inv.getArgument(0));
+
+        User result = userService.lazyProvisionFromJwt(
+                new UserService.LazyProvisionCommand("sub-backfill", "backfill@example.com", "Backfill Target"));
+
+        assertEquals(31L, result.getId());
+        assertEquals("sub-backfill", result.getKcSubject());        // sub persisted
+        assertEquals("sub-backfill", saved.getValue().getKcSubject()); // and saved
+        assertEquals("backfill@example.com", result.getEmail());     // email unchanged
+    }
+
+    @Test
+    void lazyProvisionFromJwt_existingEmail_differentKcSubject_throwsIdentityLinkConflict_noMutation() {
+        // Email-matched row is already bound to a DIFFERENT Keycloak
+        // identity — must fail closed 403 IDENTITY_LINK_CONFLICT and
+        // mutate / create nothing.
+        User existing = new User();
+        existing.setId(41L);
+        existing.setEmail("conflict@example.com");
+        existing.setName("Owned By Someone Else");
+        existing.setKcSubject("sub-original-owner");
+
+        when(userRepository.findByKcSubject("sub-intruder")).thenReturn(java.util.Optional.empty());
+        when(userRepository.findByEmailIgnoreCase("conflict@example.com"))
+                .thenReturn(java.util.Optional.of(existing));
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class, () ->
+                userService.lazyProvisionFromJwt(new UserService.LazyProvisionCommand(
+                        "sub-intruder", "conflict@example.com", "Intruder")));
+
+        assertEquals(org.springframework.http.HttpStatus.FORBIDDEN, ex.getStatusCode());
+        assertTrue(ex.getReason() != null && ex.getReason().contains("IDENTITY_LINK_CONFLICT"));
+        // No row created, and the existing row's subject untouched.
+        verify(userRepository, never()).saveAndFlush(any());
+        verify(userRepository, never()).save(any());
+        assertEquals("sub-original-owner", existing.getKcSubject());
+    }
+
+    @Test
+    void lazyProvisionFromJwt_backfillRace_uniqueSubjectConflictCaught_refetchesWinner() {
+        // Email-matched row has no kcSubject → backfill attempt. A
+        // concurrent writer links the same kc_subject first, so the
+        // unique kc_subject constraint rejects this backfill with
+        // DataIntegrityViolationException. The winner is then re-fetched
+        // by kcSubject.
+        User emailRow = new User();
+        emailRow.setId(51L);
+        emailRow.setEmail("backfill-race@example.com");
+        emailRow.setName("Backfill Race Loser");
+        emailRow.setKcSubject(null);
+
+        User winner = new User();
+        winner.setId(51L);
+        winner.setEmail("backfill-race@example.com");
+        winner.setName("Backfill Race Winner");
+        winner.setKcSubject("sub-backfill-race");
+
+        when(userRepository.findByKcSubject("sub-backfill-race"))
+                .thenReturn(java.util.Optional.empty())    // pre-backfill lookup
+                .thenReturn(java.util.Optional.of(winner)); // post-conflict re-fetch
+        when(userRepository.findByEmailIgnoreCase("backfill-race@example.com"))
+                .thenReturn(java.util.Optional.of(emailRow));
+        when(userRepository.findById(51L)).thenReturn(java.util.Optional.of(emailRow));
+        when(userRepository.saveAndFlush(any(User.class)))
+                .thenThrow(new DataIntegrityViolationException(
+                        "duplicate key value violates unique constraint \"idx_users_kc_subject\""));
+
+        User result = userService.lazyProvisionFromJwt(
+                new UserService.LazyProvisionCommand(
+                        "sub-backfill-race", "backfill-race@example.com", "Backfill Race Loser"));
+
+        assertEquals(51L, result.getId());
+        assertEquals("sub-backfill-race", result.getKcSubject());
+        assertEquals("Backfill Race Winner", result.getName()); // winner's committed row
+    }
 }
 
 /**
@@ -370,5 +583,30 @@ class StubAuthentication implements Authentication {
     @Override
     public String getName() {
         return principal != null ? principal.toString() : "";
+    }
+}
+
+/**
+ * Minimal {@link PlatformTransactionManager} for unit tests — runs the
+ * {@code TransactionTemplate} callback inline with no real transaction.
+ * The lazy-provision insert path's REQUIRES_NEW template needs a
+ * transaction manager; the actual commit/rollback semantics are exercised
+ * by the {@code @SpringBootTest} controller tests against H2, while these
+ * Mockito unit tests only need the callback to execute.
+ */
+class InlineTransactionManager implements PlatformTransactionManager {
+    @Override
+    public TransactionStatus getTransaction(TransactionDefinition definition) {
+        return new SimpleTransactionStatus();
+    }
+
+    @Override
+    public void commit(TransactionStatus status) {
+        // no-op — no real transaction in unit tests
+    }
+
+    @Override
+    public void rollback(TransactionStatus status) {
+        // no-op — no real transaction in unit tests
     }
 }

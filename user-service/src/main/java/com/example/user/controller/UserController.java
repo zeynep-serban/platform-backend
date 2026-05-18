@@ -10,6 +10,7 @@ import com.example.user.model.User;
 import com.example.commonauth.AuthorizationContext;
 import com.example.user.authz.AuthorizationContextService;
 import com.example.user.permission.PermissionActions;
+import com.example.user.service.CurrentUserResolver;
 import com.example.user.service.UserService;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -50,53 +51,35 @@ public class UserController {
 
     private final UserService userService;
     private final AuthorizationContextService authorizationContextService;
+    private final CurrentUserResolver currentUserResolver;
     private final com.example.user.service.UserAuditEventService userAuditEventService;
     private final com.example.user.service.CsvExportGuardService csvExportGuardService;
     private final MeterRegistry meterRegistry;
-    private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(UserController.class);
 
     public UserController(UserService userService,
                           AuthorizationContextService authorizationContextService,
+                          CurrentUserResolver currentUserResolver,
                           com.example.user.service.UserAuditEventService userAuditEventService,
                           com.example.user.service.CsvExportGuardService csvExportGuardService,
                           MeterRegistry meterRegistry) {
         this.userService = userService;
         this.authorizationContextService = authorizationContextService;
+        this.currentUserResolver = currentUserResolver;
         this.userAuditEventService = userAuditEventService;
         this.csvExportGuardService = csvExportGuardService;
         this.meterRegistry = meterRegistry;
     }
 
+    /**
+     * Resolves the current request's backend {@link User} profile.
+     *
+     * <p>Delegates to the shared {@link CurrentUserResolver}; see
+     * {@code UserControllerV1#requireCurrentUser()} for the rationale
+     * (single source of truth + Keycloak user lazy-provision bridge
+     * safety net).
+     */
     private User requireCurrentUser() {
-        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-        if (authentication == null
-                || !authentication.isAuthenticated()
-                || authentication instanceof AnonymousAuthenticationToken) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Kimlik doğrulaması gerekli");
-        }
-        Object principal = authentication.getPrincipal();
-        if (principal instanceof User u) {
-            return u;
-        }
-
-        String username;
-        if (principal instanceof Jwt jwt) {
-            username = firstNonBlank(
-                    jwt.getClaimAsString("email"),
-                    jwt.getClaimAsString("preferred_username"),
-                    authentication.getName());
-        } else {
-            username = authentication.getName();
-        }
-
-        if (!StringUtils.hasText(username)) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Kimlik doğrulaması gerekli");
-        }
-        return userService.findByEmail(username)
-                .orElseThrow(() -> {
-                    LOGGER.warn("Keycloak kullanıcısı bulundu ancak yerel profil yok: {}", username);
-                    return new ResponseStatusException(HttpStatus.FORBIDDEN, "PROFILE_MISSING");
-                });
+        return currentUserResolver.resolveCurrentUser();
     }
 
     private void requireServiceAuthority(String authority) {
@@ -110,18 +93,6 @@ public class UserController {
         if (!hasAuthority) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Yetersiz servis yetkisi");
         }
-    }
-
-    private static String firstNonBlank(String... values) {
-        if (values == null) {
-            return null;
-        }
-        for (String value : values) {
-            if (StringUtils.hasText(value)) {
-                return value;
-            }
-        }
-        return null;
     }
 
     /**
