@@ -282,9 +282,9 @@
       "id": "salary-by-gender", "title": "Cinsiyet Bazlı Ort. Maaş", "chartType": "bar", "size": "md",
       "source": "EMPLOYEES_IN_OUT", "sourceSchema": "workcube_mikrolink",
       "aggregate": {
-        "select": "CASE WHEN ed.SEX = 1 THEN 'Erkek' WHEN ed.SEX = 0 THEN 'Kadın' ELSE 'Belirtilmemiş' END AS label, CAST(AVG(ISNULL(es.latest_salary, 0)) AS INT) AS value",
-        "where": "[workcube_mikrolink].[EMPLOYEES_IN_OUT].FINISH_DATE IS NULL AND [workcube_mikrolink].[EMPLOYEES_IN_OUT].START_DATE IS NOT NULL AND ISNULL(es.latest_salary, 0) > 0",
-        "join": "LEFT JOIN [workcube_mikrolink].[EMPLOYEES_DETAIL] ed ON ed.EMPLOYEE_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].EMPLOYEE_ID LEFT JOIN (SELECT EMPLOYEE_ID, MAX(CASE WHEN M3 > 0 THEN M3 WHEN M2 > 0 THEN M2 WHEN M1 > 0 THEN M1 ELSE 0 END) AS latest_salary FROM [workcube_mikrolink].[EMPLOYEES_SALARY] WHERE PERIOD_YEAR = YEAR(GETDATE()) AND SALARY_CODE = 'BRUT' GROUP BY EMPLOYEE_ID) es ON es.EMPLOYEE_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].EMPLOYEE_ID",
+        "select": "CASE WHEN ed.SEX = 1 THEN 'Erkek' WHEN ed.SEX = 0 THEN 'Kadın' ELSE 'Belirtilmemiş' END AS label, CAST(AVG(es.avg_salary) AS INT) AS value",
+        "where": "[workcube_mikrolink].[EMPLOYEES_IN_OUT].FINISH_DATE IS NULL AND [workcube_mikrolink].[EMPLOYEES_IN_OUT].START_DATE IS NOT NULL AND ISNULL(es.avg_salary, 0) > 0",
+        "join": "LEFT JOIN [workcube_mikrolink].[EMPLOYEES_DETAIL] ed ON ed.EMPLOYEE_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].EMPLOYEE_ID LEFT JOIN (SELECT sal.EMPLOYEE_ID, AVG((ISNULL(sal.M1,0)+ISNULL(sal.M2,0)+ISNULL(sal.M3,0)+ISNULL(sal.M4,0)+ISNULL(sal.M5,0)+ISNULL(sal.M6,0)+ISNULL(sal.M7,0)+ISNULL(sal.M8,0)+ISNULL(sal.M9,0)+ISNULL(sal.M10,0)+ISNULL(sal.M11,0)+ISNULL(sal.M12,0))/12.0) AS avg_salary FROM [workcube_mikrolink].[EMPLOYEES_SALARY] sal JOIN (SELECT EMPLOYEE_ID, MAX(PERIOD_YEAR) AS my FROM [workcube_mikrolink].[EMPLOYEES_SALARY] WHERE PERIOD_YEAR >= YEAR(GETDATE()) - 5 GROUP BY EMPLOYEE_ID) latest ON latest.EMPLOYEE_ID = sal.EMPLOYEE_ID AND latest.my = sal.PERIOD_YEAR GROUP BY sal.EMPLOYEE_ID) es ON es.EMPLOYEE_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].EMPLOYEE_ID",
         "groupBy": "CASE WHEN ed.SEX = 1 THEN 'Erkek' WHEN ed.SEX = 0 THEN 'Kadın' ELSE 'Belirtilmemiş' END"
       }, "chartConfig": { "orientation": "horizontal", "showValues": true }
     },
@@ -427,9 +427,9 @@
       "id": "salary-gender-trend", "title": "Maaş Farkı Trend (Son 6 Yıl)", "chartType": "line", "size": "lg",
       "source": "EMPLOYEES_IN_OUT", "sourceSchema": "workcube_mikrolink",
       "aggregate": {
-        "select": "CAST(s.PERIOD_YEAR AS VARCHAR) AS label, CAST(AVG(CASE WHEN ed.SEX = 1 THEN TRY_CAST(s.MONEY AS DECIMAL(18,2)) END) AS INT) AS male_avg, CAST(AVG(CASE WHEN ed.SEX = 0 THEN TRY_CAST(s.MONEY AS DECIMAL(18,2)) END) AS INT) AS female_avg, CAST(AVG(TRY_CAST(s.MONEY AS DECIMAL(18,2))) AS INT) AS value",
-        "where": "[workcube_mikrolink].[EMPLOYEES_IN_OUT].FINISH_DATE IS NULL AND TRY_CAST(s.MONEY AS DECIMAL(18,2)) > 0 AND s.PERIOD_YEAR >= YEAR(GETDATE()) - 5",
-        "join": "LEFT JOIN [workcube_mikrolink].[EMPLOYEES_DETAIL] ed ON ed.EMPLOYEE_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].EMPLOYEE_ID LEFT JOIN [workcube_mikrolink].[EMPLOYEES_SALARY] s ON s.IN_OUT_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].IN_OUT_ID",
+        "select": "CAST(s.PERIOD_YEAR AS VARCHAR) AS label, CAST(AVG(CASE WHEN ed.SEX = 1 THEN s.yearly_avg END) AS INT) AS male_avg, CAST(AVG(CASE WHEN ed.SEX = 0 THEN s.yearly_avg END) AS INT) AS female_avg, CAST(AVG(s.yearly_avg) AS INT) AS value",
+        "where": "[workcube_mikrolink].[EMPLOYEES_IN_OUT].FINISH_DATE IS NULL AND s.yearly_avg > 0 AND s.PERIOD_YEAR >= YEAR(GETDATE()) - 5",
+        "join": "LEFT JOIN [workcube_mikrolink].[EMPLOYEES_DETAIL] ed ON ed.EMPLOYEE_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].EMPLOYEE_ID LEFT JOIN (SELECT EMPLOYEE_ID, PERIOD_YEAR, AVG((ISNULL(M1,0)+ISNULL(M2,0)+ISNULL(M3,0)+ISNULL(M4,0)+ISNULL(M5,0)+ISNULL(M6,0)+ISNULL(M7,0)+ISNULL(M8,0)+ISNULL(M9,0)+ISNULL(M10,0)+ISNULL(M11,0)+ISNULL(M12,0))/12.0) AS yearly_avg FROM [workcube_mikrolink].[EMPLOYEES_SALARY] GROUP BY EMPLOYEE_ID, PERIOD_YEAR) s ON s.EMPLOYEE_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].EMPLOYEE_ID",
         "groupBy": "s.PERIOD_YEAR",
         "orderBy": "s.PERIOD_YEAR"
       }, "chartConfig": { "showValues": true, "showGrid": true }
@@ -459,6 +459,28 @@
         "join": "LEFT JOIN [workcube_mikrolink].[SETUP_EMPLOYEE_FIRE_REASONS] r ON r.REASON_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].EXPLANATION_ID",
         "groupBy": "CASE WHEN [workcube_mikrolink].[EMPLOYEES_IN_OUT].EXPLANATION_ID IS NOT NULL THEN ISNULL(r.REASON, 'Diger') ELSE 'Gonullu' END",
         "orderBy": "COUNT(*) DESC"
+      }, "chartConfig": { "orientation": "horizontal", "showValues": true }
+    },
+    {
+      "id": "disciplinary-actions", "title": "Disiplin İşlemleri", "chartType": "bar", "size": "md",
+      "source": "EMPLOYEES_IN_OUT", "sourceSchema": "workcube_mikrolink",
+      "aggregate": {
+        "select": "ISNULL(ct.CAUTION_TYPE, 'Belirtilmemiş') AS label, COUNT(DISTINCT ec.CAUTION_ID) AS value",
+        "where": "[workcube_mikrolink].[EMPLOYEES_IN_OUT].FINISH_DATE IS NULL AND ec.CAUTION_DATE >= DATEADD(MONTH, -12, GETDATE())",
+        "join": "INNER JOIN [workcube_mikrolink].[EMPLOYEES_CAUTION] ec ON ec.CAUTION_TO = [workcube_mikrolink].[EMPLOYEES_IN_OUT].EMPLOYEE_ID LEFT JOIN [workcube_mikrolink].[SETUP_CAUTION_TYPE] ct ON ct.CAUTION_TYPE_ID = ec.CAUTION_TYPE_ID",
+        "groupBy": "ISNULL(ct.CAUTION_TYPE, 'Belirtilmemiş')",
+        "orderBy": "COUNT(DISTINCT ec.CAUTION_ID) DESC"
+      }, "chartConfig": { "orientation": "horizontal", "showValues": true }
+    },
+    {
+      "id": "ethics-training-attendance", "title": "Etik Eğitim Katılımı", "chartType": "bar", "size": "md",
+      "source": "EMPLOYEES_IN_OUT", "sourceSchema": "workcube_mikrolink",
+      "aggregate": {
+        "select": "tc.CLASS_NAME AS label, COUNT(DISTINCT tca.EMP_ID) AS value",
+        "where": "[workcube_mikrolink].[EMPLOYEES_IN_OUT].FINISH_DATE IS NULL AND tcat.TRAINING_CAT LIKE '%Etik%'",
+        "join": "INNER JOIN [workcube_mikrolink].[TRAINING_CLASS_ATTENDER] tca ON tca.EMP_ID = [workcube_mikrolink].[EMPLOYEES_IN_OUT].EMPLOYEE_ID INNER JOIN [workcube_mikrolink].[TRAINING_CLASS] tc ON tc.CLASS_ID = tca.CLASS_ID INNER JOIN [workcube_mikrolink].[TRAINING_CAT] tcat ON tcat.TRAINING_CAT_ID = tc.TRAINING_CAT_ID",
+        "groupBy": "tc.CLASS_NAME",
+        "orderBy": "COUNT(DISTINCT tca.EMP_ID) DESC"
       }, "chartConfig": { "orientation": "horizontal", "showValues": true }
     }
   ],
