@@ -28,7 +28,7 @@ import org.junit.jupiter.params.provider.MethodSource;
  * Phase 2 Program 1e — Final report contract gate test.
  *
  * <p>Codex iter-7 §1e-AGREE absorb (thread 019e0119): hybrid model — single
- * cached gate run via {@code @BeforeAll}, then aggregate + 31 per-report
+ * cached gate run via {@code @BeforeAll}, then aggregate + 32 per-report
  * parameterized assertions consume the cached summary. Also writes
  * {@code report.json} + {@code comment.md} artifacts to
  * {@code report-service/target/report-contract-gate/} for the GitHub
@@ -74,9 +74,9 @@ class ReportDefinitionContractTest {
     }
 
     @Test
-    @DisplayName("Aggregate: 31 reports discovered (drift guard)")
-    void aggregate_thirtyOneReportsDiscovered() {
-        assertThat(CACHED.reportCount()).isEqualTo(31);
+    @DisplayName("Aggregate: 32 reports discovered (drift guard)")
+    void aggregate_thirtyTwoReportsDiscovered() {
+        assertThat(CACHED.reportCount()).isEqualTo(32);
     }
 
     @Test
@@ -114,10 +114,10 @@ class ReportDefinitionContractTest {
     }
 
     @Test
-    @DisplayName("ReportRegistry: 31 reports loadable + exceptions.json excluded")
+    @DisplayName("ReportRegistry: 32 reports loadable + exceptions.json excluded")
     void reportRegistry_loadableAcceptanceTest() {
         // Codex iter-3 §1c absorb (carry-forward to 1e): runtime registry must
-        // load all 31 known keys; exceptions.json is excluded as a non-report
+        // load all 32 known keys; exceptions.json is excluded as a non-report
         // (handled by ExceptionsRegistry; ReportRegistry log-swallows the
         // bind failure since it doesn't match ReportDefinition shape).
         // Test uses classpath*:reports/ (multi-entry enumeration) because
@@ -127,8 +127,8 @@ class ReportDefinitionContractTest {
         registry.loadDefinitions();
 
         assertThat(registry.getAll())
-                .as("Runtime registry must load 31 reports")
-                .hasSize(31);
+                .as("Runtime registry must load 32 reports")
+                .hasSize(32);
         assertThat(registry.get("hr-personel-listesi")).isPresent();
         assertThat(registry.get("fin-fatura-satirlari")).isPresent();
         assertThat(registry.get("exceptions")).isEmpty();  // excluded
@@ -224,6 +224,43 @@ class ReportDefinitionContractTest {
                         + "ELSE ACR.OTHER_AMOUNT END AS OTHER_AMOUNT");
     }
 
+    @Test
+    @DisplayName("hr-demografik-yapi: live Workcube demographic grid contract")
+    void hrDemografikYapi_liveWorkcubeContract() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        ReportRegistry registry = new ReportRegistry(mapper, "classpath*:reports/");
+        registry.loadDefinitions();
+
+        ReportDefinition def = registry.get("hr-demografik-yapi").orElseThrow();
+
+        // Column contract — the 12 fields the hand-written
+        // hr-demographic-report module maps onto HrDemographicRow.
+        assertThat(def.columns().stream().map(ColumnDefinition::field).toList())
+                .containsExactly(
+                        "EMPLOYEE_ID", "FULL_NAME", "DEPARTMENT_NAME", "POSITION_NAME",
+                        "GENDER", "AGE", "EDUCATION", "EMPLOYMENT_TYPE", "LOCATION",
+                        "HIRE_DATE", "TENURE_YEARS", "GENERATION");
+
+        ColumnDefinition generation = def.columns().stream()
+                .filter(c -> "GENERATION".equals(c.field()))
+                .findFirst().orElseThrow();
+        assertThat(generation.type()).isEqualTo("text");
+
+        // Codex 019e3b64 B1: no phantom per-report permission — access gates
+        // by REPORT_VIEW + HR_REPORTS group only (the permission catalog has
+        // no reports.hr-demografik-yapi.view grant).
+        assertThat(def.access().permission()).isNull();
+        assertThat(def.access().reportGroup()).isEqualTo("HR_REPORTS");
+
+        // sourceQuery: one row per currently-employed employee (ROW_NUMBER
+        // dedup over active EMPLOYEES_IN_OUT) + N'...' NVARCHAR literals so
+        // Turkish labels survive the MSSQL codepage (Codex 019e3b64 amend).
+        assertThat(def.sourceQuery())
+                .contains("ROW_NUMBER() OVER (PARTITION BY eio.EMPLOYEE_ID")
+                .contains("N'Belirtilmemiş'")
+                .contains("N'Kadın'");
+    }
+
     @ParameterizedTest(name = "{0}")
     @MethodSource("knownReportKeys")
     @DisplayName("Per-report: zero unsuppressed failures")
@@ -235,7 +272,7 @@ class ReportDefinitionContractTest {
     }
 
     static Stream<String> knownReportKeys() {
-        // Drift guard: exact 31-key list matches registry inventory at
+        // Drift guard: exact 32-key list matches registry inventory at
         // commit-time. New report → add here; missing report → fail.
         return Stream.of(
                 "fin-alacak-yaslandirma", "fin-banka-hareketleri", "fin-borc-yaslandirma",
@@ -245,10 +282,10 @@ class ReportDefinitionContractTest {
                 "fin-kasa-hareketleri", "fin-kaynak-eslesme", "fin-masraf-detay",
                 "fin-muhasebe-detay", "fin-muhasebe-fisleri", "fin-nakit-akis-ozet",
                 "fin-stok-fis-detay", "fin-tutar-mutabakat",
-                "hr-bordro-detay", "hr-compensation-detay", "hr-egitim-katilim",
-                "hr-giris-cikis", "hr-izin-raporu", "hr-maas-gecmisi",
-                "hr-maas-raporu", "hr-personel-listesi", "hr-puantaj",
-                "satis-ozet", "stok-durum");
+                "hr-bordro-detay", "hr-compensation-detay", "hr-demografik-yapi",
+                "hr-egitim-katilim", "hr-giris-cikis", "hr-izin-raporu",
+                "hr-maas-gecmisi", "hr-maas-raporu", "hr-personel-listesi",
+                "hr-puantaj", "satis-ozet", "stok-durum");
     }
 
     private static void writeArtifacts(ContractGateSummary summary) throws IOException {

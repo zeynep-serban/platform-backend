@@ -20,7 +20,7 @@ import org.springframework.core.io.Resource;
  *
  * <p>Codex iter-4 §1d-AGREE absorb (thread 019e0119): full registry sweep
  * exercises the entire chain (raw schema validation → bind → semantic RC →
- * exception suppression). Provides the gate green-path proof for all 31
+ * exception suppression). Provides the gate green-path proof for all 32
  * migrated reports.
  *
  * <p>Acceptance criteria:
@@ -40,12 +40,12 @@ import org.springframework.core.io.Resource;
 class ReportContractGateTest {
 
     @Test
-    void gate_full31ReportRegistry_returnsCleanReport() {
+    void gate_full32ReportRegistry_returnsCleanReport() {
         ContractReport report = ReportContractGate.create().gate();
 
         assertThat(report.reportCount())
-                .as("All 31 migrated reports plus exceptions.json (excluded) discovered by sweep")
-                .isEqualTo(31);
+                .as("All 32 migrated reports plus exceptions.json (excluded) discovered by sweep")
+                .isEqualTo(32);
 
         // Codex iter-4 §1d-AGREE: gate must produce zero unsuppressed FAILs.
         // Exception entries cover known RC-004 + RC-001 debt. Anything beyond

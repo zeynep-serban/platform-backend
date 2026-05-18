@@ -18,7 +18,7 @@ import org.springframework.core.io.DefaultResourceLoader;
  *   <li>{@code REPORT_KEY_DUPLICATE} — 2 files share key</li>
  *   <li>{@code REPORT_FILE_LOAD_ERROR} — single file parse fail</li>
  *   <li>Schema violations from individual files surface via sweep</li>
- *   <li>Built-in 31 reports schema-valid (Codex iter-2 minimum acceptance)</li>
+ *   <li>Built-in 32 reports schema-valid (Codex iter-2 minimum acceptance)</li>
  * </ul>
  */
 class RegistrySweepTest {
@@ -108,7 +108,7 @@ class RegistrySweepTest {
 
     @Test
     void sweep_builtinReports_areAllSchemaValid() {
-        // Codex iter-2 minimum acceptance: 31/31 migrated reports schema-valid
+        // Codex iter-2 minimum acceptance: 32/32 migrated reports schema-valid
         // AND no duplicate keys.
         RegistrySweep sweep = new RegistrySweep(
                 new ObjectMapper().findAndRegisterModules(),
@@ -118,7 +118,7 @@ class RegistrySweepTest {
         List<ContractViolation> violations = sweep.sweep();
 
         assertThat(violations)
-                .as("All 31 migrated reports must pass schema gate; %s",
+                .as("All 32 migrated reports must pass schema gate; %s",
                         violations.stream().limit(5).toList())
                 .isEmpty();
     }

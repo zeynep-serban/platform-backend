@@ -1,0 +1,108 @@
+{
+  "contractVersion": 1,
+  "key": "hr-demografik-yapi",
+  "version": "1.0",
+  "title": "İK Demografik Yapı",
+  "description": "Aktif çalışanların cinsiyet, yaş, eğitim, kıdem, kuşak ve lokasyon kırılımıyla demografik yapı raporu (canlı Workcube verisi).",
+  "category": "İnsan Kaynakları",
+  "sourceQuery": "SELECT e.EMPLOYEE_ID AS EMPLOYEE_ID, RTRIM(LTRIM(ISNULL(e.EMPLOYEE_NAME,'')+' '+ISNULL(e.EMPLOYEE_SURNAME,''))) AS FULL_NAME, ISNULL(NULLIF(RTRIM(d.DEPARTMENT_HEAD),''),N'Belirtilmemiş') AS DEPARTMENT_NAME, ISNULL(NULLIF(RTRIM(pos.POSITION_NAME),''),N'Belirtilmemiş') AS POSITION_NAME, CASE det.SEX WHEN 1 THEN N'Erkek' WHEN 0 THEN N'Kadın' ELSE N'Diğer' END AS GENDER, CASE WHEN idn.BIRTH_DATE IS NOT NULL THEN DATEDIFF(YEAR,idn.BIRTH_DATE,GETDATE()) ELSE NULL END AS AGE, CASE det.LAST_SCHOOL WHEN 1 THEN N'İlkokul' WHEN 8 THEN N'Ortaokul' WHEN 2 THEN N'Lise' WHEN 9 THEN N'Meslek Lisesi' WHEN 3 THEN N'Önlisans' WHEN 4 THEN N'Lisans' WHEN 10 THEN N'Mühendislik' WHEN 11 THEN N'Fakülte' WHEN 5 THEN N'Yüksek Lisans' WHEN 6 THEN N'Doktora' ELSE N'Belirtilmemiş' END AS EDUCATION, CASE WHEN ISNULL(io.IS_KISMI_ISTIHDAM,0)=1 THEN N'Yarı Zamanlı' WHEN ISNULL(io.SURELI_IS_AKDI,0)=1 THEN N'Sözleşmeli' ELSE N'Tam Zamanlı' END AS EMPLOYMENT_TYPE, ISNULL(NULLIF(RTRIM(d2.BRANCH_CITY),''),N'Belirtilmemiş') AS LOCATION, io.START_DATE AS HIRE_DATE, CAST(DATEDIFF(DAY,io.START_DATE,GETDATE())/365.25 AS DECIMAL(5,1)) AS TENURE_YEARS, CASE WHEN idn.BIRTH_DATE IS NULL THEN N'Belirtilmemiş' WHEN YEAR(idn.BIRTH_DATE)<=1964 THEN N'Baby Boomer' WHEN YEAR(idn.BIRTH_DATE)<=1980 THEN N'X Kuşağı' WHEN YEAR(idn.BIRTH_DATE)<=1996 THEN N'Y Kuşağı' ELSE N'Z Kuşağı' END AS GENERATION FROM (SELECT eio.EMPLOYEE_ID, eio.START_DATE, eio.BRANCH_ID, eio.DEPARTMENT_ID, eio.IS_KISMI_ISTIHDAM, eio.SURELI_IS_AKDI, ROW_NUMBER() OVER (PARTITION BY eio.EMPLOYEE_ID ORDER BY eio.START_DATE DESC, eio.IN_OUT_ID DESC) AS RN FROM [workcube_mikrolink].[EMPLOYEES_IN_OUT] eio WITH (NOLOCK) WHERE eio.FINISH_DATE IS NULL AND eio.START_DATE IS NOT NULL) io INNER JOIN [workcube_mikrolink].[EMPLOYEES] e WITH (NOLOCK) ON e.EMPLOYEE_ID=io.EMPLOYEE_ID LEFT JOIN [workcube_mikrolink].[DEPARTMENT] d WITH (NOLOCK) ON d.DEPARTMENT_ID=io.DEPARTMENT_ID LEFT JOIN [workcube_mikrolink].[BRANCH] d2 WITH (NOLOCK) ON d2.BRANCH_ID=io.BRANCH_ID OUTER APPLY (SELECT TOP 1 epos.POSITION_NAME FROM [workcube_mikrolink].[EMPLOYEE_POSITIONS] epos WITH (NOLOCK) WHERE epos.EMPLOYEE_ID=io.EMPLOYEE_ID AND epos.POSITION_STATUS=1 ORDER BY epos.IS_MASTER DESC, epos.POSITION_ID DESC) pos OUTER APPLY (SELECT TOP 1 ed.SEX, ed.LAST_SCHOOL FROM [workcube_mikrolink].[EMPLOYEES_DETAIL] ed WITH (NOLOCK) WHERE ed.EMPLOYEE_ID=io.EMPLOYEE_ID ORDER BY ed.EMPLOYEE_DETAIL_ID DESC) det OUTER APPLY (SELECT TOP 1 ei.BIRTH_DATE FROM [workcube_mikrolink].[EMPLOYEES_IDENTY] ei WITH (NOLOCK) WHERE ei.EMPLOYEE_ID=io.EMPLOYEE_ID ORDER BY ei.EMPLOYEE_IDENTY_ID DESC) idn WHERE io.RN=1",
+  "sourceSchema": "workcube_mikrolink",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "none",
+    "scopeType": "global",
+    "schemaResolver": "sourceSchemaLiteral",
+    "reason": "Active-employee demographic data (HR org structure); no tenant scoping — access controlled via REPORT_VIEW + HR_REPORTS group gates"
+  },
+  "columns": [
+    {
+      "field": "EMPLOYEE_ID",
+      "headerName": "Sicil No",
+      "type": "number",
+      "width": 90,
+      "sensitive": false
+    },
+    {
+      "field": "FULL_NAME",
+      "headerName": "Ad Soyad",
+      "type": "text",
+      "width": 200,
+      "sensitive": false
+    },
+    {
+      "field": "DEPARTMENT_NAME",
+      "headerName": "Departman",
+      "type": "text",
+      "width": 160,
+      "sensitive": false
+    },
+    {
+      "field": "POSITION_NAME",
+      "headerName": "Pozisyon",
+      "type": "text",
+      "width": 180,
+      "sensitive": false
+    },
+    {
+      "field": "GENDER",
+      "headerName": "Cinsiyet",
+      "type": "text",
+      "width": 90,
+      "sensitive": false
+    },
+    {
+      "field": "AGE",
+      "headerName": "Yaş",
+      "type": "number",
+      "width": 70,
+      "sensitive": false
+    },
+    {
+      "field": "EDUCATION",
+      "headerName": "Eğitim",
+      "type": "text",
+      "width": 130,
+      "sensitive": false
+    },
+    {
+      "field": "EMPLOYMENT_TYPE",
+      "headerName": "İstihdam Türü",
+      "type": "text",
+      "width": 120,
+      "sensitive": false
+    },
+    {
+      "field": "LOCATION",
+      "headerName": "Lokasyon",
+      "type": "text",
+      "width": 120,
+      "sensitive": false
+    },
+    {
+      "field": "HIRE_DATE",
+      "headerName": "İşe Giriş",
+      "type": "date",
+      "width": 110,
+      "sensitive": false
+    },
+    {
+      "field": "TENURE_YEARS",
+      "headerName": "Kıdem (Yıl)",
+      "type": "number",
+      "width": 90,
+      "sensitive": false
+    },
+    {
+      "field": "GENERATION",
+      "headerName": "Kuşak",
+      "type": "text",
+      "width": 110,
+      "sensitive": false
+    }
+  ],
+  "defaultSort": "FULL_NAME",
+  "defaultSortDirection": "ASC",
+  "access": {
+    "reportGroup": "HR_REPORTS"
+  }
+}
