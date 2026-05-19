@@ -107,6 +107,23 @@ public class NotificationDelivery {
     @Column(name = "claim_token", length = 64)
     private String claimToken;
 
+    /**
+     * Faz 23.3 PR-3 — JetSMS DLR polling state. POLL-mode provider (JetSMS)
+     * ACCEPTED row'ları için bir sonraki poll zamanı; PUSH-mode (NetGSM)
+     * row'larında NULL. {@code JetSmsDlrPollingWorker} {@code WHERE
+     * dlr_next_poll_at <= now} ile claim eder.
+     */
+    @Column(name = "dlr_next_poll_at")
+    private OffsetDateTime dlrNextPollAt;
+
+    /** Faz 23.3 PR-3 — JetSMS DLR son poll zamanı (observability + max-age). */
+    @Column(name = "dlr_last_poll_at")
+    private OffsetDateTime dlrLastPollAt;
+
+    /** Faz 23.3 PR-3 — JetSMS DLR toplam poll sayısı (monitoring). */
+    @Column(name = "dlr_poll_count", nullable = false)
+    private int dlrPollCount = 0;
+
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt;
 
@@ -163,6 +180,12 @@ public class NotificationDelivery {
     }
     public String getClaimToken() { return claimToken; }
     public void setClaimToken(String claimToken) { this.claimToken = claimToken; }
+    public OffsetDateTime getDlrNextPollAt() { return dlrNextPollAt; }
+    public void setDlrNextPollAt(OffsetDateTime dlrNextPollAt) { this.dlrNextPollAt = dlrNextPollAt; }
+    public OffsetDateTime getDlrLastPollAt() { return dlrLastPollAt; }
+    public void setDlrLastPollAt(OffsetDateTime dlrLastPollAt) { this.dlrLastPollAt = dlrLastPollAt; }
+    public int getDlrPollCount() { return dlrPollCount; }
+    public void setDlrPollCount(int dlrPollCount) { this.dlrPollCount = dlrPollCount; }
     public OffsetDateTime getCreatedAt() { return createdAt; }
     public OffsetDateTime getUpdatedAt() { return updatedAt; }
 

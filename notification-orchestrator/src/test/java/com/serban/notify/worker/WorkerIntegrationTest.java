@@ -5,6 +5,8 @@ import com.serban.notify.adapter.ChannelAdapter;
 import com.serban.notify.adapter.SlackWebhookAdapter;
 import com.serban.notify.adapter.SmtpAdapter;
 import com.serban.notify.adapter.WebhookEgressAdapter;
+import com.serban.notify.adapter.sms.JetSmsProvider;
+import com.serban.notify.adapter.sms.SmsDlrPollResult;
 import com.serban.notify.domain.DeadLetter;
 import com.serban.notify.domain.NotificationDelivery;
 import com.serban.notify.domain.NotificationIntent;
@@ -45,6 +47,8 @@ import static org.mockito.Mockito.when;
  *   <li>OutboxPoller: lease recovery (stale PROCESSING → PENDING)</li>
  *   <li>RetryWorker: due RETRY claim + redispatch + DELIVERED</li>
  *   <li>RetryWorker: max-attempts → DLQ + intent FAILED</li>
+ *   <li>JetSmsDlrPollingWorker: claim + poll → terminal ingest / reschedule
+ *       (Faz 23.3 PR-3 — gerçek JPA context {@code @Transactional} smoke)</li>
  *   <li>SKIP LOCKED concurrency safety (sanity-level)</li>
  * </ul>
  *
@@ -61,6 +65,9 @@ import static org.mockito.Mockito.when;
     // Codex iter-1 P2 absorb: scheduling-enabled=false disables @Scheduled tick;
     // tests call runCycle() manually for deterministic isolation.
     "notify.worker.scheduling-enabled=false",
+    // Faz 23.3 PR-3: JetSMS DLR poll worker @Scheduled auto-tick kapalı —
+    // jetSmsDlrPollingWorker* testleri runCycle()'ı manuel çağırır.
+    "notify.adapters.sms.jetsms.dlr-scheduling-enabled=false",
     "notify.worker.poll-delay-ms=3600000",
     "notify.worker.lease-duration-ms=10000",
     "notify.retry.max-attempts=2",
@@ -85,6 +92,10 @@ class WorkerIntegrationTest extends AbstractPostgresTest {
     @MockBean WebhookEgressAdapter webhookAdapter;
     // Faz 23.3 multi-provider: SMS channel adapter facade mock'u
     @MockBean com.serban.notify.adapter.sms.SmsAdapter smsAdapter;
+    // Faz 23.3 PR-3: JetSMS DLR poll worker gerçek bean; provider mock'lu
+    // (pollDelivery gerçek HTTP yapmasın).
+    @MockBean JetSmsProvider jetSmsProvider;
+    @Autowired JetSmsDlrPollingWorker jetSmsDlrPollingWorker;
 
     @BeforeEach
     void seed() {
@@ -379,5 +390,89 @@ class WorkerIntegrationTest extends AbstractPostgresTest {
         // P1 fix kanıtı: failover sonrası gerçek provider persist edildi
         assertThat(reloaded.getProvider()).isEqualTo("netgsm");
         assertThat(reloaded.getAttemptCount()).isEqualTo(2);
+    }
+
+    // ─── Faz 23.3 PR-3: JetSMS DLR polling worker ────────────────────────
+
+    @Test
+    void jetSmsDlrPollingWorkerClaimsAndTerminalizesDelivered() {
+        // Codex `019e3ff7` P1+P2 absorb — gerçek JPA context smoke.
+        // P1: @Transactional self-proxy claim (claimJetsmsDlrPollBatch native
+        // @Modifying) gerçek PG'de TransactionRequiredException atmadan çalışır
+        // (mock unit test bunu yakalamaz). P2: terminal sonrası claim_token
+        // temizlenir + dlr poll metadata (last_poll_at / poll_count) kaydedilir.
+        NotificationIntent intent = saveIntent("sms", "+905321234567");
+        intent.setStatus(NotificationIntent.Status.PROCESSING);
+        intentRepo.save(intent);
+        NotificationDelivery delivery = saveAcceptedJetsmsDelivery(intent, "jetsms-756");
+
+        when(jetSmsProvider.pollDelivery(List.of("756")))
+            .thenReturn(List.of(SmsDlrPollResult.delivered("756", "1")));
+
+        int processed = jetSmsDlrPollingWorker.runCycle();
+
+        assertThat(processed).isEqualTo(1);
+        NotificationDelivery reloaded = deliveryRepo.findById(delivery.getId()).orElseThrow();
+        assertThat(reloaded.getStatus()).isEqualTo(NotificationDelivery.Status.DELIVERED);
+        assertThat(reloaded.getDeliveredAt()).isNotNull();
+        // P2: terminal poll housekeeping — claim_token temizlendi, metadata yazıldı
+        assertThat(reloaded.getClaimToken()).isNull();
+        assertThat(reloaded.getDlrLastPollAt()).isNotNull();
+        assertThat(reloaded.getDlrPollCount()).isEqualTo(1);
+        assertThat(reloaded.getDlrNextPollAt()).isNull();
+
+        // DLR son outstanding delivery'yi kapattı → intent COMPLETED
+        NotificationIntent reloadedIntent =
+            intentRepo.findByIntentId(intent.getIntentId()).orElseThrow();
+        assertThat(reloadedIntent.getStatus()).isEqualTo(NotificationIntent.Status.COMPLETED);
+    }
+
+    @Test
+    void jetSmsDlrPollingWorkerReschedulesPendingDelivery() {
+        // Codex `019e3ff7` P1 absorb — rescheduleDlrPoll native @Modifying UPDATE
+        // gerçek PG'de @Transactional ile çalışır. Pending sonrası dlr_next_poll_at
+        // ileri alınır, claim_token temizlenir, poll_count artırılır; row ACCEPTED.
+        NotificationIntent intent = saveIntent("sms", "+905321234567");
+        intent.setStatus(NotificationIntent.Status.PROCESSING);
+        intentRepo.save(intent);
+        NotificationDelivery delivery = saveAcceptedJetsmsDelivery(intent, "jetsms-900");
+
+        when(jetSmsProvider.pollDelivery(List.of("900")))
+            .thenReturn(List.of(SmsDlrPollResult.pending("900", "2")));
+
+        int processed = jetSmsDlrPollingWorker.runCycle();
+
+        assertThat(processed).isEqualTo(1);
+        NotificationDelivery reloaded = deliveryRepo.findById(delivery.getId()).orElseThrow();
+        // Pending — terminal DEĞİL; hâlâ ACCEPTED, bir sonraki poll'e ertelendi
+        assertThat(reloaded.getStatus()).isEqualTo(NotificationDelivery.Status.ACCEPTED);
+        assertThat(reloaded.getDlrNextPollAt()).isNotNull();
+        assertThat(reloaded.getDlrNextPollAt()).isAfter(OffsetDateTime.now());
+        assertThat(reloaded.getClaimToken()).isNull();
+        assertThat(reloaded.getDlrPollCount()).isEqualTo(1);
+    }
+
+    /**
+     * Helper: persist an ACCEPTED jetsms delivery (DLR poll worker claim
+     * adayı). recipient_hash plan-derived (PiiRedactor pepper) — createRetry
+     * Delivery ile aynı gerekçe.
+     */
+    private NotificationDelivery saveAcceptedJetsmsDelivery(
+        NotificationIntent intent, String providerMsgId
+    ) {
+        DeliveryTarget target = planService.plan(intent, null).get(0);
+        NotificationDelivery delivery = new NotificationDelivery();
+        delivery.setIntentId(intent.getIntentId());
+        delivery.setChannel("sms");
+        delivery.setRecipientType(NotificationDelivery.RecipientType.valueOf(
+            target.recipientType().equals("subscriber") ? "SUBSCRIBER"
+                : target.recipientType().equals("external") ? "EXTERNAL" : "CHANNEL"
+        ));
+        delivery.setRecipientId(target.recipientId());
+        delivery.setRecipientHash(target.recipientHash());
+        delivery.setProvider("jetsms");
+        delivery.setProviderMsgId(providerMsgId);
+        delivery.setStatus(NotificationDelivery.Status.ACCEPTED);
+        return deliveryRepo.save(delivery);
     }
 }

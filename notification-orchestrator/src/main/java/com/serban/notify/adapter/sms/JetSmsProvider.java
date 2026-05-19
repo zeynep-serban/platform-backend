@@ -53,7 +53,7 @@ public class JetSmsProvider implements SmsProvider {
     private static final Logger log = LoggerFactory.getLogger(JetSmsProvider.class);
     private static final int CONNECT_TIMEOUT_SEC = 5;
     private static final int RESPONSE_TIMEOUT_SEC = 15;
-    static final String PROVIDER_KEY = "jetsms";
+    public static final String PROVIDER_KEY = "jetsms";
 
     /** JetSMS ek yardım dosyası: bu karakterler %XX hex'e çevrilir, diğerleri raw. */
     private static final String RESERVED_CHARS = "!*'();:@&=+$,/?%#[]";
@@ -64,6 +64,9 @@ public class JetSmsProvider implements SmsProvider {
 
     @Value("${notify.adapters.sms.jetsms.api-url:https://api.jetsms.com.tr/SMS-Web/HttpSmsSend}")
     private String apiUrl;
+
+    @Value("${notify.adapters.sms.jetsms.report-url:https://api.jetsms.com.tr/SMS-Web/HttpSmsReport}")
+    private String reportUrl;
 
     @Value("${notify.adapters.sms.jetsms.username:}")
     private String username;
@@ -168,6 +171,132 @@ public class JetSmsProvider implements SmsProvider {
             return SmsSendResult.retry(PROVIDER_KEY, SmsFailureClass.TIMEOUT,
                 "io:" + e.getClass().getSimpleName());
         }
+    }
+
+    /**
+     * JetSMS DLR poll — {@code HttpSmsReport} (Faz 23.3 PR-3).
+     *
+     * <p>JetSMS DLR webhook GÖNDERMEZ; backend bu method ile periyodik poll
+     * eder ({@code JetSmsDlrPollingWorker}). POST form-urlencoded:
+     * {@code Username/Password/Originator/MessageIDs} ({@code |} ayraçlı).
+     * Response: {@code Status=0 MessageStates=2|2}.
+     *
+     * <p>MessageState → {@link SmsDlrPollResult.DeliveryStatus}:
+     * {@code 1}→DELIVERED; {@code 3/4/9}→FAILED; {@code 0/2/6/7/8}→PENDING
+     * (yeniden poll); {@code -1}→FAILED (yanlış MessageID — correlator
+     * güvenilemez, terminal FAILED).
+     *
+     * @param providerMsgIds raw JetSMS message ID listesi ({@code "jetsms-"}
+     *                       prefix ÇIKARILMIŞ)
+     * @return her input ID için DLR durumu (sıra input ile aynı; eşleşmeyen
+     *         ID PENDING-fallback)
+     */
+    @Override
+    public java.util.List<SmsDlrPollResult> pollDelivery(java.util.List<String> providerMsgIds) {
+        if (providerMsgIds == null || providerMsgIds.isEmpty()) {
+            return java.util.List.of();
+        }
+        if (username == null || username.isBlank()
+            || originator == null || originator.isBlank()) {
+            log.warn("jetsms DLR poll config missing — pending fallback");
+            return providerMsgIds.stream()
+                .map(id -> SmsDlrPollResult.pending(id, "config"))
+                .toList();
+        }
+
+        String joined = String.join("|", providerMsgIds);
+        String body = "Username=" + jetEncode(username)
+            + "&Password=" + jetEncode(password)
+            + "&Originator=" + jetEncode(originator)
+            + "&MessageIDs=" + jetEncode(joined);
+
+        try (CloseableHttpClient client = newClient()) {
+            HttpPost post = new HttpPost(reportUrl);
+            post.setHeader("Content-Type", "application/x-www-form-urlencoded; charset=ISO-8859-9");
+            post.setEntity(new StringEntity(body, ISO_8859_9));
+
+            return client.execute(post, response -> {
+                int httpCode = response.getCode();
+                String respBody = readEntityBody(response);
+                if (httpCode >= 400 || respBody.isBlank()) {
+                    log.warn("jetsms DLR poll HTTP {} / empty — pending fallback", httpCode);
+                    return providerMsgIds.stream()
+                        .map(id -> SmsDlrPollResult.pending(id, "http" + httpCode))
+                        .toList();
+                }
+                return parseReportResponse(providerMsgIds, respBody);
+            });
+        } catch (IOException e) {
+            log.warn("jetsms DLR poll IOException ({}) — pending fallback",
+                e.getClass().getSimpleName());
+            return providerMsgIds.stream()
+                .map(id -> SmsDlrPollResult.pending(id, "io"))
+                .toList();
+        }
+    }
+
+    /**
+     * {@code HttpSmsReport} response parse: {@code Status=0 MessageStates=2|2}.
+     * MessageStates input MessageIDs ile aynı sırada; index-eşleme.
+     */
+    static java.util.List<SmsDlrPollResult> parseReportResponse(
+            java.util.List<String> providerMsgIds, String body) {
+        String statusRaw = extractField(body, "Status");
+        int status;
+        try {
+            status = Integer.parseInt(statusRaw.trim());
+        } catch (NumberFormatException nfe) {
+            log.warn("jetsms DLR poll unparseable Status — pending fallback");
+            return providerMsgIds.stream()
+                .map(id -> SmsDlrPollResult.pending(id, "bad-status"))
+                .toList();
+        }
+        if (status != 0) {
+            // Status -3 (bad MessageID format) / -5 (login) / -15 / -99 →
+            // bu batch poll edilemedi; tümü pending, sonraki cycle tekrar.
+            log.warn("jetsms DLR poll Status={} — pending fallback (batch retry)", status);
+            return providerMsgIds.stream()
+                .map(id -> SmsDlrPollResult.pending(id, String.valueOf(status)))
+                .toList();
+        }
+
+        String statesRaw = extractField(body, "MessageStates");
+        String[] states = statesRaw.isEmpty()
+            ? new String[0] : statesRaw.split("\\|", -1);
+
+        java.util.List<SmsDlrPollResult> results = new java.util.ArrayList<>(providerMsgIds.size());
+        for (int i = 0; i < providerMsgIds.size(); i++) {
+            String rawId = providerMsgIds.get(i);
+            if (i >= states.length) {
+                // Response state count input'tan az — eşleşmeyen ID pending.
+                results.add(SmsDlrPollResult.pending(rawId, "no-state"));
+                continue;
+            }
+            results.add(mapMessageState(rawId, states[i].trim()));
+        }
+        return results;
+    }
+
+    /**
+     * JetSMS MessageState kodu → {@link SmsDlrPollResult}.
+     *
+     * <p>{@code 1}→DELIVERED; {@code 3/4/9}→FAILED; {@code 0/2/6/7/8}→PENDING;
+     * {@code -1}→FAILED (yanlış MessageID); unparseable→PENDING.
+     */
+    static SmsDlrPollResult mapMessageState(String rawId, String stateRaw) {
+        int state;
+        try {
+            state = Integer.parseInt(stateRaw);
+        } catch (NumberFormatException nfe) {
+            return SmsDlrPollResult.pending(rawId, "bad-state");
+        }
+        return switch (state) {
+            case 1 -> SmsDlrPollResult.delivered(rawId, "1");
+            case 3, 4, 9 -> SmsDlrPollResult.failed(rawId, String.valueOf(state));
+            case -1 -> SmsDlrPollResult.failed(rawId, "-1");  // wrong MessageID
+            case 0, 2, 6, 7, 8 -> SmsDlrPollResult.pending(rawId, String.valueOf(state));
+            default -> SmsDlrPollResult.pending(rawId, String.valueOf(state));
+        };
     }
 
     /**

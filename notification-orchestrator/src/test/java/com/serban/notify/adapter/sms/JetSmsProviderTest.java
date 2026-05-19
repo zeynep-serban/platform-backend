@@ -34,6 +34,7 @@ class JetSmsProviderTest {
     void setUp() {
         provider = new JetSmsProvider();
         ReflectionTestUtils.setField(provider, "apiUrl", jetsms.url("/SMS-Web/HttpSmsSend"));
+        ReflectionTestUtils.setField(provider, "reportUrl", jetsms.url("/SMS-Web/HttpSmsReport"));
         ReflectionTestUtils.setField(provider, "username", "test-user");
         ReflectionTestUtils.setField(provider, "password", "test-pass");
         ReflectionTestUtils.setField(provider, "originator", "Notify");
@@ -313,12 +314,122 @@ class JetSmsProviderTest {
         assertThat(JetSmsProvider.statusFailureClass(-99)).isEqualTo(SmsFailureClass.UNKNOWN_TRANSIENT);
     }
 
+    // ─── DLR polling (HttpSmsReport — PR-3) ──────────────────────────────
+
     @Test
-    void pollDeliveryUnsupportedInPr2() {
-        // PR-2'de pollDelivery default UnsupportedOperationException;
-        // PR-3 JetSmsDlrPollingWorker ile override edilir.
-        org.junit.jupiter.api.Assertions.assertThrows(
-            UnsupportedOperationException.class,
-            () -> provider.pollDelivery(java.util.List.of("756")));
+    void pollDeliveryState1Delivered() {
+        jetsms.stubFor(post(urlEqualTo("/SMS-Web/HttpSmsReport"))
+            .willReturn(aResponse().withStatus(200).withBody("Status=0 MessageStates=1")));
+
+        java.util.List<SmsDlrPollResult> r = provider.pollDelivery(java.util.List.of("756"));
+
+        assertThat(r).hasSize(1);
+        assertThat(r.get(0).rawProviderMsgId()).isEqualTo("756");
+        assertThat(r.get(0).terminal()).isTrue();
+        assertThat(r.get(0).deliveryStatus())
+            .isEqualTo(SmsDlrPollResult.DeliveryStatus.DELIVERED);
+    }
+
+    @Test
+    void pollDeliveryState3Failed() {
+        jetsms.stubFor(post(urlEqualTo("/SMS-Web/HttpSmsReport"))
+            .willReturn(aResponse().withStatus(200).withBody("Status=0 MessageStates=3")));
+
+        java.util.List<SmsDlrPollResult> r = provider.pollDelivery(java.util.List.of("756"));
+
+        assertThat(r.get(0).deliveryStatus()).isEqualTo(SmsDlrPollResult.DeliveryStatus.FAILED);
+        assertThat(r.get(0).terminal()).isTrue();
+    }
+
+    @Test
+    void pollDeliveryState2Pending() {
+        jetsms.stubFor(post(urlEqualTo("/SMS-Web/HttpSmsReport"))
+            .willReturn(aResponse().withStatus(200).withBody("Status=0 MessageStates=2")));
+
+        java.util.List<SmsDlrPollResult> r = provider.pollDelivery(java.util.List.of("756"));
+
+        assertThat(r.get(0).deliveryStatus()).isEqualTo(SmsDlrPollResult.DeliveryStatus.PENDING);
+        assertThat(r.get(0).terminal()).isFalse();
+    }
+
+    @Test
+    void pollDeliveryMultiIdOrderedMapping() {
+        jetsms.stubFor(post(urlEqualTo("/SMS-Web/HttpSmsReport"))
+            .willReturn(aResponse().withStatus(200).withBody("Status=0 MessageStates=1|3|2")));
+
+        java.util.List<SmsDlrPollResult> r = provider.pollDelivery(
+            java.util.List.of("100", "200", "300"));
+
+        assertThat(r).hasSize(3);
+        assertThat(r.get(0).rawProviderMsgId()).isEqualTo("100");
+        assertThat(r.get(0).deliveryStatus()).isEqualTo(SmsDlrPollResult.DeliveryStatus.DELIVERED);
+        assertThat(r.get(1).rawProviderMsgId()).isEqualTo("200");
+        assertThat(r.get(1).deliveryStatus()).isEqualTo(SmsDlrPollResult.DeliveryStatus.FAILED);
+        assertThat(r.get(2).rawProviderMsgId()).isEqualTo("300");
+        assertThat(r.get(2).deliveryStatus()).isEqualTo(SmsDlrPollResult.DeliveryStatus.PENDING);
+
+        // "|" JetSMS ayraç karakteri — reserved set'te değil, jetEncode raw bırakır
+        // (JetSMS API "|" ile multi-ID parse eder, encode edilmemeli).
+        jetsms.verify(postRequestedFor(urlEqualTo("/SMS-Web/HttpSmsReport"))
+            .withRequestBody(containing("MessageIDs=100|200|300")));
+    }
+
+    @Test
+    void pollDeliveryWrongIdStateNeg1Failed() {
+        // MessageState -1 (yanlış MessageID) → FAILED (correlator güvenilemez)
+        jetsms.stubFor(post(urlEqualTo("/SMS-Web/HttpSmsReport"))
+            .willReturn(aResponse().withStatus(200).withBody("Status=0 MessageStates=-1")));
+
+        java.util.List<SmsDlrPollResult> r = provider.pollDelivery(java.util.List.of("756"));
+
+        assertThat(r.get(0).deliveryStatus()).isEqualTo(SmsDlrPollResult.DeliveryStatus.FAILED);
+    }
+
+    @Test
+    void pollDeliveryStatusErrorAllPending() {
+        // Status != 0 (örn -5 login) → batch poll edilemedi, tümü pending
+        jetsms.stubFor(post(urlEqualTo("/SMS-Web/HttpSmsReport"))
+            .willReturn(aResponse().withStatus(200).withBody("Status=-5")));
+
+        java.util.List<SmsDlrPollResult> r = provider.pollDelivery(
+            java.util.List.of("100", "200"));
+
+        assertThat(r).hasSize(2);
+        assertThat(r).allMatch(x -> x.deliveryStatus() == SmsDlrPollResult.DeliveryStatus.PENDING);
+    }
+
+    @Test
+    void pollDeliveryHttpErrorAllPending() {
+        jetsms.stubFor(post(urlEqualTo("/SMS-Web/HttpSmsReport"))
+            .willReturn(aResponse().withStatus(503).withBody("unavailable")));
+
+        java.util.List<SmsDlrPollResult> r = provider.pollDelivery(java.util.List.of("756"));
+
+        assertThat(r.get(0).deliveryStatus()).isEqualTo(SmsDlrPollResult.DeliveryStatus.PENDING);
+    }
+
+    @Test
+    void pollDeliveryEmptyListReturnsEmpty() {
+        assertThat(provider.pollDelivery(java.util.List.of())).isEmpty();
+    }
+
+    @Test
+    void mapMessageStateMapping() {
+        assertThat(JetSmsProvider.mapMessageState("x", "1").deliveryStatus())
+            .isEqualTo(SmsDlrPollResult.DeliveryStatus.DELIVERED);
+        assertThat(JetSmsProvider.mapMessageState("x", "3").deliveryStatus())
+            .isEqualTo(SmsDlrPollResult.DeliveryStatus.FAILED);
+        assertThat(JetSmsProvider.mapMessageState("x", "4").deliveryStatus())
+            .isEqualTo(SmsDlrPollResult.DeliveryStatus.FAILED);
+        assertThat(JetSmsProvider.mapMessageState("x", "9").deliveryStatus())
+            .isEqualTo(SmsDlrPollResult.DeliveryStatus.FAILED);
+        assertThat(JetSmsProvider.mapMessageState("x", "-1").deliveryStatus())
+            .isEqualTo(SmsDlrPollResult.DeliveryStatus.FAILED);
+        assertThat(JetSmsProvider.mapMessageState("x", "0").deliveryStatus())
+            .isEqualTo(SmsDlrPollResult.DeliveryStatus.PENDING);
+        assertThat(JetSmsProvider.mapMessageState("x", "2").deliveryStatus())
+            .isEqualTo(SmsDlrPollResult.DeliveryStatus.PENDING);
+        assertThat(JetSmsProvider.mapMessageState("x", "bad").deliveryStatus())
+            .isEqualTo(SmsDlrPollResult.DeliveryStatus.PENDING);
     }
 }

@@ -134,6 +134,99 @@ public interface NotificationDeliveryRepository extends JpaRepository<Notificati
     List<NotificationDelivery> findByClaimToken(String claimToken);
 
     /**
+     * Atomic native claim for JetSmsDlrPollingWorker — Faz 23.3 PR-3
+     * (Codex `019e3f82` absorb).
+     *
+     * <p>JetSMS DLR webhook GÖNDERMEZ; backend POLL eder. ACCEPTED durumdaki
+     * {@code provider='jetsms'} delivery'ler {@code dlr_next_poll_at ≤ now}
+     * iken claim edilir. {@code FOR UPDATE SKIP LOCKED} + lease + claim_token —
+     * multi-pod safe (claimDueForRetry pattern'iyle paralel). Caller
+     * {@link #findByClaimToken} ile çeker.
+     */
+    @Modifying
+    @Query(value = """
+        WITH claimed AS (
+            SELECT id
+            FROM notify.notification_delivery
+            WHERE status = 'ACCEPTED'
+              AND provider = 'jetsms'
+              AND (dlr_next_poll_at IS NULL OR dlr_next_poll_at <= :now)
+              AND (processing_lease_until IS NULL OR processing_lease_until <= :now)
+            ORDER BY dlr_next_poll_at NULLS FIRST, id
+            LIMIT :batchSize
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE notify.notification_delivery d
+        SET processing_lease_until = :leaseUntil,
+            claim_token = :claimToken,
+            updated_at = :now
+        FROM claimed
+        WHERE d.id = claimed.id
+        """, nativeQuery = true)
+    int claimJetsmsDlrPollBatch(
+        @Param("now") OffsetDateTime now,
+        @Param("leaseUntil") OffsetDateTime leaseUntil,
+        @Param("claimToken") String claimToken,
+        @Param("batchSize") int batchSize
+    );
+
+    /**
+     * JetSMS DLR poll reschedule — Faz 23.3 PR-3. JetSMS hâlâ pending state
+     * bildirdiğinde ({@code MessageState 0/2/6/7/8}) bir sonraki poll zamanı
+     * ileri alınır, lease/claim_token temizlenir, poll_count artırılır.
+     *
+     * <p>{@code WHERE status='ACCEPTED'} guard: paralel bir
+     * {@code ingestTerminal} aynı row'u terminal yaptıysa reschedule no-op
+     * (forward-only invariant — terminal row tekrar ACCEPTED'a düşmez).
+     */
+    @Modifying
+    @Query(value = """
+        UPDATE notify.notification_delivery
+        SET dlr_next_poll_at = :nextPollAt,
+            dlr_last_poll_at = :now,
+            dlr_poll_count = dlr_poll_count + 1,
+            processing_lease_until = NULL,
+            claim_token = NULL,
+            updated_at = :now
+        WHERE id = :id AND status = 'ACCEPTED'
+        """, nativeQuery = true)
+    int rescheduleDlrPoll(
+        @Param("id") Long id,
+        @Param("nextPollAt") OffsetDateTime nextPollAt,
+        @Param("now") OffsetDateTime now
+    );
+
+    /**
+     * JetSMS DLR poll terminal bookkeeping — Faz 23.3 PR-3 (Codex `019e3ff7`
+     * P2 absorb).
+     *
+     * <p>Generic DLR core ({@code dlrTerminalize}) provider-agnostik —
+     * status/timestamps/lease günceller ama JetSMS-özel poll kolonlarına
+     * ({@code claim_token}, {@code dlr_*}) dokunmaz. Terminal poll sonrası
+     * {@code JetSmsDlrPollingWorker} bu method'u çağırır: claim_token temizlenir
+     * (terminal row'da poll claim_token leak'i engellenir), dlr_last_poll_at +
+     * dlr_poll_count kaydedilir (observability), dlr_next_poll_at NULL (terminal
+     * — yeni poll yok).
+     *
+     * <p>Status guard YOK: row {@code ingestTerminal} sonrası zaten terminal,
+     * bu yalnızca poll-state housekeeping (forward-only invariant bozulmaz).
+     */
+    @Modifying
+    @Query(value = """
+        UPDATE notify.notification_delivery
+        SET dlr_last_poll_at = :pollAt,
+            dlr_poll_count = dlr_poll_count + 1,
+            dlr_next_poll_at = NULL,
+            claim_token = NULL,
+            updated_at = :pollAt
+        WHERE id = :id
+        """, nativeQuery = true)
+    int markJetsmsDlrPollTerminal(
+        @Param("id") Long id,
+        @Param("pollAt") OffsetDateTime pollAt
+    );
+
+    /**
      * Find RETRY deliveries that exceeded max attempts (DLQ candidates).
      */
     @Query("""

@@ -8,8 +8,10 @@ import com.serban.notify.repository.NotificationIntentRepository;
 import com.serban.notify.worker.IntentStatusResolver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -194,6 +196,39 @@ class DlrIngestServiceTest {
 
         assertThat(result.action()).isEqualTo(DlrIngestService.DlrAction.NOOP);
         verify(audit).publishWithDelivery(eq("DELIVERY_DLR_TERMINAL_CONFLICT"), any(), any(), any(), any());
+    }
+
+    @Test
+    void terminalConflictReFetchesCurrentStatusForAccurateAudit() {
+        // Codex `019e3ff7` P2: multi-pod race — bu pod findFirstByProviderMsgId
+        // ile ACCEPTED snapshot okudu; dlrTerminalize'dan ÖNCE paralel bir pod
+        // row'u DELIVERED yaptı → affected=0. Conflict audit stale
+        // "prior_status_accepted" BASMAMALI; re-fetch ile gerçek current status
+        // (DELIVERED) raporlanmalı.
+        NotificationDelivery staleAcceptedSnapshot =
+            stubDelivery(NotificationDelivery.Status.ACCEPTED);
+        NotificationDelivery currentDelivered =
+            stubDelivery(NotificationDelivery.Status.DELIVERED);
+        when(deliveryRepo.findFirstByProviderMsgId(anyString()))
+            .thenReturn(Optional.of(staleAcceptedSnapshot));
+        when(deliveryRepo.dlrTerminalize(anyString(), anyString(), any(), any()))
+            .thenReturn(0);
+        when(deliveryRepo.findById(42L)).thenReturn(Optional.of(currentDelivered));
+        when(intentRepo.findByIntentId(anyString()))
+            .thenReturn(Optional.of(stubIntent(NotificationIntent.Status.COMPLETED)));
+
+        DlrIngestService.DlrResult result = service.ingestNetgsm("abc-1", "00", "OK", null);
+
+        assertThat(result.action()).isEqualTo(DlrIngestService.DlrAction.NOOP);
+        // re-fetch sonrası gerçek current status — stale ACCEPTED snapshot DEĞİL
+        assertThat(result.currentStatus())
+            .isEqualTo(NotificationDelivery.Status.DELIVERED);
+        ArgumentCaptor<Map> detailsCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(audit).publishWithDelivery(eq("DELIVERY_DLR_TERMINAL_CONFLICT"),
+            any(NotificationIntent.class), any(NotificationDelivery.class),
+            eq("sms"), detailsCaptor.capture());
+        assertThat(detailsCaptor.getValue().get("dlr_ignored_reason"))
+            .isEqualTo("prior_status_delivered");
     }
 
     // ─── Not found ───────────────────────────────────────────────────────
