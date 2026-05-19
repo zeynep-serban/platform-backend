@@ -281,16 +281,16 @@
     },
     {
       "id": "cost-waterfall",
-      "title": "Maliyet Yapısı Şelale",
-      "chartType": "bar",
+      "title": "İşveren Maliyeti Şelalesi",
+      "chartType": "waterfall",
       "size": "lg",
       "source": "EMPLOYEES_PUANTAJ_ROWS",
       "sourceSchema": "workcube_mikrolink",
       "aggregate": {
-        "select": "cost_item.label, MAX(cost_item.value) AS value",
-        "where": "1=1",
-        "join": "CROSS JOIN (SELECT 'Brüt Maaş' AS label, SUM(SALARY) AS value, 1 AS sort_order FROM [workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS] epr INNER JOIN [workcube_mikrolink].[EMPLOYEES_PUANTAJ] ep ON ep.PUANTAJ_ID = epr.PUANTAJ_ID WHERE ep.SAL_YEAR = YEAR(GETDATE()) AND ep.SAL_MON = MONTH(GETDATE()) - 1 UNION ALL SELECT 'SGK İşveren', SUM(SSK_ISVEREN_HISSESI), 2 FROM [workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS] epr INNER JOIN [workcube_mikrolink].[EMPLOYEES_PUANTAJ] ep ON ep.PUANTAJ_ID = epr.PUANTAJ_ID WHERE ep.SAL_YEAR = YEAR(GETDATE()) AND ep.SAL_MON = MONTH(GETDATE()) - 1 UNION ALL SELECT 'SGK İşçi', SUM(SSK_ISCI_HISSESI), 3 FROM [workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS] epr INNER JOIN [workcube_mikrolink].[EMPLOYEES_PUANTAJ] ep ON ep.PUANTAJ_ID = epr.PUANTAJ_ID WHERE ep.SAL_YEAR = YEAR(GETDATE()) AND ep.SAL_MON = MONTH(GETDATE()) - 1 UNION ALL SELECT 'İşsizlik İşveren', SUM(ISSIZLIK_ISVEREN_HISSESI), 4 FROM [workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS] epr INNER JOIN [workcube_mikrolink].[EMPLOYEES_PUANTAJ] ep ON ep.PUANTAJ_ID = epr.PUANTAJ_ID WHERE ep.SAL_YEAR = YEAR(GETDATE()) AND ep.SAL_MON = MONTH(GETDATE()) - 1 UNION ALL SELECT 'İşsizlik İşçi', SUM(ISSIZLIK_ISCI_HISSESI), 5 FROM [workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS] epr INNER JOIN [workcube_mikrolink].[EMPLOYEES_PUANTAJ] ep ON ep.PUANTAJ_ID = epr.PUANTAJ_ID WHERE ep.SAL_YEAR = YEAR(GETDATE()) AND ep.SAL_MON = MONTH(GETDATE()) - 1 UNION ALL SELECT 'Gelir Vergisi', SUM(GELIR_VERGISI), 6 FROM [workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS] epr INNER JOIN [workcube_mikrolink].[EMPLOYEES_PUANTAJ] ep ON ep.PUANTAJ_ID = epr.PUANTAJ_ID WHERE ep.SAL_YEAR = YEAR(GETDATE()) AND ep.SAL_MON = MONTH(GETDATE()) - 1 UNION ALL SELECT 'Damga Vergisi', SUM(DAMGA_VERGISI), 7 FROM [workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS] epr INNER JOIN [workcube_mikrolink].[EMPLOYEES_PUANTAJ] ep ON ep.PUANTAJ_ID = epr.PUANTAJ_ID WHERE ep.SAL_YEAR = YEAR(GETDATE()) AND ep.SAL_MON = MONTH(GETDATE()) - 1 UNION ALL SELECT 'Fazla Mesai', SUM(EXT_SALARY), 8 FROM [workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS] epr INNER JOIN [workcube_mikrolink].[EMPLOYEES_PUANTAJ] ep ON ep.PUANTAJ_ID = epr.PUANTAJ_ID WHERE ep.SAL_YEAR = YEAR(GETDATE()) AND ep.SAL_MON = MONTH(GETDATE()) - 1 UNION ALL SELECT 'Net Ücret', SUM(NET_UCRET), 9 FROM [workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS] epr INNER JOIN [workcube_mikrolink].[EMPLOYEES_PUANTAJ] ep ON ep.PUANTAJ_ID = epr.PUANTAJ_ID WHERE ep.SAL_YEAR = YEAR(GETDATE()) AND ep.SAL_MON = MONTH(GETDATE()) - 1) cost_item",
-        "groupBy": "cost_item.label, cost_item.sort_order",
+        "select": "cost_item.label, SUM(cost_item.value) AS value, cost_item.item_type AS type",
+        "where": "ep.SAL_YEAR = YEAR(GETDATE()) AND ep.SAL_MON = MONTH(GETDATE()) - 1",
+        "join": "INNER JOIN [workcube_mikrolink].[EMPLOYEES_PUANTAJ] ep ON ep.PUANTAJ_ID = [workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS].PUANTAJ_ID CROSS APPLY (VALUES ('Brüt Maaş', ISNULL([workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS].SALARY, 0), 'increase', 1), ('SGK İşveren', ISNULL([workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS].SSK_ISVEREN_HISSESI, 0), 'increase', 2), ('İşsizlik İşveren', ISNULL([workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS].ISSIZLIK_ISVEREN_HISSESI, 0), 'increase', 3), ('Toplam İşveren Maliyeti', ISNULL([workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS].SALARY, 0) + ISNULL([workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS].SSK_ISVEREN_HISSESI, 0) + ISNULL([workcube_mikrolink].[EMPLOYEES_PUANTAJ_ROWS].ISSIZLIK_ISVEREN_HISSESI, 0), 'total', 4)) cost_item(label, value, item_type, sort_order)",
+        "groupBy": "cost_item.label, cost_item.sort_order, cost_item.item_type",
         "orderBy": "cost_item.sort_order ASC"
       },
       "chartConfig": { "showValues": true, "showGrid": true }
