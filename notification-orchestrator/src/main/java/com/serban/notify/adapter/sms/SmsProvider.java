@@ -63,6 +63,23 @@ public interface SmsProvider {
     boolean supportsUnicode();
 
     /**
+     * Provider'ın kabul ettiği maksimum mesaj uzunluğu (karakter).
+     *
+     * <p>Codex `019e3fd9` PR-2 review P1 absorb: provider-capability route.
+     * JetSMS tek segment 160 char hard limit; NetGSM concat SMS (çok-segment)
+     * desteklediği için pratikte yüksek limit. {@link SmsAdapter}
+     * {@link SmsFailureClass#MESSAGE_TOO_LONG} sonucunda secondary
+     * {@code maxMessageLength()} mesajı kaldırabiliyorsa charset-route'a
+     * benzer uzunluk-capability route uygular.
+     *
+     * <p>Default 160 (konservatif tek-segment); concat destekleyen provider
+     * (NetGSM) override eder.
+     */
+    default int maxMessageLength() {
+        return 160;
+    }
+
+    /**
      * DLR durumlarını poll et (yalnızca {@link SmsDlrMode#POLL} provider'lar).
      *
      * <p>PUSH-mode provider'lar bunu implement etmez (default

@@ -94,6 +94,18 @@ public class NetGsmProvider implements SmsProvider {
         return true;  // NetGSM UCS-2 (encoding=TR)
     }
 
+    /**
+     * NetGSM REST v2 concat (çok-segment) SMS destekler — pratik üst sınır
+     * 10 segment. UCS-2 (Türkçe) 67 char/segment → 670; GSM-7 153 char/segment
+     * → 1530. Konservatif olarak UCS-2 tabanlı 670 döner (Codex `019e3fd9`
+     * P1 absorb: MESSAGE_TOO_LONG capability route — JetSMS 160 fail →
+     * NetGSM secondary'ye uzunluk-route).
+     */
+    @Override
+    public int maxMessageLength() {
+        return 670;
+    }
+
     @Override
     public SmsSendResult send(String e164Phone, String text) {
         // 1. Config gate — username boşsa fail-closed (PROVIDER_CONFIG).

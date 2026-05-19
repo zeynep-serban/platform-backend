@@ -3,6 +3,7 @@ package com.serban.notify.adapter.sms;
 import com.serban.notify.adapter.ChannelAdapter;
 import com.serban.notify.delivery.DeliveryTarget;
 import com.serban.notify.template.RenderedMessage;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -23,21 +24,32 @@ import java.util.regex.Pattern;
  * için JetSMS/NetGSM doğrudan {@code ChannelAdapter} olamaz.
  *
  * <p><b>Faz 23.3 PR-1 (behavior-neutral)</b>: source default
- * {@code primary-provider=netgsm}, {@code secondary-provider=} (boş). Bu
- * konfigürasyonla SmsAdapter yalnızca NetGSM'i çağırır — davranış eski
- * {@code NetGsmSmsAdapter} ile semantik olarak aynıdır. JetSMS primary
- * runtime flip'i GitOps ConfigMap ile gelir (PR-4 overlay).
+ * {@code primary-provider=netgsm}, {@code secondary-provider=} (boş). JetSMS
+ * primary runtime flip'i GitOps ConfigMap ile gelir (PR-4 overlay).
  *
- * <p>Failover (PR-1 temel; PR-2 full matrix): primary provider
- * {@code FAILED}/{@code RETRY} döner ve {@link SmsFailureClass#failoverEligible()}
- * {@code true} ise secondary provider denenir. Kalıcı hata
- * (invalid phone, IYS opt-out, vb.) → secondary denenmez. PR-2'de
- * {@code UNSUPPORTED_CHARSET} charset-capability pre-route + {@code PROVIDER_CONFIG}
- * alert eklenir.
+ * <h3>Failover matrisi (PR-2 — Codex `019e3f82` absorb)</h3>
  *
- * <p>Validation (provider-agnostic, facade-level): E.164 telefon formatı +
- * boş mesaj guard. Encoding/segment provider-specific
- * ({@link SmsProvider#send} içinde).
+ * <ul>
+ *   <li><b>failover-eligible</b> ({@link SmsFailureClass#failoverEligible()}
+ *       {@code true}: TIMEOUT/HTTP_5XX/PROVIDER_SYSTEM/RATE_LIMIT/
+ *       QUOTA_OR_CREDIT/NO_CORRELATOR/UNKNOWN_TRANSIENT) → secondary denenir</li>
+ *   <li><b>failover-NOT-eligible kalıcı</b> (INVALID_PHONE/INVALID_TEXT/
+ *       IYS_OPT_OUT/POLICY_BLOCK/EMPTY_MESSAGE) → secondary denenmez
+ *       (secondary'de de aynı sonuç)</li>
+ *   <li><b>UNSUPPORTED_CHARSET</b> → charset-capability pre-route: secondary
+ *       {@link SmsProvider#supportsUnicode()} ise denenir (örn. JetSMS
+ *       ISO-8859-9 fail → NetGSM UCS-2 secondary). Hiçbiri desteklemezse
+ *       primary FAILED kalır. Silent transliteration YOK.</li>
+ *   <li><b>MESSAGE_TOO_LONG</b> → uzunluk-capability route: secondary
+ *       {@link SmsProvider#maxMessageLength()} mesajı kaldırabiliyorsa
+ *       denenir (örn. JetSMS 160 fail → NetGSM concat 670 secondary).
+ *       Secondary de kaldıramazsa primary FAILED kalır.</li>
+ *   <li><b>PROVIDER_CONFIG</b> → high-severity alert metric
+ *       ({@code notify_sms_provider_config_error_total}); default sessiz
+ *       failover YOK. Operator opt-in
+ *       {@code notify.adapters.sms.failover-on-provider-config-error=true}
+ *       ile kritik topic'ler için açılabilir.</li>
+ * </ul>
  */
 @Component
 public class SmsAdapter implements ChannelAdapter {
@@ -48,17 +60,21 @@ public class SmsAdapter implements ChannelAdapter {
     private final Map<String, SmsProvider> providersByKey;
     private final String primaryKey;
     private final String secondaryKey;
+    private final boolean failoverOnProviderConfigError;
+    private final MeterRegistry meterRegistry;
 
     public SmsAdapter(
         List<SmsProvider> providers,
         @Value("${notify.adapters.sms.primary-provider:netgsm}") String primaryKey,
-        @Value("${notify.adapters.sms.secondary-provider:}") String secondaryKey
+        @Value("${notify.adapters.sms.secondary-provider:}") String secondaryKey,
+        @Value("${notify.adapters.sms.failover-on-provider-config-error:false}")
+            boolean failoverOnProviderConfigError,
+        MeterRegistry meterRegistry
     ) {
         // Codex `019e3f82` PR-1 review P2 absorb: duplicate providerKey
         // fail-fast (ChannelAdapterRegistry duplicate-channel disiplini ile
         // paralel). Aynı providerKey iki bean'den gelirse sessiz overwrite
-        // yerine startup'ta IllegalStateException — JetSMS bean/profile
-        // koşulları arttıkça yanlış provider seçim riskini önler.
+        // yerine startup'ta IllegalStateException.
         Map<String, SmsProvider> index = new HashMap<>();
         for (SmsProvider p : providers) {
             SmsProvider prev = index.putIfAbsent(p.providerKey(), p);
@@ -71,10 +87,13 @@ public class SmsAdapter implements ChannelAdapter {
         this.providersByKey = Map.copyOf(index);
         this.primaryKey = primaryKey == null ? "" : primaryKey.trim();
         this.secondaryKey = secondaryKey == null ? "" : secondaryKey.trim();
-        log.info("SmsAdapter activated: primary={} secondary={} registered={}",
+        this.failoverOnProviderConfigError = failoverOnProviderConfigError;
+        this.meterRegistry = meterRegistry;
+        log.info("SmsAdapter activated: primary={} secondary={} registered={} "
+                + "failoverOnProviderConfigError={}",
             this.primaryKey,
             this.secondaryKey.isEmpty() ? "(none)" : this.secondaryKey,
-            providersByKey.keySet());
+            providersByKey.keySet(), failoverOnProviderConfigError);
     }
 
     @Override
@@ -111,10 +130,14 @@ public class SmsAdapter implements ChannelAdapter {
             primaryKey, primaryResult.status(), primaryResult.failureClass(),
             target.recipientHash());
 
-        // 3. Failover decision (PR-1 temel — PR-2 full matrix).
+        // 3. PROVIDER_CONFIG alert — Codex `019e3fd9` P1 absorb: metric emit
+        //    failover kararından ve secondary varlığından BAĞIMSIZ. Credential/
+        //    originator hatası secondary olmasa da high-severity alert üretir.
+        maybeEmitProviderConfigAlert(primaryResult);
+
+        // 4. Failover decision matrix (PR-2 — Codex absorb).
         if (primaryResult.status() != SmsSendResult.SmsSendStatus.ACCEPTED
-            && primaryResult.failureClass().failoverEligible()
-            && !secondaryKey.isEmpty()) {
+            && shouldFailover(primaryResult, text.length())) {
 
             SmsProvider secondary = providersByKey.get(secondaryKey);
             if (secondary != null) {
@@ -124,12 +147,94 @@ public class SmsAdapter implements ChannelAdapter {
                 log.info("sms secondary={} result status={} class={} hash={}",
                     secondaryKey, secondaryResult.status(), secondaryResult.failureClass(),
                     target.recipientHash());
+                maybeEmitProviderConfigAlert(secondaryResult);
                 return toAttemptResult(secondaryResult);
             }
             log.warn("sms failover skipped: secondary '{}' not registered", secondaryKey);
         }
 
         return toAttemptResult(primaryResult);
+    }
+
+    /**
+     * {@link SmsFailureClass#PROVIDER_CONFIG} sonucunda high-severity alert
+     * metric emit eder ({@code notify_sms_provider_config_error_total}).
+     *
+     * <p>Codex `019e3fd9` P1 absorb: bu emit failover kararından ve secondary
+     * varlığından bağımsızdır — source default {@code secondary=} boş olsa
+     * bile primary credential/originator hatası alert'e düşmelidir.
+     */
+    private void maybeEmitProviderConfigAlert(SmsSendResult result) {
+        if (result.failureClass() != SmsFailureClass.PROVIDER_CONFIG) {
+            return;
+        }
+        String provider = result.actualProviderKey() != null
+            ? result.actualProviderKey() : primaryKey;
+        if (meterRegistry != null) {
+            meterRegistry.counter("notify_sms_provider_config_error_total",
+                "provider", provider,
+                "code", result.providerCode() != null ? result.providerCode() : "unknown")
+                .increment();
+        }
+        log.error("sms PROVIDER_CONFIG error: provider={} code={} — high-severity "
+                + "alert emitted (notify_sms_provider_config_error_total)",
+            provider, result.providerCode());
+    }
+
+    /**
+     * Primary provider sonucundan sonra secondary denenmeli mi?
+     *
+     * <p>Failover matrisi (Codex `019e3f82` + `019e3fd9` absorb):
+     * <ul>
+     *   <li>secondary yok → her zaman false</li>
+     *   <li>failover-eligible transient class → true</li>
+     *   <li>{@code UNSUPPORTED_CHARSET} → secondary {@code supportsUnicode()}
+     *       ise true (charset-capability pre-route)</li>
+     *   <li>{@code MESSAGE_TOO_LONG} → secondary {@code maxMessageLength()}
+     *       mesajı kaldırabiliyorsa true (uzunluk-capability route — JetSMS
+     *       160 fail → NetGSM concat secondary)</li>
+     *   <li>{@code PROVIDER_CONFIG} → opt-in flag'e bağlı (alert ayrı
+     *       {@link #maybeEmitProviderConfigAlert} ile emit edilir)</li>
+     *   <li>diğer kalıcı class → false</li>
+     * </ul>
+     *
+     * @param textLength gönderilen mesaj uzunluğu (MESSAGE_TOO_LONG capability
+     *                   route kararı için)
+     */
+    private boolean shouldFailover(SmsSendResult primaryResult, int textLength) {
+        if (secondaryKey.isEmpty()) {
+            return false;
+        }
+        SmsFailureClass fc = primaryResult.failureClass();
+
+        if (fc.failoverEligible()) {
+            return true;
+        }
+
+        if (fc == SmsFailureClass.UNSUPPORTED_CHARSET) {
+            SmsProvider secondary = providersByKey.get(secondaryKey);
+            boolean route = secondary != null && secondary.supportsUnicode();
+            log.info("sms UNSUPPORTED_CHARSET: secondary={} supportsUnicode={} → pre-route={}",
+                secondaryKey, secondary != null && secondary.supportsUnicode(), route);
+            return route;
+        }
+
+        if (fc == SmsFailureClass.MESSAGE_TOO_LONG) {
+            SmsProvider secondary = providersByKey.get(secondaryKey);
+            boolean route = secondary != null && secondary.maxMessageLength() >= textLength;
+            log.info("sms MESSAGE_TOO_LONG: textLength={} secondary={} maxLength={} → route={}",
+                textLength, secondaryKey,
+                secondary != null ? secondary.maxMessageLength() : "(none)", route);
+            return route;
+        }
+
+        if (fc == SmsFailureClass.PROVIDER_CONFIG) {
+            // Alert maybeEmitProviderConfigAlert ile zaten emit edildi —
+            // burada yalnız failover kararı (default sessiz failover YOK).
+            return failoverOnProviderConfigError;
+        }
+
+        return false;  // kalıcı recipient/content hatası
     }
 
     /** Provider.send'i sarmalar — beklenmedik exception RETRY'a çevrilir. */
@@ -146,17 +251,32 @@ public class SmsAdapter implements ChannelAdapter {
 
     /** {@link SmsSendResult} → {@link ChannelAdapter.DeliveryAttemptResult}. */
     private static DeliveryAttemptResult toAttemptResult(SmsSendResult r) {
+        // Codex `019e3fc5` PR-1 review P2 absorb: providerCode numeric ise
+        // structured providerResponseCode alanına da taşı (JetSMS Status -5,
+        // NetGSM code 50 gibi). Non-numeric ("http503", "config", "io:...") →
+        // null; bilgi failureReason string'inde korunur.
+        Integer responseCode = parseNumericCode(r.providerCode());
         return switch (r.status()) {
             case ACCEPTED -> DeliveryAttemptResult.accepted(
                 r.providerMsgId(), r.actualProviderKey());
             case FAILED -> DeliveryAttemptResult.failed(
                 "sms " + r.actualProviderKey() + " " + r.failureClass()
                     + (r.providerCode() != null ? " (" + r.providerCode() + ")" : ""),
-                null, r.actualProviderKey());
+                responseCode, r.actualProviderKey());
             case RETRY -> DeliveryAttemptResult.retry(
                 "sms " + r.actualProviderKey() + " " + r.failureClass()
                     + (r.providerCode() != null ? " (" + r.providerCode() + ")" : ""),
-                null, r.actualProviderKey());
+                responseCode, r.actualProviderKey());
         };
+    }
+
+    /** providerCode numeric ise Integer, değilse null. */
+    private static Integer parseNumericCode(String providerCode) {
+        if (providerCode == null || providerCode.isBlank()) return null;
+        try {
+            return Integer.valueOf(providerCode.trim());
+        } catch (NumberFormatException nfe) {
+            return null;  // "http503", "config", "io:..." gibi non-numeric
+        }
     }
 }
