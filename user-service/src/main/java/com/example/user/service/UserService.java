@@ -403,9 +403,13 @@ public class UserService implements UserDetailsService { // UserDetailsService a
      * now-committed row in a fresh transaction. The caller is never left
      * executing inside a rolled-back transaction.
      *
-     * <p>The created row is least-privilege: {@code role=USER},
-     * {@code enabled=true}, {@code companyId=null}, no modules/permissions
-     * granted. Role is deliberately NOT derived from JWT realm roles.
+     * <p>The created row is least-privilege and <em>passive</em>:
+     * {@code role=USER}, {@code enabled=false}, {@code companyId=null}, no
+     * modules/permissions granted. Role is deliberately NOT derived from
+     * JWT realm roles. The row is created disabled so an M365 first-login
+     * surfaces in admin "Kullanıcı Yönetimi" as a pending account an admin
+     * must explicitly activate — the operator-chosen "admin manually
+     * authorizes" model. Activation flows through {@code updateActivation}.
      *
      * @param command the gate-validated Keycloak identity to materialise
      * @return the existing, backfilled or newly-created backend
@@ -439,7 +443,11 @@ public class UserService implements UserDetailsService { // UserDetailsService a
                 fresh.setEmail(canonicalEmail);
                 fresh.setName(displayName);
                 fresh.setRole("USER");
-                fresh.setEnabled(true);
+                // Passive by design — an auto-provisioned M365 first-login
+                // lands disabled so an admin explicitly activates it
+                // ("admin manually authorizes" model). Activation flows
+                // through updateActivation (admin "Kullanıcı Yönetimi").
+                fresh.setEnabled(false);
                 fresh.setCompanyId(null);
                 fresh.setKcSubject(kcSubject);
                 fresh.setPassword(passwordEncoder.encode(UUID.randomUUID().toString()));

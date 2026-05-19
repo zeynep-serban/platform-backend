@@ -44,6 +44,16 @@ import java.util.Optional;
  *       allowed, or missing the M365 marker) and no profile exists;</li>
  *   <li>the JWT is missing an email or {@code sub} and no profile exists.</li>
  * </ul>
+ *
+ * <h2>403 {@code ACCOUNT_DISABLED} — activation gate</h2>
+ * Once a profile is resolved, a passive one ({@code enabled=false}) is
+ * rejected with {@code 403 ACCOUNT_DISABLED}. An M365 first-login is
+ * auto-provisioned <em>passive</em> (the admin-manually-authorizes model),
+ * so its first request provisions the row then fails this gate — an admin
+ * flips it active via {@code updateActivation} ("Kullanıcı Yönetimi").
+ * Local username/password login is already gated by Spring Security
+ * ({@code UserDetails.isEnabled()}); JWT/session auth bypasses that, so the
+ * check is re-applied here, the single current-user resolution point.
  */
 @Component
 public class CurrentUserResolver {
@@ -65,13 +75,38 @@ public class CurrentUserResolver {
     /**
      * Resolves the {@link User} for the current {@link SecurityContextHolder}
      * authentication, lazily provisioning an M365 first-login profile when
-     * the auto-provision gate permits.
+     * the auto-provision gate permits, then enforcing the account-activation
+     * gate — a passive ({@code enabled=false}) profile cannot transact.
      *
-     * @return the resolved backend {@link User}
+     * @return the resolved, <em>active</em> backend {@link User}
      * @throws ResponseStatusException {@code 401} when unauthenticated,
-     *         {@code 403 PROFILE_MISSING} per the narrowed rules above
+     *         {@code 403 PROFILE_MISSING} per the narrowed rules above,
+     *         {@code 403 ACCOUNT_DISABLED} when the resolved profile is
+     *         passive ({@code enabled=false})
      */
     public User resolveCurrentUser() {
+        User user = resolveAuthenticatedUser();
+        // Account-activation gate. A passive (enabled=false) profile — an
+        // M365 first-login auto-provisioned account awaiting admin
+        // activation, or a manually-disabled account — must not transact
+        // via a JWT/session request. Local username/password login is
+        // already gated by Spring Security (UserDetails.isEnabled() →
+        // DisabledException); JWT auth bypasses that, so the check is
+        // re-applied here, the single current-user resolution point.
+        if (!user.isEnabled()) {
+            log.warn("Pasif hesap isteği reddedildi (enabled=false): userId={} email={}",
+                    user.getId(), user.getEmail());
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "ACCOUNT_DISABLED");
+        }
+        return user;
+    }
+
+    /**
+     * Resolves the backend {@link User} of the current principal WITHOUT
+     * the activation gate — principal-type branching only. Private; the
+     * gated public entry point is {@link #resolveCurrentUser()}.
+     */
+    private User resolveAuthenticatedUser() {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         if (authentication == null
                 || !authentication.isAuthenticated()

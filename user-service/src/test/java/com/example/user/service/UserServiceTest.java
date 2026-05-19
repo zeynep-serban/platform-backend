@@ -326,7 +326,7 @@ class UserServiceTest {
         assertEquals("new@example.com", created.getEmail());
         assertEquals("New Person", created.getName());
         assertEquals("USER", created.getRole());          // least-privilege, not derived from JWT
-        assertTrue(created.isEnabled());
+        assertFalse(created.isEnabled());                  // passive — admin must activate ("admin authorizes")
         assertNull(created.getCompanyId());                 // companyId stays null
         assertEquals("sub-1", created.getKcSubject());
         assertEquals("New Person", result.getName());

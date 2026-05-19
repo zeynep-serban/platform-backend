@@ -85,26 +85,29 @@ class NotificationPreferencesControllerV1Test {
     }
 
     /**
-     * Keycloak user lazy-provision bridge: an M365 first-login (allow-listed
-     * issuer + {@code entra_tid} marker) with no backend profile is now
-     * auto-provisioned and the preferences request proceeds (returns the
-     * default channel set), instead of the old {@code 403 PROFILE_MISSING}.
+     * Keycloak user lazy-provision bridge + activation gate: an M365
+     * first-login (allow-listed issuer + {@code entra_tid} marker) with no
+     * backend profile is auto-provisioned as a <em>passive</em>
+     * ({@code enabled=false}) row, and the preferences request is rejected
+     * {@code 403 ACCOUNT_DISABLED} — the profile awaits admin activation
+     * ("admin manually authorizes" model). The filter still provisions the
+     * row before {@code CurrentUserResolver} gates the request.
      * Previously {@code getPreferences_missingLocalProfile_returns403}.
      */
     @Test
-    void getPreferences_m365FirstLogin_autoProvisionsAndReturnsDefaults() throws Exception {
+    void getPreferences_m365FirstLogin_autoProvisionsPassiveAndReturns403() throws Exception {
         String email = "m365-prefs@example.com";
         org.assertj.core.api.Assertions.assertThat(userRepository.findByEmail(email)).isEmpty();
 
         String token = issueM365Token(email, "66666666-6666-6666-6666-666666666666");
         mockMvc.perform(get("/api/v1/notification-preferences")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.preferences", hasSize(4)));
+                .andExpect(status().isForbidden())
+                .andExpect(content().string(containsString("ACCOUNT_DISABLED")));
 
         User provisioned = userRepository.findByEmail(email).orElseThrow();
         org.assertj.core.api.Assertions.assertThat(provisioned.getRole()).isEqualTo("USER");
-        org.assertj.core.api.Assertions.assertThat(provisioned.isEnabled()).isTrue();
+        org.assertj.core.api.Assertions.assertThat(provisioned.isEnabled()).isFalse();  // passive — admin must activate
     }
 
     /**

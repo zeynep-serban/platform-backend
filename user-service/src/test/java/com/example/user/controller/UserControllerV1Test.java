@@ -86,25 +86,28 @@ class UserControllerV1Test {
     }
 
     /**
-     * Keycloak user lazy-provision bridge: an M365 first-login (allow-listed
-     * issuer + {@code entra_tid} marker) with no backend profile is now
-     * auto-provisioned and the request proceeds, instead of the old
-     * {@code 403 PROFILE_MISSING}. This test was previously
-     * {@code listUsers_missingLocalProfile_returns403}.
+     * Keycloak user lazy-provision bridge + activation gate: an M365
+     * first-login (allow-listed issuer + {@code entra_tid} marker) with no
+     * backend profile is auto-provisioned as a <em>passive</em>
+     * ({@code enabled=false}) row, and the request itself is rejected
+     * {@code 403 ACCOUNT_DISABLED} — the profile awaits admin activation
+     * ("admin manually authorizes" model). The filter still provisions the
+     * row before {@code CurrentUserResolver} gates the request.
      */
     @Test
-    void listUsers_m365FirstLogin_autoProvisionsAndReturns200() throws Exception {
+    void listUsers_m365FirstLogin_autoProvisionsPassiveAndReturns403() throws Exception {
         String email = "m365-first@example.com";
         Assertions.assertThat(userRepository.findByEmail(email)).isEmpty();
 
         String token = issueM365Token(email, "11111111-1111-1111-1111-111111111111");
         mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
-                .andExpect(status().isOk());
+                .andExpect(status().isForbidden())
+                .andExpect(content().string(containsString("ACCOUNT_DISABLED")));
 
         User provisioned = userRepository.findByEmail(email).orElseThrow();
         Assertions.assertThat(provisioned.getRole()).isEqualTo("USER");      // least-privilege
-        Assertions.assertThat(provisioned.isEnabled()).isTrue();
+        Assertions.assertThat(provisioned.isEnabled()).isFalse();            // passive — admin must activate
         Assertions.assertThat(provisioned.getCompanyId()).isNull();
         Assertions.assertThat(provisioned.getKcSubject()).isEqualTo("kc-sub-m365-first");
     }
@@ -185,7 +188,9 @@ class UserControllerV1Test {
 
     /**
      * Auto-provision is idempotent: a second M365 request for the same
-     * subject reuses the row created on the first request — no duplicate.
+     * subject reuses the passive row created on the first request — no
+     * duplicate. Both requests are gated {@code 403 ACCOUNT_DISABLED}
+     * (the row stays passive until an admin activates it).
      */
     @Test
     void listUsers_m365SecondLogin_reusesSameRow() throws Exception {
@@ -194,12 +199,12 @@ class UserControllerV1Test {
 
         mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
-                .andExpect(status().isOk());
+                .andExpect(status().isForbidden());
         Long firstId = userRepository.findByEmail(email).orElseThrow().getId();
 
         mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
-                .andExpect(status().isOk());
+                .andExpect(status().isForbidden());
 
         Assertions.assertThat(userRepository.findAll().stream()
                         .filter(u -> email.equals(u.getEmail())).count())
@@ -210,8 +215,9 @@ class UserControllerV1Test {
 
     /**
      * Email case-normalization: a token whose email is mixed-case
-     * provisions a row with the canonical lowercase email, and a
-     * subsequent request with different casing resolves the same row.
+     * provisions a passive row with the canonical lowercase email. The
+     * request is gated {@code 403 ACCOUNT_DISABLED}; the row is still
+     * created with the normalized email.
      */
     @Test
     void listUsers_m365FirstLogin_normalizesEmailCase() throws Exception {
@@ -220,7 +226,7 @@ class UserControllerV1Test {
 
         mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
-                .andExpect(status().isOk());
+                .andExpect(status().isForbidden());
 
         Assertions.assertThat(userRepository.findByEmail("Mixed.Case@Example.com")).isEmpty();
         User provisioned = userRepository.findByEmailIgnoreCase("mixed.case@example.com").orElseThrow();
@@ -358,12 +364,16 @@ class UserControllerV1Test {
 
     @Test
     void updateActivation_returnsAckWithAudit() throws Exception {
-        User saved = ensureUserExists("activate@example.com");
-        saved.setEnabled(false);
-        userRepository.save(saved);
-        String token = issueToken(saved.getEmail());
+        // The activation target starts passive; the request is made by a
+        // separate enabled admin — a passive account cannot itself transact
+        // (CurrentUserResolver ACCOUNT_DISABLED gate).
+        User target = ensureUserExists("activate-target@example.com");
+        target.setEnabled(false);
+        userRepository.save(target);
+        User admin = ensureUserExists("activate-admin@example.com");
+        String token = issueToken(admin.getEmail());
 
-        mockMvc.perform(put("/api/v1/users/{id}/activation", saved.getId())
+        mockMvc.perform(put("/api/v1/users/{id}/activation", target.getId())
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
                         .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(Map.of("active", true))))
@@ -371,9 +381,36 @@ class UserControllerV1Test {
                 .andExpect(jsonPath("$.status").value("ok"))
                 .andExpect(jsonPath("$.auditId").value(org.hamcrest.Matchers.startsWith("user-")));
 
-        User updated = userRepository.findById(saved.getId()).orElseThrow();
+        User updated = userRepository.findById(target.getId()).orElseThrow();
         org.assertj.core.api.Assertions.assertThat(updated.isEnabled()).isTrue();
         Assertions.assertThat(userAuditEventRepository.count()).isEqualTo(1);
+    }
+
+    /**
+     * Activation gate, positive path: once an admin activates the passive
+     * M365-provisioned profile, the same M365 token transacts normally —
+     * the {@code 403 ACCOUNT_DISABLED} gate is the only thing that was
+     * blocking it.
+     */
+    @Test
+    void listUsers_m365User_afterActivation_returns200() throws Exception {
+        String email = "m365-activated@example.com";
+        String token = issueM365Token(email, "77777777-7777-7777-7777-777777777777");
+
+        // First login — auto-provisioned passive, request gated.
+        mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isForbidden());
+
+        // Admin activates the row (the updateActivation path).
+        User provisioned = userRepository.findByEmail(email).orElseThrow();
+        provisioned.setEnabled(true);
+        userRepository.save(provisioned);
+
+        // The same M365 token now transacts.
+        mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk());
     }
 
     @Test
