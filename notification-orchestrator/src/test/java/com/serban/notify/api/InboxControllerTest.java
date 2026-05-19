@@ -214,6 +214,79 @@ class InboxControllerTest {
             .andExpect(status().isBadRequest());
     }
 
+    // ─── Faz 23.4 M6a: GET /me/history ───────────────────────────────────
+
+    @Test
+    void historyMineReturns200WithAllStatesAndWindowMetadata() throws Exception {
+        NotificationInbox unread = stubRow();
+        NotificationInbox archived = stubRow();
+        archived.setId(43L);
+        archived.setState(NotificationInbox.State.ARCHIVED);
+        Page<NotificationInbox> page =
+            new PageImpl<>(List.of(unread, archived), Pageable.ofSize(20), 2);
+        OffsetDateTime windowStart = OffsetDateTime.parse("2026-04-19T12:00:00Z");
+        when(inboxService.listHistory(anyString(), anyString(), anyInt(), anyInt()))
+            .thenReturn(new InboxService.HistoryResult(page, windowStart, 30));
+
+        mockMvc.perform(get("/api/v1/notify/inbox/me/history")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "sub-1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.items.length()").value(2))
+            .andExpect(jsonPath("$.items[0].state").value("UNREAD"))
+            .andExpect(jsonPath("$.items[1].state").value("ARCHIVED"))
+            .andExpect(jsonPath("$.totalElements").value(2))
+            .andExpect(jsonPath("$.windowDays").value(30))
+            .andExpect(jsonPath("$.windowStart").exists())
+            .andExpect(jsonPath("$.unreadCount").doesNotExist());
+    }
+
+    @Test
+    void historyMineWithoutOrgIdReturns400() throws Exception {
+        mockMvc.perform(get("/api/v1/notify/inbox/me/history")
+                .header("X-Subscriber-Id", "sub-1"))
+            .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void historyMineWithoutSubscriberIdReturns400() throws Exception {
+        mockMvc.perform(get("/api/v1/notify/inbox/me/history")
+                .header("X-Org-Id", "default"))
+            .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void historyMineNegativePageReturns400() throws Exception {
+        mockMvc.perform(get("/api/v1/notify/inbox/me/history")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "sub-1")
+                .param("page", "-1"))
+            .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void historyMineZeroSizeReturns400() throws Exception {
+        mockMvc.perform(get("/api/v1/notify/inbox/me/history")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "sub-1")
+                .param("size", "0"))
+            .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void historyMineRespectsPageAndSizeQuery() throws Exception {
+        OffsetDateTime windowStart = OffsetDateTime.parse("2026-04-19T12:00:00Z");
+        when(inboxService.listHistory(anyString(), anyString(), anyInt(), anyInt()))
+            .thenReturn(new InboxService.HistoryResult(Page.empty(), windowStart, 30));
+
+        mockMvc.perform(get("/api/v1/notify/inbox/me/history")
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "sub-1")
+                .param("page", "1")
+                .param("size", "50"))
+            .andExpect(status().isOk());
+    }
+
     // ─── Faz 23.5 PR1: bulk mark-all-read ────────────────────────────────
 
     @Test

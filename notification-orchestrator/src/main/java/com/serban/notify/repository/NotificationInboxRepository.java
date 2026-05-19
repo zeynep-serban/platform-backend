@@ -65,6 +65,41 @@ public interface NotificationInboxRepository extends JpaRepository<NotificationI
     );
 
     /**
+     * Subscriber's 30-day inbox history (Faz 23.4 M6a — Codex thread
+     * {@code 019e40ec} AGREE iter-2).
+     *
+     * <p>Unlike {@link #findActiveBySubscriber}, this query returns rows
+     * in EVERY state (UNREAD + READ + ARCHIVED) — the read-only "what
+     * notifications did I get" review surface. {@code since} is the
+     * server-enforced window floor; the service derives it from the DB
+     * clock ({@code currentDatabaseTimestamp()} minus the configured
+     * window), so the boundary never depends on a JVM clock.
+     *
+     * <p>{@code ORDER BY created_at DESC, id DESC}: {@code id} is the
+     * deterministic tie-breaker for rows that share a transaction
+     * timestamp (multi-recipient fan-out) — without it offset pagination
+     * could drift a row across page boundaries.
+     *
+     * <p>Index hint: V16 {@code idx_inbox_subscriber_history}
+     * (org_id, subscriber_id, created_at DESC, id DESC) — full index over
+     * all states (the V9 active partial index excludes ARCHIVED so it
+     * cannot serve this query).
+     */
+    @Query("""
+        SELECT i FROM NotificationInbox i
+        WHERE i.orgId = :orgId
+          AND i.subscriberId = :subscriberId
+          AND i.createdAt >= :since
+        ORDER BY i.createdAt DESC, i.id DESC
+        """)
+    Page<NotificationInbox> findHistoryBySubscriber(
+        @Param("orgId") String orgId,
+        @Param("subscriberId") String subscriberId,
+        @Param("since") OffsetDateTime since,
+        Pageable pageable
+    );
+
+    /**
      * Unread count for badge display.
      *
      * <p>Index hint: idx_inbox_unread_badge partial index

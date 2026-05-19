@@ -104,6 +104,38 @@ class InboxControllerSecurityTest {
             .andExpect(status().isForbidden());
     }
 
+    @Test
+    void history_jwtSubMismatchesHeader_returns403() throws Exception {
+        // Faz 23.4 M6a — GET /inbox/me/history runs the same guard chain
+        // as the active inbox; an identity mismatch must 403 before any
+        // service call.
+        mockMvc.perform(get("/api/v1/notify/inbox/me/history")
+                .with(jwt().jwt(j -> j.subject("alice")))
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "bob"))
+            .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void history_jwtSubMatchesHeader_returns200() throws Exception {
+        org.mockito.Mockito.when(inboxService.listHistory(
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.anyInt(),
+            org.mockito.ArgumentMatchers.anyInt()
+        )).thenReturn(new InboxService.HistoryResult(
+            org.springframework.data.domain.Page.empty(),
+            java.time.OffsetDateTime.parse("2026-04-19T12:00:00Z"),
+            30
+        ));
+
+        mockMvc.perform(get("/api/v1/notify/inbox/me/history")
+                .with(jwt().jwt(j -> j.subject("alice")))
+                .header("X-Org-Id", "default")
+                .header("X-Subscriber-Id", "alice"))
+            .andExpect(status().isOk());
+    }
+
     // ─── SSE endpoint ────────────────────────────────────────────────────
 
     @Test

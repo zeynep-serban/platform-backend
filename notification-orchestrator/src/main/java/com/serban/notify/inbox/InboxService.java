@@ -5,12 +5,14 @@ import com.serban.notify.exception.InvalidRequestException;
 import com.serban.notify.repository.NotificationInboxRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Optional;
@@ -47,15 +49,42 @@ public class InboxService {
     /** Default page size for GET /inbox/me. */
     private static final int DEFAULT_PAGE_SIZE = 20;
 
+    /** History window lower bound (days) — fail-fast guard floor. */
+    private static final int MIN_HISTORY_WINDOW_DAYS = 1;
+
+    /** History window upper bound (days) — fail-fast guard ceiling. */
+    private static final int MAX_HISTORY_WINDOW_DAYS = 90;
+
     private final NotificationInboxRepository inboxRepository;
     private final InboxEventPublisher eventPublisher;
 
+    /**
+     * Rolling history window for {@code GET /inbox/me/history} (days).
+     * Server-enforced — the endpoint takes no client {@code since}
+     * param. Validated to {@code [1, 90]} at construction.
+     */
+    private final int historyWindowDays;
+
     public InboxService(
         NotificationInboxRepository inboxRepository,
-        InboxEventPublisher eventPublisher
+        InboxEventPublisher eventPublisher,
+        @Value("${notify.inbox.history-window-days:30}") int historyWindowDays
     ) {
         this.inboxRepository = inboxRepository;
         this.eventPublisher = eventPublisher;
+        // Faz 23.4 M6a (Codex thread `019e40ec` AGREE iter-2): fail fast
+        // at startup on a misconfigured window. An out-of-range value
+        // would otherwise silently widen GET /inbox/me/history into an
+        // unbounded scan (huge value) or a zero-row endpoint (<= 0) with
+        // no obvious symptom.
+        if (historyWindowDays < MIN_HISTORY_WINDOW_DAYS
+            || historyWindowDays > MAX_HISTORY_WINDOW_DAYS) {
+            throw new IllegalStateException(
+                "notify.inbox.history-window-days must be in ["
+                + MIN_HISTORY_WINDOW_DAYS + ", " + MAX_HISTORY_WINDOW_DAYS
+                + "] — got " + historyWindowDays);
+        }
+        this.historyWindowDays = historyWindowDays;
     }
 
     /**
@@ -74,6 +103,45 @@ public class InboxService {
         int safePage = Math.max(0, page);
         Pageable pageable = PageRequest.of(safePage, safeSize);
         return inboxRepository.findActiveBySubscriber(orgId, subscriberId, pageable);
+    }
+
+    /**
+     * List a subscriber's notification history (Faz 23.4 M6a — Codex
+     * thread {@code 019e40ec} AGREE iter-2).
+     *
+     * <p>Unlike {@link #listActive} (active surface — UNREAD + READ;
+     * ARCHIVED filtered out), the history view returns rows in EVERY
+     * state within a rolling window (default 30 days). The window floor
+     * is sourced from the database clock — {@code currentDatabaseTimestamp()}
+     * minus the configured window — never the JVM, so the boundary is
+     * identical across pods (the same multi-pod race-safety contract the
+     * mark-all-read cutoff uses).
+     *
+     * <p>Read-only review surface: the result page may contain UNREAD
+     * rows, but the history endpoint exposes no mutation — callers
+     * archive / mark-read through the {@code GET /inbox/me} actions.
+     *
+     * @param page 0-indexed page number (clamped to {@code >= 0})
+     * @param size requested page size (clamped to {@code [1, MAX_PAGE_SIZE]})
+     * @return the paged history rows plus the window metadata the
+     *         controller echoes back to the client
+     */
+    @Transactional(readOnly = true)
+    public HistoryResult listHistory(String orgId, String subscriberId, int page, int size) {
+        validateTenancy(orgId, subscriberId);
+        int safeSize = Math.max(1, Math.min(size > 0 ? size : DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE));
+        int safePage = Math.max(0, page);
+        // DB-clock-sourced window floor — no JVM clock authority. The
+        // repo helper returns Instant (Hibernate native timestamptz
+        // mapper); adapt to UTC OffsetDateTime for the JPQL comparison
+        // and the response wire shape.
+        OffsetDateTime windowStart = inboxRepository.currentDatabaseTimestamp()
+            .minus(Duration.ofDays(historyWindowDays))
+            .atOffset(ZoneOffset.UTC);
+        Page<NotificationInbox> result = inboxRepository.findHistoryBySubscriber(
+            orgId, subscriberId, windowStart, PageRequest.of(safePage, safeSize)
+        );
+        return new HistoryResult(result, windowStart, historyWindowDays);
     }
 
     /**
@@ -205,6 +273,18 @@ public class InboxService {
      * also know the cutoff that was actually applied (operator audit).
      */
     public record BulkMarkAllReadResult(int updatedCount, OffsetDateTime cutoff) {}
+
+    /**
+     * Result of a {@link #listHistory} call — the paged history rows plus
+     * the window metadata ({@code windowStart} DB-clock floor and
+     * {@code windowDays}) the controller maps into
+     * {@code InboxHistoryListResponse} so the client can label the view.
+     */
+    public record HistoryResult(
+        Page<NotificationInbox> page,
+        OffsetDateTime windowStart,
+        int windowDays
+    ) {}
 
     private static void validateTenancy(String orgId, String subscriberId) {
         if (orgId == null || orgId.isBlank()) {

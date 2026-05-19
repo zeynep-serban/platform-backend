@@ -42,7 +42,9 @@ class InboxServiceUnitTest {
     void setUp() {
         repository = mock(NotificationInboxRepository.class);
         eventPublisher = mock(InboxEventPublisher.class);
-        service = new InboxService(repository, eventPublisher);
+        // Faz 23.4 M6a: constructor gained a validated history-window-days
+        // arg — 30 is the production default.
+        service = new InboxService(repository, eventPublisher, 30);
     }
 
     // ─── Tenancy guard ───────────────────────────────────────────────────
@@ -306,6 +308,89 @@ class InboxServiceUnitTest {
             () -> service.markAllAsRead("default", "")
         );
         verify(repository, never()).markAllAsRead(any(), any());
+    }
+
+    // ─── Faz 23.4 M6a: history window config + listHistory ───────────────
+
+    @Test
+    void constructorRejectsHistoryWindowBelowMinimum() {
+        assertThatThrownBy(() -> new InboxService(repository, eventPublisher, 0))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("history-window-days");
+    }
+
+    @Test
+    void constructorRejectsHistoryWindowAboveMaximum() {
+        assertThatThrownBy(() -> new InboxService(repository, eventPublisher, 91))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("history-window-days");
+    }
+
+    @Test
+    void constructorAcceptsHistoryWindowBoundaries() {
+        // [1, 90] inclusive — neither boundary throws at construction.
+        new InboxService(repository, eventPublisher, 1);
+        new InboxService(repository, eventPublisher, 90);
+    }
+
+    @Test
+    void listHistoryRequiresOrgIdAndSubscriberId() {
+        assertThatThrownBy(() -> service.listHistory(null, "sub-1", 0, 20))
+            .isInstanceOf(InvalidRequestException.class)
+            .hasMessageContaining("orgId");
+        assertThatThrownBy(() -> service.listHistory("default", "", 0, 20))
+            .isInstanceOf(InvalidRequestException.class)
+            .hasMessageContaining("subscriberId");
+    }
+
+    @Test
+    void listHistoryDerivesWindowFloorFromDbClockMinusConfiguredDays() {
+        java.time.Instant dbNow = java.time.Instant.parse("2026-05-19T12:00:00Z");
+        when(repository.currentDatabaseTimestamp()).thenReturn(dbNow);
+        when(repository.findHistoryBySubscriber(eq("default"), eq("sub-1"), any(), any()))
+            .thenReturn(Page.empty());
+
+        InboxService.HistoryResult result = service.listHistory("default", "sub-1", 0, 20);
+
+        OffsetDateTime expectedWindowStart = dbNow
+            .minus(java.time.Duration.ofDays(30))
+            .atOffset(java.time.ZoneOffset.UTC);
+        assertThat(result.windowStart()).isEqualTo(expectedWindowStart);
+        assertThat(result.windowDays()).isEqualTo(30);
+        // The repo query receives the DB-clock-derived floor, not a JVM clock.
+        verify(repository).findHistoryBySubscriber(
+            eq("default"), eq("sub-1"), eq(expectedWindowStart), any());
+    }
+
+    @Test
+    void listHistoryClampsPageSizeTo100() {
+        when(repository.currentDatabaseTimestamp())
+            .thenReturn(java.time.Instant.parse("2026-05-19T12:00:00Z"));
+        when(repository.findHistoryBySubscriber(eq("default"), eq("sub-1"), any(), any()))
+            .thenReturn(Page.empty());
+
+        service.listHistory("default", "sub-1", 0, 1000);
+
+        verify(repository).findHistoryBySubscriber(eq("default"), eq("sub-1"), any(),
+            org.mockito.ArgumentMatchers.argThat(p -> p.getPageSize() == 100));
+    }
+
+    @Test
+    void listHistoryReturnsRepositoryPageIncludingArchivedRows() {
+        NotificationInbox archived = stubRow();
+        archived.setState(NotificationInbox.State.ARCHIVED);
+        Page<NotificationInbox> page =
+            new PageImpl<>(List.of(archived), Pageable.ofSize(20), 1);
+        when(repository.currentDatabaseTimestamp())
+            .thenReturn(java.time.Instant.parse("2026-05-19T12:00:00Z"));
+        when(repository.findHistoryBySubscriber(eq("default"), eq("sub-1"), any(), any()))
+            .thenReturn(page);
+
+        InboxService.HistoryResult result = service.listHistory("default", "sub-1", 0, 20);
+
+        assertThat(result.page().getContent()).hasSize(1);
+        assertThat(result.page().getContent().get(0).getState())
+            .isEqualTo(NotificationInbox.State.ARCHIVED);
     }
 
     private static NotificationInbox stubRow() {

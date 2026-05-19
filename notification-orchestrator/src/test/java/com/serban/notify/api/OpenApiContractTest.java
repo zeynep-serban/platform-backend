@@ -52,6 +52,9 @@ class OpenApiContractTest extends AbstractPostgresTest {
             .andExpect(jsonPath("$.paths./api/v1/notify/inbox/me.get").exists())
             .andExpect(jsonPath("$.paths./api/v1/notify/inbox/me/unread-count").exists())
             .andExpect(jsonPath("$.paths./api/v1/notify/inbox/me/unread-count.get").exists())
+            // Faz 23.4 M6a — 30-day history endpoint surface contract.
+            .andExpect(jsonPath("$.paths./api/v1/notify/inbox/me/history").exists())
+            .andExpect(jsonPath("$.paths./api/v1/notify/inbox/me/history.get").exists())
             .andExpect(jsonPath("$.paths./api/v1/notify/inbox/{id}/read").exists())
             .andExpect(jsonPath("$.paths./api/v1/notify/inbox/{id}/read.post").exists())
             .andExpect(jsonPath("$.paths./api/v1/notify/inbox/{id}/archive").exists())

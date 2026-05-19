@@ -200,6 +200,10 @@ notify:
   # that aren't needed without multi-pod scale).
   inbox:
     cross-pod-enabled: ${NOTIFY_INBOX_CROSS_POD_ENABLED:true}
+    # Faz 23.4 M6a — GET /inbox/me/history rolling window (days). Server-
+    # enforced; the endpoint takes no client `since` param. Valid range
+    # [1, 90] — InboxService fails fast at startup outside that range.
+    history-window-days: ${NOTIFY_INBOX_HISTORY_WINDOW_DAYS:30}
 
   # Faz 23.5 PR6 — NotifyOrgAccessGuard single-tenant fallback.
   # default-org-id: requestedOrgId == defaultOrgId ise JWT claim'i aranmaksızın

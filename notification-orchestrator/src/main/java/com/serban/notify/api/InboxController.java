@@ -1,5 +1,6 @@
 package com.serban.notify.api;
 
+import com.serban.notify.api.dto.InboxHistoryListResponse;
 import com.serban.notify.api.dto.InboxItemResponse;
 import com.serban.notify.api.dto.InboxListResponse;
 import com.serban.notify.domain.NotificationInbox;
@@ -95,6 +96,47 @@ public class InboxController {
         );
         long unreadCount = inboxService.unreadCount(callerOrgId, subscriberId);
         return ResponseEntity.ok(InboxListResponse.from(pageResult, unreadCount));
+    }
+
+    /**
+     * GET /api/v1/notify/inbox/me/history — paged notification history.
+     *
+     * <p>Faz 23.4 M6a (Codex thread {@code 019e40ec} AGREE iter-2).
+     * Unlike {@link #listMine} (active surface — UNREAD + READ only),
+     * the history view returns rows in EVERY state (UNREAD + READ +
+     * ARCHIVED) created within a server-enforced rolling window (default
+     * 30 days; property {@code notify.inbox.history-window-days}). It is
+     * a read-only review surface — no mutation endpoint accepts a
+     * history-scoped row, and there is no client {@code since} param
+     * (the window floor is server policy, sourced from the DB clock).
+     *
+     * <p>The response carries {@code windowStart} + {@code windowDays}
+     * so the client can label the view without re-deriving the boundary.
+     *
+     * @param size requested page size, clamped service-side to {@code [1, 100]}
+     */
+    @GetMapping("/me/history")
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "Paged 30-day inbox history (all states)"),
+        @ApiResponse(responseCode = "400", description = "Validation error")
+    })
+    public ResponseEntity<InboxHistoryListResponse> historyMine(
+        @RequestHeader(name = "X-Org-Id", required = true) @NotBlank String callerOrgId,
+        @RequestHeader(name = "X-Subscriber-Id", required = true) @NotBlank String subscriberId,
+        @RequestParam(name = "page", defaultValue = "0") @Min(0) int page,
+        @RequestParam(name = "size", defaultValue = "20") @Min(1) int size
+    ) {
+        // Same guard order as listMine (Codex thread `019e0675` iter-5):
+        // org guard before the subscriber identity guard so the
+        // cutover-gate metric captures every browser inbox call.
+        notifyOrgAccessGuard.requireOrgAccessOrThrow(callerOrgId);
+        subscriberIdentityGuard.requireMatchOrThrow(subscriberId);
+        InboxService.HistoryResult result = inboxService.listHistory(
+            callerOrgId, subscriberId, page, size
+        );
+        return ResponseEntity.ok(InboxHistoryListResponse.from(
+            result.page(), result.windowStart(), result.windowDays()
+        ));
     }
 
     /**

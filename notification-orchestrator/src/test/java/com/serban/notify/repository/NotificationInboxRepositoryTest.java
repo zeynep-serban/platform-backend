@@ -494,4 +494,161 @@ class NotificationInboxRepositoryTest extends AbstractPostgresTest {
         assertThat(java.time.Duration.between(dbNow, jvmNow).abs())
             .isLessThan(java.time.Duration.ofMinutes(5));
     }
+
+    // ─── Faz 23.4 M6a: findHistoryBySubscriber ───────────────────────────
+
+    @Test
+    void findHistoryBySubscriberReturnsAllThreeStates() {
+        // History is NOT state-filtered — unlike findActiveBySubscriber it
+        // surfaces UNREAD + READ + ARCHIVED alike.
+        repo.save(stub("default", "intent-h-unread", "sub-1"));
+        NotificationInbox read = repo.save(stub("default", "intent-h-read", "sub-1"));
+        repo.markAsRead("default", read.getId(), "sub-1");
+        NotificationInbox archived = repo.save(stub("default", "intent-h-arch", "sub-1"));
+        repo.archive("default", archived.getId(), "sub-1");
+
+        OffsetDateTime since = OffsetDateTime.now().minusDays(30);
+        Page<NotificationInbox> page = repo.findHistoryBySubscriber(
+            "default", "sub-1", since, PageRequest.of(0, 20));
+
+        assertThat(page.getTotalElements()).isEqualTo(3);
+        assertThat(page.getContent()).extracting(NotificationInbox::getState)
+            .containsExactlyInAnyOrder(
+                NotificationInbox.State.UNREAD,
+                NotificationInbox.State.READ,
+                NotificationInbox.State.ARCHIVED);
+    }
+
+    @Test
+    void findHistoryBySubscriberIncludesArchivedRowThatActiveQueryExcludes() {
+        // Core M6a behaviour: an archived row drops out of the active inbox
+        // but stays visible in the 30-day history.
+        NotificationInbox row = repo.save(stub("default", "intent-arch-m6a", "sub-1"));
+        repo.archive("default", row.getId(), "sub-1");
+
+        Page<NotificationInbox> active = repo.findActiveBySubscriber(
+            "default", "sub-1", PageRequest.of(0, 20));
+        OffsetDateTime since = OffsetDateTime.now().minusDays(30);
+        Page<NotificationInbox> history = repo.findHistoryBySubscriber(
+            "default", "sub-1", since, PageRequest.of(0, 20));
+
+        assertThat(active.getContent()).extracting(NotificationInbox::getIntentId)
+            .doesNotContain("intent-arch-m6a");
+        assertThat(history.getContent()).extracting(NotificationInbox::getIntentId)
+            .containsExactly("intent-arch-m6a");
+    }
+
+    @Test
+    void findHistoryBySubscriberExcludesRowsOlderThanWindow() {
+        NotificationInbox inWindow = repo.save(stub("default", "intent-in", "sub-1"));
+        NotificationInbox outOfWindow = repo.save(stub("default", "intent-out", "sub-1"));
+        // created_at is insertable=false (DB DEFAULT NOW()); plant via raw SQL.
+        jdbcTemplate.update(
+            "UPDATE notify.notification_inbox SET created_at = NOW() - INTERVAL '29 days' WHERE id = ?",
+            inWindow.getId());
+        jdbcTemplate.update(
+            "UPDATE notify.notification_inbox SET created_at = NOW() - INTERVAL '31 days' WHERE id = ?",
+            outOfWindow.getId());
+
+        OffsetDateTime since = OffsetDateTime.now().minusDays(30);
+        Page<NotificationInbox> page = repo.findHistoryBySubscriber(
+            "default", "sub-1", since, PageRequest.of(0, 20));
+
+        assertThat(page.getContent()).extracting(NotificationInbox::getIntentId)
+            .containsExactly("intent-in");
+    }
+
+    @Test
+    void findHistoryBySubscriberWindowFloorIsInclusive() {
+        NotificationInbox row = repo.save(stub("default", "intent-boundary", "sub-1"));
+        // Pin created_at to a known UTC instant (column is insertable=false).
+        jdbcTemplate.update(
+            "UPDATE notify.notification_inbox "
+            + "SET created_at = TIMESTAMPTZ '2026-05-01 00:00:00+00' WHERE id = ?",
+            row.getId());
+
+        // since == created_at → the >= predicate includes the row.
+        Page<NotificationInbox> atFloor = repo.findHistoryBySubscriber(
+            "default", "sub-1", OffsetDateTime.parse("2026-05-01T00:00:00Z"),
+            PageRequest.of(0, 20));
+        assertThat(atFloor.getTotalElements()).isEqualTo(1);
+
+        // since one second after created_at → row excluded.
+        Page<NotificationInbox> afterFloor = repo.findHistoryBySubscriber(
+            "default", "sub-1", OffsetDateTime.parse("2026-05-01T00:00:01Z"),
+            PageRequest.of(0, 20));
+        assertThat(afterFloor.getTotalElements()).isZero();
+    }
+
+    @Test
+    void findHistoryBySubscriberHasNoUpperBoundFutureDatedRowIncluded() {
+        // created_at is DB-DEFAULT-NOW so it is never future in practice;
+        // this documents that the query has no upper bound — a row stamped
+        // ahead of "now" (test plant / clock skew) still satisfies
+        // created_at >= since.
+        NotificationInbox future = repo.save(stub("default", "intent-future", "sub-1"));
+        jdbcTemplate.update(
+            "UPDATE notify.notification_inbox SET created_at = NOW() + INTERVAL '1 hour' WHERE id = ?",
+            future.getId());
+
+        OffsetDateTime since = OffsetDateTime.now().minusDays(30);
+        Page<NotificationInbox> page = repo.findHistoryBySubscriber(
+            "default", "sub-1", since, PageRequest.of(0, 20));
+
+        assertThat(page.getTotalElements()).isEqualTo(1);
+    }
+
+    @Test
+    void findHistoryBySubscriberFiltersCrossTenant() {
+        repo.save(stub("default", "intent-a", "sub-1"));
+        repo.save(stub("other-org", "intent-b", "sub-1"));   // different org
+        repo.save(stub("default", "intent-c", "sub-2"));     // different subscriber
+
+        OffsetDateTime since = OffsetDateTime.now().minusDays(30);
+        Page<NotificationInbox> page = repo.findHistoryBySubscriber(
+            "default", "sub-1", since, PageRequest.of(0, 20));
+
+        assertThat(page.getTotalElements()).isEqualTo(1);
+        assertThat(page.getContent().get(0).getOrgId()).isEqualTo("default");
+        assertThat(page.getContent().get(0).getSubscriberId()).isEqualTo("sub-1");
+    }
+
+    @Test
+    void findHistoryBySubscriberUsesIdDescTieBreakerForEqualCreatedAt() {
+        NotificationInbox first = repo.save(stub("default", "intent-tie-1", "sub-1"));
+        NotificationInbox second = repo.save(stub("default", "intent-tie-2", "sub-1"));
+        // Pin both rows to an identical created_at so ordering is decided
+        // solely by the `id DESC` tie-breaker.
+        jdbcTemplate.update(
+            "UPDATE notify.notification_inbox "
+            + "SET created_at = TIMESTAMPTZ '2026-05-10 09:00:00+00' WHERE id IN (?, ?)",
+            first.getId(), second.getId());
+
+        Page<NotificationInbox> page = repo.findHistoryBySubscriber(
+            "default", "sub-1", OffsetDateTime.parse("2026-01-01T00:00:00Z"),
+            PageRequest.of(0, 20));
+
+        long higherId = Math.max(first.getId(), second.getId());
+        long lowerId = Math.min(first.getId(), second.getId());
+        assertThat(page.getContent()).extracting(NotificationInbox::getId)
+            .containsExactly(higherId, lowerId);
+    }
+
+    @Test
+    void findHistoryBySubscriberPaginationReportsTotals() {
+        for (int i = 0; i < 25; i++) {
+            repo.save(stub("default", "intent-hp-" + i, "sub-1"));
+        }
+
+        OffsetDateTime since = OffsetDateTime.now().minusDays(30);
+        Page<NotificationInbox> page0 = repo.findHistoryBySubscriber(
+            "default", "sub-1", since, PageRequest.of(0, 10));
+        Page<NotificationInbox> lastPage = repo.findHistoryBySubscriber(
+            "default", "sub-1", since, PageRequest.of(2, 10));
+
+        assertThat(page0.getContent()).hasSize(10);
+        assertThat(page0.getTotalElements()).isEqualTo(25L);
+        assertThat(page0.getTotalPages()).isEqualTo(3);
+        assertThat(lastPage.getContent()).hasSize(5);  // 25 rows → last page has 5
+    }
 }
