@@ -7,10 +7,7 @@ import com.example.report.contract.report.ContractReport;
 import com.example.report.contract.report.ContractViolation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.InputStream;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.DefaultResourceLoader;
 import org.springframework.core.io.Resource;
@@ -26,15 +23,14 @@ import org.springframework.core.io.Resource;
  * <p>Acceptance criteria:
  * <ul>
  *   <li>Default {@code mvn test} run completes deterministically.</li>
- *   <li>RC-004 governance debt is suppressed by the 4 exception entries
- *       (HR reports with no company-boundary column; tracked #247). RC-001
- *       debt closed via the RC001 COMPANY_REMAINDER carve-out (Codex
- *       019e3f5c).</li>
+ *   <li>All report-contract governance debt is closed at the rule level —
+ *       RC-001 via the COMPANY_REMAINDER carve-out (#248), RC-004 via the
+ *       BRANCH migration + RC-004 v2 sourceQuery projected-join boundary
+ *       (#247). exceptions.json is empty; the gate is green with raw=0.</li>
  *   <li>{@code hr-personel-listesi} (legitimate {@code OUR_COMPANY_ID})
  *       is NOT in the exception list.</li>
  *   <li>No unsuppressed FAILs remain in the gate output.</li>
- *   <li>Exception inventory exact: 4 entries (4× RC-004); RC-001 closed
- *       via carve-out, RC-005 eliminated by 2d.</li>
+ *   <li>Exception inventory exact: 0 entries — all debt rule-closed.</li>
  * </ul>
  */
 class ReportContractGateTest {
@@ -48,9 +44,9 @@ class ReportContractGateTest {
                 .isEqualTo(32);
 
         // Codex iter-4 §1d-AGREE: gate must produce zero unsuppressed FAILs.
-        // Exception entries cover known RC-004 debt only; RC-001 COMPANY_REMAINDER
-        // snapshots pass by the RC001 rule carve-out. Anything beyond that
-        // signals new tech debt or regression.
+        // Codex 019e3f5c: all governance debt is rule-closed (RC-001 carve-out
+        // + RC-004 v2 boundary) and exceptions.json is empty — any failure
+        // here signals new tech debt or a regression.
         assertThat(report.failures())
                 .as("Unsuppressed failures: %s",
                         report.failures().stream().limit(10).toList())
@@ -58,20 +54,19 @@ class ReportContractGateTest {
     }
 
     @Test
-    void gate_currentRC004ExceptionsAreSuppressed() {
-        // 4 RC-004 governance debt entries (HR reports with no company-boundary
-        // column; tracked Halildeu/platform-backend#247). hr-giris-cikis +
-        // hr-puantaj (2e/BRANCH) and stok-durum (current-resolver fix) were
-        // closed earlier and are no longer exception entries.
+    void gate_hrReports_passRC004AfterClosure() {
+        // Codex 019e3f5c: the 4 formerly-debt HR reports now pass RC-004 with
+        // no violation and no exception — hr-bordro-detay via BRANCH scope,
+        // hr-izin-raporu / hr-maas-raporu / hr-maas-gecmisi via the RC-004 v2
+        // sourceQuery projected-join company boundary (#247).
         ContractReport report = ReportContractGate.create().gate();
-        List<String> knownDebtKeys = List.of(
+        List<String> closedKeys = List.of(
                 "hr-bordro-detay", "hr-izin-raporu",
                 "hr-maas-gecmisi", "hr-maas-raporu");
 
-        // None of these should appear as failures.
         assertThat(report.failures())
-                .as("Current RC-004 governance debt must be exception-suppressed")
-                .noneMatch(v -> knownDebtKeys.contains(v.reportKey())
+                .as("Formerly-debt HR reports must raise no RC-004 failure")
+                .noneMatch(v -> closedKeys.contains(v.reportKey())
                         && "RC-004".equals(v.ruleId()));
     }
 
@@ -116,40 +111,19 @@ class ReportContractGateTest {
     }
 
     @Test
-    void exceptionsJson_inventoryExactCounts() throws Exception {
-        // Codex iter-5 §1d-AGREE absorb: lock the production exception inventory
-        // shape so accidental drift (e.g. someone adding an RC-007 90d entry
-        // without review) is caught at gate-test time.
-        // Codex 019e3f5c absorb: RC-001 debt (×2) closed via the RC001
-        // COMPANY_REMAINDER schema-encoded-snapshot carve-out; only 4 RC-004
-        // entries remain (HR reports lacking a company-boundary column —
-        // tracked Halildeu/platform-backend#247).
+    void exceptionsJson_inventoryIsEmpty_allDebtClosed() throws Exception {
+        // Codex 019e3f5c absorb: all report-contract governance debt is now
+        // closed at the rule level — RC-001 via the RC001 COMPANY_REMAINDER
+        // carve-out (#248), RC-004 via the BRANCH migration + RC-004 v2
+        // sourceQuery projected-join boundary (#247). exceptions.json carries
+        // zero entries; the gate is green with raw=0 (nothing to suppress).
+        // This test is the drift guard: a stray exception entry re-appearing
+        // without review fails here.
         ContractExceptionEntry[] entries = loadExceptions();
 
         assertThat(entries)
-                .as("Governance debt entries: 4 RC-004 (RC-001 closed via carve-out)")
-                .hasSize(4);
-
-        Map<String, Long> byRule = Arrays.stream(entries)
-                .flatMap(e -> e.ruleIds().stream())
-                .collect(Collectors.groupingBy(r -> r, Collectors.counting()));
-
-        assertThat(byRule.get("RC-004"))
-                .as("RC-004 debt: HR reports with no company-boundary column")
-                .isEqualTo(4L);
-        assertThat(byRule.get("RC-001"))
-                .as("RC-001 debt closed via RC001 COMPANY_REMAINDER carve-out")
-                .isNull();
-        // RC-005 eliminated by Phase 2 Program 2d (rowFilter removed from 12
-        // yearly reports; 2a runtime tenant guard hardening provides the
-        // fail-closed precondition).
-        assertThat(byRule.get("RC-005"))
-                .as("RC-005 debt eliminated by 2d")
-                .isNull();
-
-        // No other rule namespace should creep in without review.
-        assertThat(byRule.keySet())
-                .containsExactly("RC-004");
+                .as("Governance debt fully closed — exception inventory must be empty")
+                .isEmpty();
     }
 
     @Test

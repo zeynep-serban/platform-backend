@@ -5,13 +5,13 @@
   "title": "Maaş Raporu",
   "description": "Çalışan bazlı aylık brüt maaş verileri (yıl ve ay bazında)",
   "category": "İnsan Kaynakları",
-  "source": "EMPLOYEES_SALARY",
+  "sourceQuery": "SELECT ES.SALARY_HISTORY_ID, ES.EMPLOYEE_ID, ES.PERIOD_YEAR, ES.MONEY, ES.M1, ES.M2, ES.M3, ES.M4, ES.M5, ES.M6, ES.M7, ES.M8, ES.M9, ES.M10, ES.M11, ES.M12, ES.SALARY_CODE, ES.RECORD_DATE, EP.OUR_COMPANY_ID AS [OUR_COMPANY_ID] FROM [workcube_mikrolink].[EMPLOYEES_SALARY] ES WITH (NOLOCK) INNER JOIN [workcube_mikrolink].[EMPLOYEE_POSITIONS] EP WITH (NOLOCK) ON EP.EMPLOYEE_ID = ES.EMPLOYEE_ID AND EP.POSITION_ID = (SELECT TOP 1 EP2.POSITION_ID FROM [workcube_mikrolink].[EMPLOYEE_POSITIONS] EP2 WITH (NOLOCK) WHERE EP2.EMPLOYEE_ID = ES.EMPLOYEE_ID AND EP2.OUR_COMPANY_ID IS NOT NULL ORDER BY CASE WHEN EP2.POSITION_STATUS = 1 THEN 0 ELSE 1 END, EP2.IS_MASTER DESC, EP2.POSITION_ID DESC)",
   "sourceSchema": "workcube_mikrolink",
   "schemaMode": "static",
   "tenantBoundary": {
     "mode": "row",
     "scopeType": "COMPANY",
-    "reason": "Row-level filter via rowFilter; tenant scoping enforced at query layer"
+    "reason": "Row-level company filter on EMPLOYEE_POSITIONS.OUR_COMPANY_ID projected via the sourceQuery employee-position join (RC-004 v2 projectedJoin boundary)."
   },
   "columns": [
     {
@@ -162,9 +162,20 @@
       ]
     },
     "rowFilter": {
-      "column": "EMPLOYEE_ID",
+      "column": "OUR_COMPANY_ID",
       "scopeType": "COMPANY",
-      "bypassPermission": "reports.hr.all-companies"
+      "bypassPermission": "reports.hr.all-companies",
+      "sourceQueryBoundary": {
+        "mode": "projectedJoin",
+        "sourceTable": "EMPLOYEES_SALARY",
+        "sourceAlias": "ES",
+        "sourceJoinColumn": "EMPLOYEE_ID",
+        "boundaryTable": "EMPLOYEE_POSITIONS",
+        "boundaryAlias": "EP",
+        "boundaryJoinColumn": "EMPLOYEE_ID",
+        "boundaryColumn": "OUR_COMPANY_ID",
+        "projectedColumn": "OUR_COMPANY_ID"
+      }
     },
     "reportGroup": "HR_REPORTS"
   }

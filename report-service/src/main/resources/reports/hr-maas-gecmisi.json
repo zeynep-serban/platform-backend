@@ -5,13 +5,13 @@
   "title": "Maaş Değişiklik Geçmişi",
   "description": "Maaş artışları ve değişiklik kayıtları (yıl bazlı karşılaştırma)",
   "category": "İnsan Kaynakları",
-  "source": "EMPLOYEES_SALARY_HISTORY",
+  "sourceQuery": "SELECT ESH.HISTORY_ID, ESH.EMPLOYEE_ID, ESH.PERIOD_YEAR, ESH.MONEY, ESH.M1, ESH.M2, ESH.M3, ESH.M4, ESH.M5, ESH.M6, ESH.M7, ESH.M8, ESH.M9, ESH.M10, ESH.M11, ESH.M12, ESH.SALARY_UPDATE_ID, ESH.SALARY_CODE, ESH.RECORD_DATE, EP.OUR_COMPANY_ID AS [OUR_COMPANY_ID] FROM [workcube_mikrolink].[EMPLOYEES_SALARY_HISTORY] ESH WITH (NOLOCK) INNER JOIN [workcube_mikrolink].[EMPLOYEE_POSITIONS] EP WITH (NOLOCK) ON EP.EMPLOYEE_ID = ESH.EMPLOYEE_ID AND EP.POSITION_ID = (SELECT TOP 1 EP2.POSITION_ID FROM [workcube_mikrolink].[EMPLOYEE_POSITIONS] EP2 WITH (NOLOCK) WHERE EP2.EMPLOYEE_ID = ESH.EMPLOYEE_ID AND EP2.OUR_COMPANY_ID IS NOT NULL ORDER BY CASE WHEN EP2.POSITION_STATUS = 1 THEN 0 ELSE 1 END, EP2.IS_MASTER DESC, EP2.POSITION_ID DESC)",
   "sourceSchema": "workcube_mikrolink",
   "schemaMode": "static",
   "tenantBoundary": {
     "mode": "row",
     "scopeType": "COMPANY",
-    "reason": "Row-level filter via rowFilter; tenant scoping enforced at query layer"
+    "reason": "Row-level company filter on EMPLOYEE_POSITIONS.OUR_COMPANY_ID projected via the sourceQuery employee-position join (RC-004 v2 projectedJoin boundary)."
   },
   "columns": [
     {
@@ -169,9 +169,20 @@
       ]
     },
     "rowFilter": {
-      "column": "EMPLOYEE_ID",
+      "column": "OUR_COMPANY_ID",
       "scopeType": "COMPANY",
-      "bypassPermission": "reports.hr.all-companies"
+      "bypassPermission": "reports.hr.all-companies",
+      "sourceQueryBoundary": {
+        "mode": "projectedJoin",
+        "sourceTable": "EMPLOYEES_SALARY_HISTORY",
+        "sourceAlias": "ESH",
+        "sourceJoinColumn": "EMPLOYEE_ID",
+        "boundaryTable": "EMPLOYEE_POSITIONS",
+        "boundaryAlias": "EP",
+        "boundaryJoinColumn": "EMPLOYEE_ID",
+        "boundaryColumn": "OUR_COMPANY_ID",
+        "projectedColumn": "OUR_COMPANY_ID"
+      }
     },
     "reportGroup": "HR_REPORTS"
   }

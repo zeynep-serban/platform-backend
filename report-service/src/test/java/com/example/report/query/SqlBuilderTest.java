@@ -158,6 +158,39 @@ class SqlBuilderTest {
         }
 
         @Test
+        void customSourceQuery_rlsOnNonVisibleProjectedColumn() {
+            // RC-004 v2 (Codex 019e3f5c): the company boundary column
+            // OUR_COMPANY_ID is projected by the sourceQuery but is NOT a
+            // visible report column. RLS must still filter on it — the clause
+            // is appended after `AS _src WHERE 1=1`, so any column the inner
+            // sourceQuery projects is addressable regardless of visibility.
+            ReportDefinition def = new ReportDefinition(
+                    "v2-report", "v1", "V2", "desc", "İK",
+                    null, "workcube_mikrolink", "static", null,
+                    "SELECT OT.EMPLOYEE_ID, EP.OUR_COMPANY_ID AS [OUR_COMPANY_ID] "
+                            + "FROM [workcube_mikrolink].[OFFTIME] OT WITH (NOLOCK) "
+                            + "INNER JOIN [workcube_mikrolink].[EMPLOYEE_POSITIONS] EP WITH (NOLOCK) "
+                            + "ON EP.EMPLOYEE_ID = OT.EMPLOYEE_ID",
+                    List.of(new ColumnDefinition("EMPLOYEE_ID", "Sicil", "number", 100, false)),
+                    "EMPLOYEE_ID", "ASC",
+                    new AccessConfig(null, null, null, null));
+            MapSqlParameterSource rlsParams = new MapSqlParameterSource()
+                    .addValue("_rlsIds", List.of(1L, 2L));
+
+            SqlBuilder.BuiltQuery q = builder.buildDataQuery(
+                    def, List.of("EMPLOYEE_ID"),
+                    Collections.emptyMap(), Collections.emptyList(),
+                    "[OUR_COMPANY_ID] IN (:_rlsIds)", rlsParams, 1, 10);
+
+            // RLS on the projected-but-not-visible boundary column renders.
+            assertThat(q.sql())
+                    .contains(") AS _src WHERE 1=1 AND [OUR_COMPANY_ID] IN (:_rlsIds)");
+            // OUR_COMPANY_ID is not selected as a visible column.
+            assertThat(q.sql()).contains("SELECT [EMPLOYEE_ID]");
+            assertThat(q.params().getValue("_rlsIds")).isEqualTo(List.of(1L, 2L));
+        }
+
+        @Test
         void multiSchema_producesUnionAll() {
             YearlySchemaResolver.ResolvedSchemas schemas =
                     new YearlySchemaResolver.ResolvedSchemas(List.of(branch("db_2023"), branch("db_2024")));

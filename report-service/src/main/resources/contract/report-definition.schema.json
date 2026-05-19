@@ -246,6 +246,36 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 200
+            },
+            "sourceQueryBoundary": {
+              "description": "RC-004 v2 — declarative company-boundary projection for a sourceQuery report whose physical base table has no company column. The boundary table is INNER JOINed and its company column projected under projectedColumn; RC-004 cross-checks the sourceQuery text against this declaration.",
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "sourceTable",
+                "sourceAlias",
+                "sourceJoinColumn",
+                "boundaryTable",
+                "boundaryAlias",
+                "boundaryJoinColumn",
+                "boundaryColumn",
+                "projectedColumn"
+              ],
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": ["projectedJoin"]
+                },
+                "sourceTable": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "sourceAlias": { "type": "string", "minLength": 1, "maxLength": 32 },
+                "sourceJoinColumn": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "boundaryTable": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "boundaryAlias": { "type": "string", "minLength": 1, "maxLength": 32 },
+                "boundaryJoinColumn": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "boundaryColumn": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "projectedColumn": { "type": "string", "minLength": 1, "maxLength": 80 }
+              }
             }
           },
           "required": ["column", "scopeType"]

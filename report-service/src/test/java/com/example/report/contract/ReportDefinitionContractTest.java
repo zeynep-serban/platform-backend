@@ -80,18 +80,18 @@ class ReportDefinitionContractTest {
     }
 
     @Test
-    @DisplayName("Aggregate: suppressed counts match exception inventory (RC-004 debt only)")
+    @DisplayName("Aggregate: zero raw violations, zero suppressions — all debt rule-closed")
     void aggregate_suppressedCountsMatchInventory() {
-        // Phase 2 Program 2d cleaned RC-005×12 (rowFilter removed from 12 yearly
-        // reports; 2a runtime tenant guard provides fail-closed precondition).
-        // Codex 019e3f5c absorb: RC-001×2 closed via the RC001 COMPANY_REMAINDER
-        // schema-encoded-snapshot carve-out — no raw violation, nothing to
-        // suppress. Remaining suppressed: RC-004×4 (HR reports with no
-        // company-boundary column; tracked Halildeu/platform-backend#247).
-        assertThat(CACHED.suppressedByRule())
-                .containsEntry("RC-004", 4L)
-                .doesNotContainKey("RC-001")
-                .doesNotContainKey("RC-005");
+        // Codex 019e3f5c absorb: all report-contract governance debt is closed
+        // at the rule level — RC-001 via the COMPANY_REMAINDER carve-out (#248),
+        // RC-004 via the BRANCH migration + RC-004 v2 sourceQuery projected-join
+        // boundary (#247). exceptions.json is empty: zero raw violations means
+        // zero suppressions, and the gate is green without any exception.
+        assertThat(CACHED.rawViolations())
+                .as("raw violations: %s", CACHED.rawViolations())
+                .isEmpty();
+        assertThat(CACHED.suppressedByRule()).isEmpty();
+        assertThat(CACHED.exceptionInventory()).isEmpty();
     }
 
     @Test

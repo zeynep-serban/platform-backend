@@ -163,7 +163,7 @@ public final class WorkcubeSqlTableRefScanner {
      * same length so that subsequent regex matches keep their positions
      * intact but won't pick up phantom refs from inside strings.
      */
-    private static String maskLiteralsAndComments(String sql) {
+    public static String maskLiteralsAndComments(String sql) {
         StringBuilder out = new StringBuilder(sql);
         replaceWithSpaces(out, BLOCK_COMMENT);
         replaceWithSpaces(out, LINE_COMMENT);

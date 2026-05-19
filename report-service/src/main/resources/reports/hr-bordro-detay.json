@@ -10,8 +10,8 @@
   "schemaMode": "static",
   "tenantBoundary": {
     "mode": "row",
-    "scopeType": "COMPANY",
-    "reason": "Row-level filter via rowFilter; tenant scoping enforced at query layer"
+    "scopeType": "BRANCH",
+    "reason": "Row-level branch boundary via EMPLOYEES_PUANTAJ_ROWS.POSITION_BRANCH_ID; BRANCH is an authz-produced scope axis (RC-004 gates only COMPANY scopes)."
   },
   "columns": [
     {
@@ -243,8 +243,8 @@
       ]
     },
     "rowFilter": {
-      "column": "DEPARTMENT_ID",
-      "scopeType": "COMPANY",
+      "column": "POSITION_BRANCH_ID",
+      "scopeType": "BRANCH",
       "bypassPermission": "reports.hr.all-companies"
     },
     "reportGroup": "HR_REPORTS"
