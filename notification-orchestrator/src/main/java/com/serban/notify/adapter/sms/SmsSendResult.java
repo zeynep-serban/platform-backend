@@ -29,13 +29,19 @@ package com.serban.notify.adapter.sms;
  *       ({@code ISO-8859-9} JetSMS Latin-5, {@code UCS-2} NetGSM Unicode,
  *       {@code GSM-7} NetGSM ASCII). Null = encoding bilgisi yok (eski
  *       call path veya provider override).</li>
+ *   <li>{@link #actualChannel} — Faz 23.3.2 PR-A3.1.1 (Codex P2 absorb):
+ *       JetSMS SOAP outbound'ta gerçekten kullanılan kanal kodu
+ *       ({@code VFO} / {@code VF}); routing kararının audit kanıtı.
+ *       Null = legacy 2-arg send call veya channel-agnostic provider
+ *       (örn. NetGSM tek-kanal). Sadece {@code ACCEPTED} sonuçta
+ *       anlamlıdır; {@code FAILED}/{@code RETRY} için null olmalı.</li>
  * </ul>
  *
  * <p>{@code SmsAdapter} bu metadata'yı {@code DeliveryAttemptResult.providerMetadata}
  * generic map'ine taşır; {@code DeliveryDispatchService} ve {@code RetryWorker}
  * {@code DELIVERY_ACCEPTED} audit event details'ine merge eder
- * ({@code PiiRedactor} whitelist'i {@code segment_count} + {@code encoding}
- * key'lerini açar).
+ * ({@code PiiRedactor} whitelist'i {@code segment_count} + {@code encoding} +
+ * {@code actual_channel} key'lerini açar).
  */
 public record SmsSendResult(
     SmsSendStatus status,
@@ -44,7 +50,8 @@ public record SmsSendResult(
     String providerMsgId,
     String providerCode,
     int segmentCount,
-    String encoding
+    String encoding,
+    String actualChannel
 ) {
 
     /** Send sonuç durumu. DELIVERED yok — SMS her zaman async DLR ile terminal olur. */
@@ -83,22 +90,28 @@ public record SmsSendResult(
                 "Sadece ACCEPTED sonuç segmentCount > 0 olabilir; FAILED/RETRY "
                     + "için segmentCount=0 (mesaj gönderilmedi → billing yok)");
         }
+        if (status != SmsSendStatus.ACCEPTED && actualChannel != null) {
+            throw new IllegalArgumentException(
+                "Sadece ACCEPTED sonuç actualChannel taşıyabilir; FAILED/RETRY "
+                    + "için null (mesaj gönderilmedi → kanal bilgisi anlamsız)");
+        }
     }
 
     /**
      * Backward-compatible: carrier kabul etti — DLR bekleniyor.
-     * Default {@code segmentCount=1} + {@code encoding=null} (legacy callers).
+     * Default {@code segmentCount=1} + {@code encoding=null} + {@code actualChannel=null}
+     * (legacy callers).
      *
      * @param actualProviderKey gerçek dispatch eden provider
      * @param providerMsgId DLR correlator ({@code "<providerKey>-<rawId>"}), non-blank
      */
     public static SmsSendResult accepted(String actualProviderKey, String providerMsgId) {
-        return accepted(actualProviderKey, providerMsgId, 1, null);
+        return accepted(actualProviderKey, providerMsgId, 1, null, null);
     }
 
     /**
-     * Carrier kabul etti — DLR bekleniyor + multipart metadata
-     * (Faz 23.3.2 PR-A1.1).
+     * Backward-compatible (Faz 23.3.2 PR-A1.1): segment + encoding metadata,
+     * {@code actualChannel=null}.
      *
      * @param actualProviderKey gerçek dispatch eden provider
      * @param providerMsgId DLR correlator, non-blank
@@ -107,9 +120,26 @@ public record SmsSendResult(
      */
     public static SmsSendResult accepted(String actualProviderKey, String providerMsgId,
                                          int segmentCount, String encoding) {
+        return accepted(actualProviderKey, providerMsgId, segmentCount, encoding, null);
+    }
+
+    /**
+     * Carrier kabul etti — DLR bekleniyor + multipart metadata + actual channel
+     * (Faz 23.3.2 PR-A3.1.1 Codex P2 absorb).
+     *
+     * @param actualProviderKey gerçek dispatch eden provider
+     * @param providerMsgId DLR correlator, non-blank
+     * @param segmentCount billed segment sayısı (≥1)
+     * @param encoding provider encoding label (ISO-8859-9, UCS-2, GSM-7, vb.); null OK
+     * @param actualChannel SOAP outbound'ta kullanılan kanal kodu
+     *                      ({@code VFO} / {@code VF}); null = channel-agnostic
+     */
+    public static SmsSendResult accepted(String actualProviderKey, String providerMsgId,
+                                         int segmentCount, String encoding,
+                                         String actualChannel) {
         return new SmsSendResult(
             SmsSendStatus.ACCEPTED, SmsFailureClass.NONE,
-            actualProviderKey, providerMsgId, null, segmentCount, encoding);
+            actualProviderKey, providerMsgId, null, segmentCount, encoding, actualChannel);
     }
 
     /**
@@ -121,7 +151,7 @@ public record SmsSendResult(
                                        SmsFailureClass failureClass,
                                        String providerCode) {
         return new SmsSendResult(
-            SmsSendStatus.FAILED, failureClass, actualProviderKey, null, providerCode, 0, null);
+            SmsSendStatus.FAILED, failureClass, actualProviderKey, null, providerCode, 0, null, null);
     }
 
     /**
@@ -132,6 +162,6 @@ public record SmsSendResult(
                                       SmsFailureClass failureClass,
                                       String providerCode) {
         return new SmsSendResult(
-            SmsSendStatus.RETRY, failureClass, actualProviderKey, null, providerCode, 0, null);
+            SmsSendStatus.RETRY, failureClass, actualProviderKey, null, providerCode, 0, null, null);
     }
 }

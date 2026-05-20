@@ -338,6 +338,12 @@ public class SmsAdapter implements ChannelAdapter {
         if (r.encoding() != null && !r.encoding().isBlank()) {
             metadata.put("encoding", r.encoding());
         }
+        // Faz 23.3.2 PR-A3.1.1 (Codex P2 absorb): JetSMS SOAP outbound channel
+        // audit propagation — VFO/VF routing kararı kanıtı DELIVERY_ACCEPTED
+        // event details'inde görünür.
+        if (r.actualChannel() != null && !r.actualChannel().isBlank()) {
+            metadata.put("actual_channel", r.actualChannel());
+        }
         return metadata;
     }
 
