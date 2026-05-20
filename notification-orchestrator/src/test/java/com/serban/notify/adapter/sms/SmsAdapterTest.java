@@ -271,6 +271,55 @@ class SmsAdapterTest {
     }
 
     @Test
+    void unsupportedCharsetUnicodeSecondaryWithSufficientLengthRoutes() {
+        // Codex thread 019e4514 iter-2 P2 absorb (PR-A1.2 hardening):
+        // UNSUPPORTED_CHARSET route'da secondary.supportsUnicode() yetmez;
+        // secondary.maxMessageLength() >= textLength da olmalı. Burada
+        // text 200 char (NetGSM 670 cap içinde) + emoji → route OK.
+        String text200 = "e".repeat(200);
+        FakeProvider jetsms = new FakeProvider("jetsms", false, 160,
+            t -> SmsSendResult.failed("jetsms", SmsFailureClass.UNSUPPORTED_CHARSET, "charset"));
+        FakeProvider netgsm = new FakeProvider("netgsm", true, 670,
+            t -> SmsSendResult.accepted("netgsm", "netgsm-ucs2"));
+        SmsAdapter a = adapter(List.of(jetsms, netgsm), "jetsms", "netgsm");
+
+        ChannelAdapter.DeliveryAttemptResult r = a.send(
+            target("+905321111111"), msg("S", text200 + "🎉"));
+
+        assertThat(r.status()).isEqualTo(ChannelAdapter.DeliveryAttemptResult.Status.ACCEPTED);
+        assertThat(r.actualProviderKey()).isEqualTo("netgsm");
+        assertThat(netgsm.sendCallCount).isEqualTo(1);
+    }
+
+    @Test
+    void unsupportedCharsetUnicodeSecondaryButLengthExceedsMaxStaysFailed() {
+        // Codex thread 019e4514 iter-2 P2 absorb (PR-A1.2 hardening):
+        // emoji içeren mesaj NetGSM secondary'nin maxMessageLength (670)
+        // sınırını aşıyorsa silent failover etmek YANLIŞ — primary FAILED
+        // kalmalı. NetGSM provider-side code 20 ile MESSAGE_TOO_LONG dönecek;
+        // client-side preflight ile bu gereksiz outbound atılır.
+        String longUnicodeText = "🎉".repeat(700);  // 700 char unicode, 670 cap'i aşar
+        FakeProvider jetsms = new FakeProvider("jetsms", false, 160,
+            t -> SmsSendResult.failed("jetsms", SmsFailureClass.UNSUPPORTED_CHARSET, "charset"));
+        FakeProvider netgsm = new FakeProvider("netgsm", true, 670,
+            t -> SmsSendResult.accepted("netgsm", "netgsm-ucs2"));
+        SmsAdapter a = adapter(List.of(jetsms, netgsm), "jetsms", "netgsm");
+
+        ChannelAdapter.DeliveryAttemptResult r = a.send(
+            target("+905321111111"), msg("S", longUnicodeText));
+
+        assertThat(r.status())
+            .as("emoji + uzun text: secondary Unicode destekliyor ama "
+                + "maxMessageLength yetersiz → silent failover YASAK; "
+                + "PR-A1.2 capability hardening")
+            .isEqualTo(ChannelAdapter.DeliveryAttemptResult.Status.FAILED);
+        assertThat(r.actualProviderKey()).isEqualTo("jetsms");
+        assertThat(netgsm.sendCallCount)
+            .as("client-side preflight ile NetGSM outbound atılmadı")
+            .isZero();
+    }
+
+    @Test
     void providerConfigErrorEmitsAlertMetricNoFailoverByDefault() {
         // PROVIDER_CONFIG → alert metric emit; default failover YOK
         SimpleMeterRegistry registry = new SimpleMeterRegistry();

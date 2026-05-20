@@ -212,10 +212,23 @@ public class SmsAdapter implements ChannelAdapter {
         }
 
         if (fc == SmsFailureClass.UNSUPPORTED_CHARSET) {
+            // Codex thread 019e4514 iter-2 P2 absorb (PR-A1.2 hardening):
+            // charset-route'da secondary'nin Unicode desteklemesi yetmez;
+            // mesaj uzunluğu secondary'nin maxMessageLength()'inden büyükse
+            // dispatch yine fail eder (NetGSM provider-side code 20 ile
+            // MESSAGE_TOO_LONG döner; client-side preflight'la yine route
+            // değil). JetSMS multipart operational açıldığında uzun mesaj
+            // (>NetGSM cap) emoji içerirse silent failover yerine no-route
+            // dönülmeli.
             SmsProvider secondary = providersByKey.get(secondaryKey);
-            boolean route = secondary != null && secondary.supportsUnicode();
-            log.info("sms UNSUPPORTED_CHARSET: secondary={} supportsUnicode={} → pre-route={}",
-                secondaryKey, secondary != null && secondary.supportsUnicode(), route);
+            boolean unicodeOk = secondary != null && secondary.supportsUnicode();
+            boolean lengthOk = secondary != null && secondary.maxMessageLength() >= textLength;
+            boolean route = unicodeOk && lengthOk;
+            log.info("sms UNSUPPORTED_CHARSET: textLength={} secondary={} "
+                    + "supportsUnicode={} maxLength={} → route={}",
+                textLength, secondaryKey, unicodeOk,
+                secondary != null ? secondary.maxMessageLength() : "(none)",
+                route);
             return route;
         }
 
