@@ -39,7 +39,7 @@ public interface SmsProvider {
     String providerKey();
 
     /**
-     * SMS gönder.
+     * SMS gönder (legacy 2-arg).
      *
      * @param e164Phone E.164 telefon ({@code +905321234567}); provider kendi
      *                  formatına dönüştürür (örn. JetSMS {@code +} strip)
@@ -48,6 +48,26 @@ public interface SmsProvider {
      *         provider'ın {@link #providerKey()} değerine eşit olmalı
      */
     SmsSendResult send(String e164Phone, String text);
+
+    /**
+     * SMS gönder (context-aware) — Faz 23.3.2 PR-A3.1 (Codex thread
+     * {@code 019e4514}).
+     *
+     * <p>Provider implementasyonu context'ten routing kararı verebilir
+     * (örn. JetSMS topic/template allowlist → VFO channel). Default 2-arg
+     * legacy path'e düşer (context yokmuş gibi davranır) — NetGSM gibi
+     * context-aware olmayan provider'lar override etmez.
+     *
+     * @param e164Phone E.164 telefon
+     * @param text rendered text
+     * @param context routing context (severity audit hint, topic/template
+     *                channel select); {@code null} OK ama prefer
+     *                {@link SmsSendContext#empty()}
+     * @return send sonucu
+     */
+    default SmsSendResult send(String e164Phone, String text, SmsSendContext context) {
+        return send(e164Phone, text);
+    }
 
     /** Bu provider DLR'yi nasıl bildiriyor (PUSH webhook / POLL). */
     SmsDlrMode dlrMode();

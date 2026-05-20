@@ -183,11 +183,30 @@ public class DeliveryPlanService {
             // providerKey "sms" (failover-aware placeholder) — gerçek provider
             // SmsAdapter failover sonucu DeliveryAttemptResult.actualProviderKey
             // ile runtime'da belirlenir, DeliveryDispatchService persist eder.
+            //
+            // Faz 23.3.2 PR-A3.1 (Codex thread 019e4514): routingMetadata
+            // SMS-specific channel hints — JetSmsProvider topic/template
+            // allowlist'inden VFO/VF channel select. Map.of() null-safe değil
+            // (Codex absorb); putIfNotBlank helper kullanılır.
+            java.util.Map<String, Object> routingMeta = new java.util.LinkedHashMap<>();
+            if (intent.getSeverity() != null) {
+                routingMeta.put("severity", intent.getSeverity().name());
+            }
+            putIfNotBlank(routingMeta, "topic_key", intent.getTopicKey());
+            putIfNotBlank(routingMeta, "template_id", intent.getTemplateId());
             result.add(new DeliveryTarget(
-                "sms", type, ref.subscriberId(), hash, phone, "sms"
+                "sms", type, ref.subscriberId(), hash, phone, "sms", routingMeta
             ));
         }
         return result;
+    }
+
+    /** Null/blank guard — Map.of() null reject eder; Codex P3 absorb. */
+    private static void putIfNotBlank(java.util.Map<String, Object> map,
+                                      String key, String value) {
+        if (value != null && !value.isBlank()) {
+            map.put(key, value);
+        }
     }
 
     /**

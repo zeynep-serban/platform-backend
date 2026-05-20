@@ -224,6 +224,32 @@ public class JetSmsProvider implements SmsProvider {
     @Value("${notify.adapters.sms.jetsms.channel-allowed:VF,VFO}")
     private String channelAllowedCsv;
 
+    /**
+     * OTP topic-key allowlist (Faz 23.3.2 PR-A3.1 — Codex thread {@code 019e4514}).
+     * Topic-key bu CSV set'inde ise SOAP envelope channel = {@code VFO} (OTP).
+     * Aksi halde default {@link #channel} (VF BULK).
+     *
+     * <p><b>Source default boş</b> (Codex absorb): örnek değerler
+     * ({@code auth.password-reset-otp}, vb.) source default'a koymak yanlış
+     * route açma riski. Operator GitOps overlay'inde explicitly set eder.
+     */
+    @Value("${notify.adapters.sms.jetsms.channel-otp-topic-keys:}")
+    private String otpTopicKeysCsv;
+
+    /** OTP template-id allowlist — paralel pattern. Source default boş. */
+    @Value("${notify.adapters.sms.jetsms.channel-otp-template-ids:}")
+    private String otpTemplateIdsCsv;
+
+    /**
+     * VFO channel max character length (overlength guard) — Faz 23.3.2 PR-A3.1
+     * (Codex thread {@code 019e4514}). Allowlist match olsa bile text bu
+     * uzunluğun üstünde ise default channel'a (VF) fallback. Default 160
+     * (tek-segment OTP-style). Codex absorb: yanlış sınıflandırılmış uzun
+     * kritik mesajı düşürmek yerine BULK kanaldan gönder.
+     */
+    @Value("${notify.adapters.sms.jetsms.channel-otp-max-length:160}")
+    private int otpMaxLength;
+
     @Override
     public String providerKey() {
         return PROVIDER_KEY;

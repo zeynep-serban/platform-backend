@@ -125,7 +125,12 @@ public class SmsAdapter implements ChannelAdapter {
                 "sms primary provider not registered: " + primaryKey, null);
         }
 
-        SmsSendResult primaryResult = safeSend(primary, phone, text);
+        // Faz 23.3.2 PR-A3.1 (Codex thread 019e4514): SMS context extract
+        // from DeliveryTarget.routingMetadata. Primary + secondary aynı
+        // context'i alır.
+        SmsSendContext context = extractContext(target);
+
+        SmsSendResult primaryResult = safeSend(primary, phone, text, context);
         log.info("sms primary={} result status={} class={} hash={}",
             primaryKey, primaryResult.status(), primaryResult.failureClass(),
             target.recipientHash());
@@ -143,7 +148,7 @@ public class SmsAdapter implements ChannelAdapter {
             if (secondary != null) {
                 log.info("sms failover: primary={} class={} → secondary={}",
                     primaryKey, primaryResult.failureClass(), secondaryKey);
-                SmsSendResult secondaryResult = safeSend(secondary, phone, text);
+                SmsSendResult secondaryResult = safeSend(secondary, phone, text, context);
                 log.info("sms secondary={} result status={} class={} hash={}",
                     secondaryKey, secondaryResult.status(), secondaryResult.failureClass(),
                     target.recipientHash());
@@ -154,6 +159,32 @@ public class SmsAdapter implements ChannelAdapter {
         }
 
         return toAttemptResult(primaryResult);
+    }
+
+    /**
+     * DeliveryTarget routingMetadata Map'inden typed {@link SmsSendContext}
+     * çıkar. Codex thread {@code 019e4514} PR-A3.1 absorb: defansif string
+     * cast, blank guard, missing key tolerant.
+     */
+    private static SmsSendContext extractContext(DeliveryTarget target) {
+        java.util.Map<String, Object> meta = target.routingMetadata();
+        if (meta == null || meta.isEmpty()) {
+            return SmsSendContext.empty();
+        }
+        return new SmsSendContext(
+            stringMeta(meta, "severity"),
+            stringMeta(meta, "topic_key"),
+            stringMeta(meta, "template_id")
+        );
+    }
+
+    /** Defansif string extract — non-String veya blank null döner. */
+    private static String stringMeta(java.util.Map<String, Object> meta, String key) {
+        Object value = meta.get(key);
+        if (value instanceof String s && !s.isBlank()) {
+            return s;
+        }
+        return null;
     }
 
     /**
@@ -250,10 +281,16 @@ public class SmsAdapter implements ChannelAdapter {
         return false;  // kalıcı recipient/content hatası
     }
 
-    /** Provider.send'i sarmalar — beklenmedik exception RETRY'a çevrilir. */
-    private SmsSendResult safeSend(SmsProvider provider, String phone, String text) {
+    /**
+     * Provider.send'i sarmalar — beklenmedik exception RETRY'a çevrilir.
+     * Faz 23.3.2 PR-A3.1 (Codex thread {@code 019e4514}): context-aware
+     * 3-arg overload'u kullanır; context-agnostic provider'lar (NetGSM)
+     * default impl üzerinden legacy 2-arg path'e düşer.
+     */
+    private SmsSendResult safeSend(SmsProvider provider, String phone, String text,
+                                   SmsSendContext context) {
         try {
-            return provider.send(phone, text);
+            return provider.send(phone, text, context != null ? context : SmsSendContext.empty());
         } catch (RuntimeException e) {
             log.warn("sms provider {} threw {} — RETRY",
                 provider.providerKey(), e.getClass().getSimpleName());
