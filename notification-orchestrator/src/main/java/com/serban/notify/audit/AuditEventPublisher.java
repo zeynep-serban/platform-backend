@@ -196,8 +196,17 @@ public class AuditEventPublisher {
      * commits this audit INSERT in its own transaction so the abuse evidence
      * survives the outer rollback.
      *
-     * <p>Safety: yalnız BLOCKED path'te kullan; happy path için
-     * {@link #publishStandalone} (transaction-bound) tercih et.
+     * <p>Safety: BLOCKED path'te (exception throw'dan önce) ve
+     * pre-insert ALLOWED audit decisions için kullan — örn. AbuseGuard
+     * critical-bypass `RATE_LIMIT_BYPASSED_CRITICAL` audit (T1.6.6
+     * absorb 2026-05-20): allowed branch'te bile audit row independent
+     * txn'de commit edilir, böylece downstream bir hata outer rollback'i
+     * tetiklerse bile bypass kanıtı korunur.
+     *
+     * <p>Happy path (intent insert sonrası INTENT_CREATED gibi) için
+     * {@link #publishStandalone} (transaction-bound, MANDATORY)
+     * tercih edilmelidir — orada outer transaction zaten commit
+     * yolunda; ayrı txn açmak gereksiz.
      *
      * @see #publishStandalone for inherited transaction (MANDATORY) variant
      */

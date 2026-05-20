@@ -155,6 +155,31 @@ public class IntentSubmissionService {
             );
         }
 
+        // T1.6.6 critical-bypass audit (Codex thread 019e42df iter-1 P0 absorb):
+        // AbuseGuardService critical-severity allowed branch'i Decision'a
+        // auditEventType taşır (RATE_LIMIT_BYPASSED_CRITICAL). Burada
+        // Propagation.REQUIRES_NEW ile audit row publish edilir; bu olmadan
+        // operatöre "kim ne zaman critical severity ile rate limit bypass
+        // etti, hangi topic için" sorusunun joinable cevabı yok (Prometheus
+        // counter anonim). Other allowed-without-audit branches (within_window)
+        // için auditEventType null → skip.
+        if (abuseDecision.auditEventType() != null) {
+            java.util.Map<String, Object> bypassAuditDetails = new java.util.HashMap<>(abuseDecision.auditDetails());
+            bypassAuditDetails.put("topic_key", request.topicKey());
+            bypassAuditDetails.put("data_classification",
+                request.dataClassification() != null ? request.dataClassification().name() : null);
+            bypassAuditDetails.put("reason", abuseDecision.reason());
+            if (request.correlationId() != null) {
+                bypassAuditDetails.put("correlation_id", request.correlationId());
+            }
+            auditPublisher.publishStandaloneRequiresNew(
+                abuseDecision.auditEventType(),
+                request.orgId(),
+                null,
+                bypassAuditDetails
+            );
+        }
+
         // Step 2: Bounded intake check sadece YENİ intent için (Codex Q3 PARTIAL)
         long pendingCount = intentRepository.countByStatus(NotificationIntent.Status.PENDING);
         if (pendingCount >= config.intake().maxPending()) {

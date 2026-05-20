@@ -18,9 +18,15 @@ import java.util.Map;
  * <p>HTTP 429 Too Many Requests response; {@code reason} + {@code auditDetails}
  * caller'a döner (Retry-After header gelecek iter follow-up).
  *
- * <p>Critical bypass: severity=critical OR data_classification=security
- * intent'ler bu exception'ı tetiklemez ({@code AbuseGuardService} pre-check
- * tarafından bypass edilir).
+ * <p>Critical bypass: yalnız {@code severity=critical} intent'ler RATE
+ * LIMIT için bypass edilir ({@code AbuseGuardService} pre-check tarafından);
+ * bu exception RATE LIMIT path'inde tetiklenmez. Önceki tasarımda
+ * {@code data_classification=security} de bypass ediyordu ama bu yan-axis
+ * Codex thread {@code 019e0c28} P1 absorb 2026-05-09 ile kaldırıldı —
+ * request DTO field client-controlled, trusted-producer authority yok.
+ *
+ * <p>Webhook fan-out cap HARD safety limit; severity=critical bile bypass
+ * etmez — bu exception fan-out cap path'inde her zaman tetiklenir.
  */
 @ResponseStatus(HttpStatus.TOO_MANY_REQUESTS)
 public class AbuseGuardBlockedException extends RuntimeException {

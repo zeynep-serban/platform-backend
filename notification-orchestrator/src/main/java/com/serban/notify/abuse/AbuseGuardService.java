@@ -183,11 +183,21 @@ public class AbuseGuardService {
         // Step 2: Critical bypass for RATE LIMIT only (Codex P1 absorb dar scope)
         // Sadece severity=critical bypass; data_classification=security bypass
         // kaldırıldı (request DTO client-controlled, authority signal yok).
+        // T1.6.6 audit wiring (Codex 019e42df iter-1 P0 absorb):
+        // critical bypass DECISION'a auditEventType taşı; caller (IntentSubmissionService)
+        // allowed branch'inde de Propagation.REQUIRES_NEW ile RATE_LIMIT_BYPASSED_CRITICAL
+        // audit row publish edebilsin. Bu olmadan operasyonel bir denetim trail'i yok:
+        // "kim ne zaman critical severity ile rate limit bypass etti" sorusunun
+        // cevabı sadece Prometheus counter'da kalır, audit'te değil.
         if (severity == NotificationIntent.Severity.critical) {
             criticalBypassCounter.increment();
             log.debug("AbuseGuard rate limit critical bypass: orgId={} topic={} severity={}",
                 orgId, topicKey, severity);
-            return Decision.allowed("critical_bypass");
+            return Decision.allowedWithAudit(
+                "critical_bypass",
+                EVENT_RATE_LIMIT_BYPASSED_CRITICAL,
+                Map.of("severity", "critical")
+            );
         }
 
         // Step 3: Rate limit sliding window (data_classification=security DAHIL non-bypass)
@@ -234,6 +244,18 @@ public class AbuseGuardService {
     ) {
         public static Decision allowed(String reason) {
             return new Decision(true, reason, null, Map.of());
+        }
+
+        /**
+         * Allowed decision that ALSO requires the caller to publish an audit
+         * row. Used by the critical-severity bypass path so the operator
+         * can answer "who bypassed rate limit under critical severity, when,
+         * for what topic" from the audit trail — Prometheus counter alone is
+         * not sufficient because the counter is anonymous and not joinable
+         * to request/correlation context.
+         */
+        public static Decision allowedWithAudit(String reason, String auditEventType, Map<String, Object> details) {
+            return new Decision(true, reason, auditEventType, details);
         }
 
         public static Decision blocked(String reason, String auditEventType, Map<String, Object> details) {
