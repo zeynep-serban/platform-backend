@@ -28,10 +28,17 @@ import org.springframework.web.util.UriComponentsBuilder;
  *
  * <p>**Production hostname guard**: PR-A absorb iter-1 (thread `019e12c0`)
  * added {@code notify.unsubscribe.signing-secret} guard to
- * ProductionConfigValidator. Base URL hostname guard
- * ({@code notify.unsubscribe.base-url} prod prefix `https://ai.acik.com`)
- * scheduled for **PR-C** acceptance gate (DeliveryDispatchService email
- * channel integration includes prod-host validation).
+ * {@code ProductionConfigValidator}. Base URL hostname guard
+ * ({@code notify.unsubscribe.base-url} prod prefix {@code https://ai.acik.com})
+ * has shipped in {@code ProductionConfigValidator} — see the prod-hostname
+ * tests covering {@code testai}, localhost, HTTP, arbitrary host and
+ * suffix-attack vectors. GitOps overlay is responsible for setting the
+ * prod base URL.
+ *
+ * <p><b>Footer integration</b>: {@link UnsubscribeFooterAppender} (T1.1.8
+ * Codex thread {@code 019e4476}) consumes this builder per-target in
+ * {@code DeliveryDispatchService.dispatchSingleTarget} to inject a
+ * locale-aware unsubscribe link into email subscriber messages.
  */
 @Service
 public class UnsubscribeUrlBuilder {

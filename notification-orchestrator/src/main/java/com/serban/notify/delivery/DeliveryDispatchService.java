@@ -12,6 +12,7 @@ import com.serban.notify.repository.NotificationTemplateRepository;
 import com.serban.notify.eligibility.DeliveryEligibilityService;
 import com.serban.notify.template.RenderedMessage;
 import com.serban.notify.template.TemplateRenderer;
+import com.serban.notify.unsubscribe.UnsubscribeFooterAppender;
 import com.serban.notify.worker.BackoffCalculator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,6 +62,7 @@ public class DeliveryDispatchService {
     private final AuditEventPublisher audit;
     private final BackoffCalculator backoffCalculator;
     private final DeliveryEligibilityService eligibilityService;
+    private final UnsubscribeFooterAppender footerAppender;
     private DeliveryDispatchService self;  // Self-injection for REQUIRES_NEW boundary
 
     public DeliveryDispatchService(
@@ -71,7 +73,8 @@ public class DeliveryDispatchService {
         ChannelAdapterRegistry adapterRegistry,
         AuditEventPublisher audit,
         BackoffCalculator backoffCalculator,
-        DeliveryEligibilityService eligibilityService
+        DeliveryEligibilityService eligibilityService,
+        UnsubscribeFooterAppender footerAppender
     ) {
         this.renderer = renderer;
         this.templateRepo = templateRepo;
@@ -81,6 +84,7 @@ public class DeliveryDispatchService {
         this.audit = audit;
         this.backoffCalculator = backoffCalculator;
         this.eligibilityService = eligibilityService;
+        this.footerAppender = footerAppender;
     }
 
     /**
@@ -309,9 +313,17 @@ public class DeliveryDispatchService {
         audit.publish("DELIVERY_ATTEMPTED", intent, target.recipientHash(), target.channel(),
             Map.of("provider", target.providerKey()));
 
+        // T1.1.8 unsubscribe footer (Codex 019e4476 absorb): email subscriber
+        // targets receive a locale-aware footer injection BEFORE adapter.send.
+        // No-op for slack/webhook/sms/in-app and for external email recipients.
+        // The original `message` reference stays unchanged so the renderer's
+        // RenderedMessage record + TemplateRenderer's SSTI/CRLF contract are
+        // unaffected for non-email channels and for subject in all cases.
+        RenderedMessage outbound = footerAppender.appendIfRequired(intent, target, message);
+
         ChannelAdapter.DeliveryAttemptResult result;
         try {
-            result = adapter.send(target, message);
+            result = adapter.send(target, outbound);
         } catch (RuntimeException e) {
             log.warn("adapter exception (treating as RETRY): channel={} provider={} err={}",
                 target.channel(), target.providerKey(), e.getMessage());
