@@ -1,7 +1,9 @@
 package com.serban.notify;
 
+import com.serban.notify.preference.TopicCatalogProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
@@ -19,6 +21,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @SpringBootApplication
 @EnableScheduling
 @EnableAsync  // Faz 23.3 PR-E.3: SSE event listener async dispatch (InboxSseController)
+@EnableConfigurationProperties(TopicCatalogProperties.class)  // Faz 23.5 M5 G2: topic catalog
 public class NotificationOrchestratorApplication {
 
     public static void main(String[] args) {

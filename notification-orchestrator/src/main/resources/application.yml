@@ -104,6 +104,83 @@ management:
         notify.intent.processing.duration: 0.5, 0.95, 0.99
 
 notify:
+  # Faz 23.5 M5 G2: subscriber-facing topic catalog
+  # GET /api/v1/notify/topics/me returns this list.
+  # Adding/removing entries here surfaces in the UI on next pod restart.
+  # criticalEligible=true means the topic supports bypassForCritical (e.g. OTP);
+  # supportedChannels restricts the channel multi-select in the UI.
+  topics:
+    catalog:
+      - topicKey: auth.mfa-otp
+        label: "MFA OTP Kodu"
+        category: auth
+        supportedChannels: [SMS, EMAIL]
+        criticalEligible: true
+        description: "Hesabınıza giriş için iki adımlı doğrulama kodu. Güvenlik nedeniyle devre dışı bırakılamaz."
+        defaultFrequencyHint: null
+      - topicKey: auth.password-reset-otp
+        label: "Şifre Sıfırlama OTP"
+        category: auth
+        supportedChannels: [SMS, EMAIL]
+        criticalEligible: true
+        description: "Şifre sıfırlama için iki adımlı doğrulama kodu."
+        defaultFrequencyHint: null
+      - topicKey: auth.admin-invite
+        label: "Yönetici Daveti"
+        category: auth
+        supportedChannels: [EMAIL, SLACK]
+        criticalEligible: false
+        description: "Sistem yöneticisi tarafından gönderilen davet bildirimleri."
+        defaultFrequencyHint: null
+      - topicKey: audit.security
+        label: "Güvenlik Olayları"
+        category: audit
+        supportedChannels: [EMAIL, SLACK, IN_APP]
+        criticalEligible: true
+        description: "Hesabınızla ilgili güvenlik olayları (yeni cihaz girişi, şifre değişikliği, vb.)."
+        defaultFrequencyHint: null
+      - topicKey: audit.compliance
+        label: "Uyumluluk Raporları"
+        category: audit
+        supportedChannels: [EMAIL, IN_APP]
+        criticalEligible: false
+        description: "KVKK ve uyumluluk denetim olayları."
+        defaultFrequencyHint: 5
+      - topicKey: ops.drift-alarm
+        label: "Sistem Drift Alarmları"
+        category: system
+        supportedChannels: [SLACK, EMAIL]
+        criticalEligible: true
+        description: "Operasyon ekibi için gerçek-zamanlı drift uyarıları."
+        defaultFrequencyHint: null
+      - topicKey: ops.break-glass
+        label: "Break-Glass Audit"
+        category: system
+        supportedChannels: [SLACK, EMAIL]
+        criticalEligible: true
+        description: "Olağanüstü durum erişim kayıtları."
+        defaultFrequencyHint: null
+      - topicKey: marketing.campaign
+        label: "Pazarlama Kampanyaları"
+        category: marketing
+        supportedChannels: [EMAIL, SMS, IN_APP]
+        criticalEligible: false
+        description: "Ürün ve hizmet tanıtım kampanyaları, indirim duyuruları."
+        defaultFrequencyHint: 5
+      - topicKey: marketing.newsletter
+        label: "Aylık Bülten"
+        category: marketing
+        supportedChannels: [EMAIL]
+        criticalEligible: false
+        description: "Aylık ürün ve sektör güncellemeleri."
+        defaultFrequencyHint: 2
+      - topicKey: system.notification
+        label: "Sistem Bildirimleri"
+        category: system
+        supportedChannels: [EMAIL, IN_APP, SLACK]
+        criticalEligible: false
+        description: "Genel sistem bildirimleri (planlı bakım, yeni özellik, vb.)."
+        defaultFrequencyHint: 10
   # PR2 dispatch.enabled=false default — worker yok, intake-only mode (Codex 019df9ae Q3)
   # PR4: dispatch.enabled=true → OutboxPoller + RetryWorker + DLQ aktive (Codex 019dfa47 absorb)
   dispatch:
