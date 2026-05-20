@@ -66,13 +66,31 @@ public class ProductionConfigValidator {
     private final String unsubscribeBaseUrl;
     /**
      * A4 DKIM (Faz 23.2 R3 mitigation) — Codex 019e1307 P0/P1 absorb 2026-05-10.
-     * Prod profile: notify.dkim.enabled=true required + selector + domain +
-     * private-key-pem populated. App-side DKIM signing active path.
+     *
+     * <p>PR-B1 2026-05-20 (Codex 019e4514 plan-time consult): strategy enum
+     * (app|relay|disabled) chooses validator branch:
+     * <ul>
+     *   <li>{@code app}: app-side DkimSigner — require enabled=true + selector
+     *       + domain + private-key-pem (PR-A1 original contract; R3 mitigation)</li>
+     *   <li>{@code relay}: provider-managed DKIM (Office 365 Native, AWS SES,
+     *       etc.) — require enabled=false + relay.provider + relay.domain +
+     *       SMTP TLS enforce + From domain alignment</li>
+     *   <li>{@code disabled}: prod REJECT (R3 contract bozulur; break-glass
+     *       timeboxed flag varsa istisna — bu PR scope dışı)</li>
+     * </ul>
      */
+    private final String dkimStrategy;
     private final boolean dkimEnabled;
     private final String dkimSelector;
     private final String dkimDomain;
     private final String dkimPrivateKeyPem;
+    private final String dkimRelayProvider;
+    private final String dkimRelayDomain;
+    /**
+     * From: address (notify.adapters.smtp.from-address) — relay strategy
+     * domain alignment guard. Must end with .{relay.domain} or equal relay.domain.
+     */
+    private final String smtpFromAddress;
 
     public ProductionConfigValidator(
         Environment springEnv,
@@ -86,10 +104,14 @@ public class ProductionConfigValidator {
             String unsubscribeSigningSecret,
         @Value("${notify.unsubscribe.base-url:https://testai.acik.com/api/v1/notify/unsubscribe}")
             String unsubscribeBaseUrl,
+        @Value("${notify.dkim.strategy:app}") String dkimStrategy,
         @Value("${notify.dkim.enabled:false}") boolean dkimEnabled,
         @Value("${notify.dkim.selector:}") String dkimSelector,
         @Value("${notify.dkim.domain:}") String dkimDomain,
         @Value("${notify.dkim.private-key-pem:}") String dkimPrivateKeyPem,
+        @Value("${notify.dkim.relay.provider:}") String dkimRelayProvider,
+        @Value("${notify.dkim.relay.domain:}") String dkimRelayDomain,
+        @Value("${notify.adapters.smtp.from-address:}") String smtpFromAddress,
         @Value("${notify.smtp.tls.enforce:false}") boolean smtpTlsEnforce,
         @Value("${notify.smtp.tls.check-server-identity:true}") boolean smtpTlsCheckServerIdentity,
         @Value("${notify.preferences.enabled:true}") boolean preferencesEnabled,
@@ -101,10 +123,14 @@ public class ProductionConfigValidator {
         this.authzInternalApiKey = authzInternalApiKey;
         this.unsubscribeSigningSecret = unsubscribeSigningSecret;
         this.unsubscribeBaseUrl = unsubscribeBaseUrl;
+        this.dkimStrategy = dkimStrategy;
         this.dkimEnabled = dkimEnabled;
         this.dkimSelector = dkimSelector;
         this.dkimDomain = dkimDomain;
         this.dkimPrivateKeyPem = dkimPrivateKeyPem;
+        this.dkimRelayProvider = dkimRelayProvider;
+        this.dkimRelayDomain = dkimRelayDomain;
+        this.smtpFromAddress = smtpFromAddress;
         this.smtpTlsEnforce = smtpTlsEnforce;
         this.smtpTlsCheckServerIdentity = smtpTlsCheckServerIdentity;
         this.preferencesEnabled = preferencesEnabled;
@@ -159,10 +185,11 @@ public class ProductionConfigValidator {
         // (subscribers click link → wrong host → 404 / wrong-cluster credential drift).
         validateUnsubscribeBaseUrl(errors, unsubscribeBaseUrl);
 
-        // A4 DKIM mail security boundary (Codex 019e1307 P0/P1 absorb 2026-05-10).
-        // Prod profile: notify.dkim.enabled=true required + selector + domain +
-        // private-key-pem populated. App-side DKIM signing active path enforced.
-        validateDkim(errors, dkimEnabled, dkimSelector, dkimDomain, dkimPrivateKeyPem);
+        // A4 DKIM mail security boundary (Codex 019e1307 P0/P1 + PR-B1 strategy
+        // expansion 019e4514). Prod profile: strategy enum branches validator.
+        validateDkimStrategy(errors, dkimStrategy, dkimEnabled, dkimSelector,
+            dkimDomain, dkimPrivateKeyPem, dkimRelayProvider, dkimRelayDomain,
+            smtpFromAddress, smtpTlsEnforce);
 
         // Preferences (Codex PR5 Q1)
         if (!preferencesEnabled) {
@@ -309,48 +336,160 @@ public class ProductionConfigValidator {
     }
 
     /**
-     * Validate DKIM mail security boundary (A4 — Codex 019e1307 P0/P1 absorb).
+     * Validate DKIM strategy (PR-B1 2026-05-20, Codex 019e4514 plan-time consult).
      *
-     * Production fail-closed contract:
+     * <p>Strategy enum branches validator contract:
+     *
+     * <h3>app — App-Side DKIM (PR-A1 original contract; R3 mitigation)</h3>
      * <ul>
-     *   <li>{@code notify.dkim.enabled=true} required (R3 mitigation)</li>
-     *   <li>{@code notify.dkim.selector} non-blank (DNS TXT record name)</li>
-     *   <li>{@code notify.dkim.domain} non-blank (signing domain, must align with From: domain)</li>
-     *   <li>{@code notify.dkim.private-key-pem} populated + parseable (PKCS#8)</li>
+     *   <li>{@code enabled=true} required</li>
+     *   <li>{@code selector} non-blank (DNS TXT record name)</li>
+     *   <li>{@code domain} non-blank (signing domain)</li>
+     *   <li>{@code private-key-pem} populated + PEM marker sanity (PKCS#8)</li>
      * </ul>
      *
-     * <p>**Why prod fail-closed**: outbound emails without DKIM signature land
-     * in spam folders or bounce; corporate relays may mark unsigned mail as
-     * suspicious. R3 risk register requires app-side DKIM in prod profile.
+     * <h3>relay — Provider-Managed DKIM (Office 365 Native, AWS SES, etc.)</h3>
+     * <ul>
+     *   <li>{@code enabled=false} required (app-side signer must NOT inject)</li>
+     *   <li>{@code relay.provider} non-blank (e.g. {@code office365})</li>
+     *   <li>{@code relay.domain} non-blank (DKIM-signed domain — must align From:)</li>
+     *   <li>{@code smtp.tls.enforce=true} (STARTTLS to provider relay)</li>
+     *   <li>{@code adapters.smtp.from-address} domain MUST align with relay.domain
+     *       (e.g. {@code ai@acik.com} aligns with {@code acik.com})</li>
+     * </ul>
      *
-     * <p>**Operator alternative**: corporate relay DKIM authoritative pattern
-     * (Plan B) can disable app-side DKIM — explicit ops alignment + 90-day
-     * rotation SLA. Plan B activation requires ADR + alternate validator
-     * contract (out of scope this PR; flag-gated future iter).
+     * <h3>disabled — Unsigned mail (R3 contract violation)</h3>
+     * <p>Prod REJECT. Outbound mail unsigned → SPF/DMARC only → spam folder risk.
+     * Break-glass timeboxed flag scope outside this PR.
+     *
+     * <p><b>Why provider-managed (relay) is long-term stable</b> (Codex
+     * 019e4514 plan-time): key rotation Microsoft-managed (no Vault re-seed),
+     * one-time DNS CNAME setup (selector1 + selector2 → onmicrosoft.com),
+     * private key not in Vault (less attack surface), industry-standard SaaS
+     * mail pattern.
      */
-    private static void validateDkim(List<String> errors, boolean enabled,
-                                      String selector, String domain, String privateKeyPem) {
+    static void validateDkimStrategy(List<String> errors, String strategy,
+                                      boolean enabled, String selector,
+                                      String domain, String privateKeyPem,
+                                      String relayProvider, String relayDomain,
+                                      String smtpFromAddress, boolean smtpTlsEnforce) {
+        String strategyLower = strategy == null ? "" : strategy.trim().toLowerCase();
+        switch (strategyLower) {
+            case "app":
+                validateDkimApp(errors, enabled, selector, domain, privateKeyPem);
+                break;
+            case "relay":
+                validateDkimRelay(errors, enabled, relayProvider, relayDomain,
+                    smtpFromAddress, smtpTlsEnforce);
+                break;
+            case "disabled":
+                errors.add("notify.dkim.strategy=disabled — production REJECT "
+                    + "(R3 mitigation contract: outbound mail unsigned → spam folder + "
+                    + "reputation drop). Break-glass timeboxed flag scope outside this PR.");
+                break;
+            case "":
+                // Default fallback (yml default `app`) — handled by `app` branch above.
+                // Defensive: if Spring injects null/empty despite yaml default, treat as app.
+                validateDkimApp(errors, enabled, selector, domain, privateKeyPem);
+                break;
+            default:
+                errors.add("notify.dkim.strategy=" + strategy + " — invalid enum value. "
+                    + "Valid: app | relay | disabled");
+        }
+    }
+
+    /**
+     * Validate app-side DKIM strategy (PR-A1 original contract; R3 mitigation).
+     */
+    static void validateDkimApp(List<String> errors, boolean enabled,
+                                 String selector, String domain, String privateKeyPem) {
         if (!enabled) {
-            errors.add("notify.dkim.enabled=false — production must enable app-side "
-                + "DKIM (R3 mitigation: outbound mail integrity + spam folder defense). "
-                + "Plan B (corporate relay DKIM) requires explicit ADR + flag-gated "
-                + "alternative validator contract.");
+            errors.add("notify.dkim.strategy=app + notify.dkim.enabled=false — "
+                + "app strategy requires enabled=true (R3 mitigation: outbound mail "
+                + "integrity + spam folder defense). Set strategy=relay for "
+                + "provider-managed DKIM (Office 365 Native), or strategy=disabled "
+                + "for break-glass unsigned (prod REJECT).");
             return;
         }
         if (selector == null || selector.isBlank()) {
-            errors.add("notify.dkim.selector=blank — production DKIM signer requires "
+            errors.add("notify.dkim.selector=blank — app strategy DKIM signer requires "
                 + "selector (DNS TXT record name; e.g. 's1' for s1._domainkey.<domain>)");
         }
         if (domain == null || domain.isBlank()) {
-            errors.add("notify.dkim.domain=blank — production DKIM signer requires "
+            errors.add("notify.dkim.domain=blank — app strategy DKIM signer requires "
                 + "signing domain (must align with From: header domain for valid signatures)");
         }
         if (privateKeyPem == null || privateKeyPem.isBlank()) {
-            errors.add("notify.dkim.private-key-pem=blank — production DKIM signer requires "
+            errors.add("notify.dkim.private-key-pem=blank — app strategy DKIM signer requires "
                 + "RSA PKCS#8 private key (Vault inject; openssl pkcs8 -topk8 -nocrypt format)");
         } else if (!privateKeyPem.contains("BEGIN") || !privateKeyPem.contains("END")) {
             errors.add("notify.dkim.private-key-pem malformed — must be PEM-encoded PKCS#8 "
                 + "(BEGIN/END markers required; Vault inject from openssl pkcs8 output)");
+        }
+    }
+
+    /**
+     * Validate relay DKIM strategy (PR-B1 — provider-managed DKIM).
+     *
+     * <p>App-side signer MUST NOT inject (enabled=false). DKIM signing handled by
+     * SMTP relay provider (Office 365 Native, AWS SES, SendGrid, etc.).
+     * Validator enforces: provider/domain config + SMTP TLS + From: alignment.
+     */
+    static void validateDkimRelay(List<String> errors, boolean enabled,
+                                   String relayProvider, String relayDomain,
+                                   String smtpFromAddress, boolean smtpTlsEnforce) {
+        if (enabled) {
+            errors.add("notify.dkim.strategy=relay + notify.dkim.enabled=true — "
+                + "relay strategy requires enabled=false (app-side signer MUST NOT "
+                + "double-sign provider-managed DKIM). Disable app-side signer to "
+                + "use provider-managed DKIM (Office 365 Native, AWS SES, etc.).");
+        }
+        if (relayProvider == null || relayProvider.isBlank()) {
+            errors.add("notify.dkim.relay.provider=blank — relay strategy requires "
+                + "provider identifier (e.g. 'office365', 'aws-ses', 'sendgrid'). "
+                + "Provider owns DKIM signing keys + DNS CNAME records.");
+        }
+        if (relayDomain == null || relayDomain.isBlank()) {
+            errors.add("notify.dkim.relay.domain=blank — relay strategy requires "
+                + "signing domain (DKIM `d=` value; must align From: header domain). "
+                + "E.g. 'acik.com' for ai@acik.com From: address.");
+            return;
+        }
+        // From: address domain alignment guard (DKIM alignment requires d= matches
+        // From: header domain for SPF/DMARC pass).
+        if (smtpFromAddress == null || smtpFromAddress.isBlank()) {
+            errors.add("notify.adapters.smtp.from-address=blank — relay strategy "
+                + "requires From: address to align with relay.domain DKIM signature.");
+        } else {
+            String fromLower = smtpFromAddress.trim().toLowerCase();
+            String relayLower = relayDomain.trim().toLowerCase();
+            int atIdx = fromLower.indexOf('@');
+            if (atIdx < 0) {
+                errors.add("notify.adapters.smtp.from-address=" + smtpFromAddress
+                    + " — invalid format (missing @). Must be valid email address.");
+            } else {
+                String fromDomain = fromLower.substring(atIdx + 1);
+                // From: domain must equal relay.domain OR be subdomain (.relay.domain).
+                // Strict alignment: SPF/DMARC adkim=s requires exact match; adkim=r
+                // (default) allows subdomain. This validator uses relaxed (r) since
+                // DMARC policy default is relaxed; tighter aligment via DMARC config.
+                if (!fromDomain.equals(relayLower)
+                    && !fromDomain.endsWith("." + relayLower)) {
+                    errors.add("notify.adapters.smtp.from-address=" + smtpFromAddress
+                        + " — From: domain '" + fromDomain + "' does not align with "
+                        + "notify.dkim.relay.domain='" + relayDomain + "'. DKIM "
+                        + "signature `d=" + relayDomain + "` requires From: domain "
+                        + "to equal or be subdomain of relay.domain (DMARC adkim=r "
+                        + "relaxed alignment).");
+                }
+            }
+        }
+        // STARTTLS enforce already validated by main flow; restate as relay-specific
+        // dependency for clearer error message in audit.
+        if (!smtpTlsEnforce) {
+            errors.add("notify.dkim.strategy=relay + notify.smtp.tls.enforce=false — "
+                + "relay strategy requires STARTTLS to provider relay (Office 365/SES "
+                + "demand TLS; plaintext = mail bounce + reputation drop).");
         }
     }
 }

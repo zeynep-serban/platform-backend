@@ -44,7 +44,9 @@ class ProductionConfigValidatorTest {
             "dev-only-key-not-for-production",
             "dev-only-unsubscribe-secret-not-for-production",
             "https://testai.acik.com/api/v1/notify/unsubscribe",
+            "app",  // PR-B1: dkimStrategy default app
             false, "", "", "",  // DKIM disabled (test profile skip-path)
+            "", "", "",  // PR-B1: relay blank + from-address blank (non-prod skip)
             false, false, false, false  // all production guards off
         );
 
@@ -212,16 +214,20 @@ class ProductionConfigValidatorTest {
         Environment env = mock(Environment.class);
         when(env.getActiveProfiles()).thenReturn(new String[] { "prod" });
         // Codex 019e1307 P0/P1 absorb: helper passes DKIM "OK" defaults so existing
-        // tests don't need rewrite. DKIM-specific tests use 5-arg overload below.
+        // tests don't need rewrite. DKIM-specific tests use overloads below.
+        // PR-B1 2026-05-20 (Codex 019e4514): strategy=app default + relay blank.
         return new ProductionConfigValidator(
             env, pepper, webhookSecret, authzKey, unsubSecret, baseUrl,
+            "app",  // PR-B1: dkimStrategy default app (PR-A1 contract)
             true, "s1", "ai.acik.com", OK_DKIM_PEM,  // DKIM enabled+populated for happy-path
+            "", "", "ai@acik.com",  // PR-B1: relay blank (app strategy), from-address (relay test reuse OK)
             tlsEnforce, tlsCheckIdentity, preferences, authz
         );
     }
 
     /**
      * 11-arg helper for DKIM-specific tests (A4 Codex 019e1307 P0/P1 absorb).
+     * PR-B1: strategy=app default; for relay-specific tests use prodValidatorWithRelay.
      */
     private ProductionConfigValidator prodValidatorWithDkim(
         String pepper, String webhookSecret, String authzKey, String unsubSecret,
@@ -234,7 +240,33 @@ class ProductionConfigValidatorTest {
         when(env.getActiveProfiles()).thenReturn(new String[] { "prod" });
         return new ProductionConfigValidator(
             env, pepper, webhookSecret, authzKey, unsubSecret, baseUrl,
+            "app",  // PR-B1: default app strategy
             dkimEnabled, dkimSelector, dkimDomain, dkimPem,
+            "", "", "ai@acik.com",  // PR-B1: relay blank + from-address default
+            tlsEnforce, tlsCheckIdentity, preferences, authz
+        );
+    }
+
+    /**
+     * PR-B1 2026-05-20 (Codex 019e4514) — relay strategy test helper.
+     * Provider-managed DKIM (Office 365 Native pattern); enabled=false + relay
+     * provider/domain + From: address alignment with relay.domain.
+     */
+    private ProductionConfigValidator prodValidatorWithRelay(
+        String pepper, String webhookSecret, String authzKey, String unsubSecret,
+        String baseUrl,
+        boolean dkimEnabled, String relayProvider, String relayDomain,
+        String smtpFromAddress,
+        boolean tlsEnforce, boolean tlsCheckIdentity,
+        boolean preferences, boolean authz
+    ) {
+        Environment env = mock(Environment.class);
+        when(env.getActiveProfiles()).thenReturn(new String[] { "prod" });
+        return new ProductionConfigValidator(
+            env, pepper, webhookSecret, authzKey, unsubSecret, baseUrl,
+            "relay",  // PR-B1: relay strategy
+            dkimEnabled, "", "", "",  // app-side blank for relay
+            relayProvider, relayDomain, smtpFromAddress,
             tlsEnforce, tlsCheckIdentity, preferences, authz
         );
     }
@@ -445,6 +477,8 @@ class ProductionConfigValidatorTest {
             false, "s1", "ai.acik.com", OK_DKIM_PEM,
             true, true, true, true);
 
+        // PR-B1 2026-05-20: validator message updated to "notify.dkim.strategy=app
+        // + notify.dkim.enabled=false" for strategy-aware diagnostics
         org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("notify.dkim.enabled=false")
@@ -508,5 +542,150 @@ class ProductionConfigValidatorTest {
             true, true, true, true);
 
         v.validate();  // No throw — DKIM enabled + selector + domain + PEM marker present
+    }
+
+    // ====================================================================
+    // PR-B1 (Codex 019e4514 2026-05-20) — DKIM strategy enum (app|relay|disabled)
+    // ====================================================================
+
+    @Test
+    void prodProfileRelayStrategyHappyPathPasses() {
+        // Office 365 Native DKIM: enabled=false, relay.provider=office365,
+        // relay.domain=acik.com, From: ai@acik.com aligned, SMTP TLS enforced
+        ProductionConfigValidator v = prodValidatorWithRelay(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            false, "office365", "acik.com", "ai@acik.com",
+            true, true, true, true);
+
+        v.validate();  // No throw — relay strategy happy path
+    }
+
+    @Test
+    void prodProfileRelayStrategyWithEnabledTrueFails() {
+        // Double-sign risk: app-side signer + provider-managed DKIM
+        ProductionConfigValidator v = prodValidatorWithRelay(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            true,  // enabled=true with strategy=relay → fail
+            "office365", "acik.com", "ai@acik.com",
+            true, true, true, true);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.dkim.strategy=relay")
+            .hasMessageContaining("notify.dkim.enabled=true")
+            .hasMessageContaining("double-sign");
+    }
+
+    @Test
+    void prodProfileRelayStrategyWithBlankProviderFails() {
+        ProductionConfigValidator v = prodValidatorWithRelay(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            false, "", "acik.com", "ai@acik.com",
+            true, true, true, true);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.dkim.relay.provider=blank");
+    }
+
+    @Test
+    void prodProfileRelayStrategyWithBlankDomainFails() {
+        ProductionConfigValidator v = prodValidatorWithRelay(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            false, "office365", "", "ai@acik.com",
+            true, true, true, true);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.dkim.relay.domain=blank");
+    }
+
+    @Test
+    void prodProfileRelayStrategyWithMismatchedFromDomainFails() {
+        // From: anotherco.example does not align with relay.domain=acik.com
+        ProductionConfigValidator v = prodValidatorWithRelay(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            false, "office365", "acik.com", "ai@anotherco.example",
+            true, true, true, true);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("does not align")
+            .hasMessageContaining("relay.domain");
+    }
+
+    @Test
+    void prodProfileRelayStrategyWithSubdomainFromAddressPasses() {
+        // From: alerts@mail.acik.com IS subdomain of acik.com (DMARC adkim=r relaxed)
+        ProductionConfigValidator v = prodValidatorWithRelay(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            false, "office365", "acik.com", "alerts@mail.acik.com",
+            true, true, true, true);
+
+        v.validate();  // No throw — subdomain alignment OK
+    }
+
+    @Test
+    void prodProfileRelayStrategyWithTlsDisabledFails() {
+        ProductionConfigValidator v = prodValidatorWithRelay(
+            OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            false, "office365", "acik.com", "ai@acik.com",
+            false,  // tlsEnforce=false → relay requires TLS
+            true, true, true);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.dkim.strategy=relay")
+            .hasMessageContaining("STARTTLS");
+    }
+
+    @Test
+    void prodProfileDisabledStrategyFails() {
+        // strategy=disabled → R3 contract violation; prod REJECT
+        Environment env = mock(Environment.class);
+        when(env.getActiveProfiles()).thenReturn(new String[] { "prod" });
+        ProductionConfigValidator v = new ProductionConfigValidator(
+            env, OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            "disabled",  // strategy=disabled
+            false, "", "", "",  // DKIM all blank
+            "", "", "ai@acik.com",  // relay blank
+            true, true, true, true);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.dkim.strategy=disabled")
+            .hasMessageContaining("REJECT");
+    }
+
+    @Test
+    void prodProfileInvalidStrategyFails() {
+        Environment env = mock(Environment.class);
+        when(env.getActiveProfiles()).thenReturn(new String[] { "prod" });
+        ProductionConfigValidator v = new ProductionConfigValidator(
+            env, OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            "invalid-enum",  // strategy=invalid
+            false, "", "", "",
+            "", "", "ai@acik.com",
+            true, true, true, true);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(v::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("notify.dkim.strategy=invalid-enum")
+            .hasMessageContaining("Valid: app | relay | disabled");
+    }
+
+    @Test
+    void prodProfileBlankStrategyDefaultsToApp() {
+        // Defensive: if Spring injects empty despite yaml default, treat as app
+        Environment env = mock(Environment.class);
+        when(env.getActiveProfiles()).thenReturn(new String[] { "prod" });
+        ProductionConfigValidator v = new ProductionConfigValidator(
+            env, OK_PEPPER, OK_WEBHOOK, OK_AUTHZ, OK_UNSUB, OK_BASE_URL,
+            "",  // strategy blank → defaults to app branch
+            true, "s1", "ai.acik.com", OK_DKIM_PEM,
+            "", "", "ai@acik.com",
+            true, true, true, true);
+
+        v.validate();  // No throw — app strategy happy path via fallback
     }
 }

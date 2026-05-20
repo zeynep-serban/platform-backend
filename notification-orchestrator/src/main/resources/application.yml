@@ -123,11 +123,28 @@ notify:
   # Production profile (prod / production) ProductionConfigValidator fail-closed
   # gates aşağıdaki guard'ları zorunlu kılar.
   dkim:
+    # PR-B1 2026-05-20 (Codex 019e4514 plan-time consult — long-term stable):
+    # `strategy` enum decides ProductionConfigValidator branch:
+    #   - app:      app-side DkimSigner; require enabled=true + selector + domain
+    #               + private-key-pem (PR-A1 original contract; R3 mitigation)
+    #   - relay:    provider-managed DKIM (Office 365 Native); require enabled=false
+    #               + relay.provider + relay.domain + SMTP TLS enforce + From domain
+    #               align (DNS CNAME one-time setup; key rotation Microsoft-managed)
+    #   - disabled: prod REJECT unless timeboxed break-glass ack flag set
+    # Default `app` keeps backward compat (PR-A1 contract); GitOps overlay flips
+    # to `relay` for prod after Office 365 DKIM tenant enable + CNAME publish.
+    strategy: ${NOTIFY_DKIM_STRATEGY:app}
     # Q1 PARTIAL: app-side DKIM default (production); test/dev: false
     enabled: ${NOTIFY_DKIM_ENABLED:false}
     selector: ${NOTIFY_DKIM_SELECTOR:default}
     domain: ${NOTIFY_DKIM_DOMAIN:testai.acik.com}
     private-key-pem: ${NOTIFY_DKIM_PRIVATE_KEY_PEM:}
+    # Relay strategy config (PR-B1) — provider-managed DKIM
+    relay:
+      # Provider that owns the DKIM signing keys (Office 365 Native = "office365")
+      provider: ${NOTIFY_DKIM_RELAY_PROVIDER:}
+      # Domain that DKIM signature must align with From: header
+      domain: ${NOTIFY_DKIM_RELAY_DOMAIN:}
   smtp:
     tls:
       # Q2 AGREE: production STARTTLS required; test profile false (Mailpit plaintext)
