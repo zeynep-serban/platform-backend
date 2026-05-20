@@ -112,6 +112,18 @@ public class JetSmsProvider implements SmsProvider {
     /** JetSMS Latin-5 encoding label (audit + segment estimator hint). */
     static final String ENCODING_LABEL_LATIN5 = "ISO-8859-9";
 
+    /** SOAP operation identifier — Faz 23.3.2 PR-A3.0 (Codex thread 019e4514). */
+    static final String SOAP_OP_SEND_SMS = "sendSMS";          // BULK array (legacy)
+    static final String SOAP_OP_SEND_SMS_SINGLE = "sendSMSSingle";  // single + channel
+    /** Default SOAP operation (behavior-neutral; GitOps flip ile sendSMSSingle'a geçilir). */
+    static final String SOAP_OP_DEFAULT = SOAP_OP_SEND_SMS;
+
+    /** JetSMS channel codes (Biotekno operator notification 2026-05-20). */
+    static final String CHANNEL_VFO = "VFO";  // VODAFONE NET OTP (short OTP-style)
+    static final String CHANNEL_VF = "VF";    // VODAFONE NET BULK (long multipart)
+    /** Default channel — uzun multipart için VF (PR-A3.0 canary kanıtladı). */
+    static final String CHANNEL_DEFAULT = CHANNEL_VF;
+
     @Value("${notify.adapters.sms.jetsms.api-url:https://api.jetsms.com.tr/SMS-Web/HttpSmsSend}")
     private String apiUrl;
 
@@ -172,11 +184,45 @@ public class JetSmsProvider implements SmsProvider {
     /**
      * SOAP {@code onlengthproblem} parametre değeri. Default
      * {@code RejectAllPackage} (provider uzun mesaj reddet — mevcut davranış).
-     * Provider-confirmed split değeri (örn. {@code SplitMessage}) canary
-     * kanıtı sonrası operator overlay'de override edilir.
+     * Provider-confirmed enum value (WSDL verified 2026-05-20:
+     * {@code SendAllPackage} uzun multipart için) canary kanıtı sonrası
+     * operator overlay'de override edilir.
      */
     @Value("${notify.adapters.sms.jetsms.on-length-problem:RejectAllPackage}")
     private String onLengthProblem;
+
+    /**
+     * SOAP operation seçimi — Faz 23.3.2 PR-A3.0 (Codex thread {@code 019e4514}).
+     * <ul>
+     *   <li>{@code sendSMS} (default) — BULK array pattern; mevcut davranış
+     *       korunur (behavior-neutral). 258 char canary DELIVERED kanıtı var
+     *       ama Biotekno operator channel ayrımı (VFO=OTP, VF=BULK) bu
+     *       operation'da yok.</li>
+     *   <li>{@code sendSMSSingle} — tek alıcı + tek mesaj + {@code channel}
+     *       parametresi. WSDL {@code SendSMSSingle} operasyonuna POST eder;
+     *       {@link #channel} ile VFO/VF route.</li>
+     * </ul>
+     * Bilinmeyen/blank değer {@link #SOAP_OP_DEFAULT}'a düşer.
+     */
+    @Value("${notify.adapters.sms.jetsms.soap-operation:sendSMS}")
+    private String soapOperation;
+
+    /**
+     * JetSMS channel code — {@code SendSMSSingle} operation için. Default
+     * {@code VF} (BULK; canary'de DELIVERED). {@code VFO} OTP traffic.
+     * Sadece {@link #soapOperation} {@code sendSMSSingle} iken kullanılır.
+     */
+    @Value("${notify.adapters.sms.jetsms.channel:VF}")
+    private String channel;
+
+    /**
+     * İzin verilen channel set — invalid config local fail-closed (provider'a
+     * gönderilmez). Codex absorb: provider-side WSDL error reject olarak
+     * dönerse provider_msg_id mevcut RETRY taxonomy'sine düşer; local
+     * preflight {@code PROVIDER_CONFIG} dönerek daha net diagnostic verir.
+     */
+    @Value("${notify.adapters.sms.jetsms.channel-allowed:VF,VFO}")
+    private String channelAllowedCsv;
 
     @Override
     public String providerKey() {
@@ -409,13 +455,32 @@ public class JetSmsProvider implements SmsProvider {
      * ({@code ReportSMS.groupid}) — correlator {@code "jetsms-<ID>"}.
      */
     private SmsSendResult sendViaSoap(String phone, String text) {
-        String envelope = buildSendSoapEnvelope(
-            username, password, originator, phone, text, onLengthProblem);
+        // Faz 23.3.2 PR-A3.0 (Codex thread 019e4514): SOAP operation
+        // branching. Default sendSMS (BULK array, behavior-neutral); operator
+        // overlay sendSMSSingle ile channel-aware path açar.
+        boolean useSingleOp = isSoapSingleOperation();
+
+        if (useSingleOp) {
+            // Channel preflight — config invalid ise outbound atılmaz.
+            if (!isChannelAllowed(channel)) {
+                log.warn("jetsms SOAP single config: channel='{}' not in allowed set ({}) — fail-closed",
+                    channel, channelAllowedCsv);
+                return SmsSendResult.failed(PROVIDER_KEY, SmsFailureClass.PROVIDER_CONFIG,
+                    "channel-invalid");
+            }
+        }
+
+        String envelope = useSingleOp
+            ? buildSendSMSSingleSoapEnvelope(
+                username, password, originator, phone, text, channel, onLengthProblem)
+            : buildSendSoapEnvelope(
+                username, password, originator, phone, text, onLengthProblem);
+        String soapAction = useSingleOp ? "SendSMSSingle" : "SendSMS";
 
         try (CloseableHttpClient client = newClient()) {
             HttpPost post = new HttpPost(soapUrl);
             post.setHeader("Content-Type", "text/xml; charset=utf-8");
-            post.setHeader("SOAPAction", "\"" + SOAP_NS + "SendSMS\"");
+            post.setHeader("SOAPAction", "\"" + SOAP_NS + soapAction + "\"");
             post.setEntity(new StringEntity(envelope, java.nio.charset.StandardCharsets.UTF_8));
 
             return client.execute(post, response -> {
@@ -425,35 +490,56 @@ public class JetSmsProvider implements SmsProvider {
                 // SOAP fault (HTTP 500) — provider tarafı yaygın olarak
                 // soap:Fault'u 500 ile döndürür. Transient olarak işle.
                 if (httpCode >= 500) {
-                    log.warn("jetsms SOAP transport transient HTTP RETRY: code={} body={}",
-                        httpCode, truncate(respBody, 200));
+                    log.warn("jetsms SOAP transport transient HTTP RETRY: op={} code={} body={}",
+                        soapAction, httpCode, truncate(respBody, 200));
                     return SmsSendResult.retry(PROVIDER_KEY, SmsFailureClass.HTTP_5XX,
                         "http" + httpCode);
                 }
                 if (httpCode == 401 || httpCode == 403) {
-                    log.warn("jetsms SOAP transport auth FAIL: code={}", httpCode);
+                    log.warn("jetsms SOAP transport auth FAIL: op={} code={}", soapAction, httpCode);
                     return SmsSendResult.failed(PROVIDER_KEY, SmsFailureClass.PROVIDER_CONFIG,
                         "http" + httpCode);
                 }
                 if (httpCode >= 400) {
-                    log.warn("jetsms SOAP transport permanent HTTP FAIL: code={}", httpCode);
+                    log.warn("jetsms SOAP transport permanent HTTP FAIL: op={} code={}",
+                        soapAction, httpCode);
                     return SmsSendResult.failed(PROVIDER_KEY, SmsFailureClass.PROVIDER_SYSTEM,
                         "http" + httpCode);
                 }
                 if (respBody.isBlank()) {
-                    log.warn("jetsms SOAP transport 2xx empty body (RETRY)");
+                    log.warn("jetsms SOAP transport 2xx empty body (RETRY): op={}", soapAction);
                     return SmsSendResult.retry(PROVIDER_KEY,
                         SmsFailureClass.UNKNOWN_TRANSIENT, "empty-body");
                 }
                 int segments = isOperationalMultipart() ? estimateLatin5Segments(text) : 1;
+                // SendSMSSingleResponse + SendSMSResponse aynı SendSMSResult shape
+                // döndürür (ErrorCode + ID); aynı parse re-use.
                 return parseSoapSendResponse(respBody, segments, ENCODING_LABEL_LATIN5);
             });
         } catch (IOException e) {
-            log.warn("jetsms SOAP transport IOException (RETRY): {}",
-                e.getClass().getSimpleName());
+            log.warn("jetsms SOAP transport IOException (RETRY): op={} err={}",
+                soapAction, e.getClass().getSimpleName());
             return SmsSendResult.retry(PROVIDER_KEY, SmsFailureClass.TIMEOUT,
                 "io:" + e.getClass().getSimpleName());
         }
+    }
+
+    /** {@code soapOperation=sendSMSSingle} mu? Blank/bilinmeyen değer default'a düşer. */
+    boolean isSoapSingleOperation() {
+        return soapOperation != null
+            && SOAP_OP_SEND_SMS_SINGLE.equalsIgnoreCase(soapOperation.trim());
+    }
+
+    /** Verilen channel allowed CSV set'inde mi? */
+    boolean isChannelAllowed(String ch) {
+        if (ch == null || ch.isBlank() || channelAllowedCsv == null) return false;
+        String target = ch.trim();
+        for (String allowed : channelAllowedCsv.split(",")) {
+            if (allowed.trim().equalsIgnoreCase(target)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -836,6 +922,59 @@ public class JetSmsProvider implements SmsProvider {
         sb.append("<receipents><string>").append(xmlEscape(phone)).append("</string></receipents>");
         sb.append("<onlengthproblem>").append(xmlEscape(onLength)).append("</onlengthproblem>");
         sb.append("</SendSMS>");
+        sb.append("</soap:Body>");
+        sb.append("</soap:Envelope>");
+        return sb.toString();
+    }
+
+    /**
+     * {@code SendSMSSingle} SOAP 1.1 zarfı — Faz 23.3.2 PR-A3.0 (Codex thread
+     * {@code 019e4514}). WSDL {@code SendSMSSingle} operasyonu: tek alıcı +
+     * tek mesaj + {@code channel} parametresi (VFO=OTP, VF=BULK).
+     *
+     * <p>WSDL parameter sırası birebir korunur (ASP.NET SOAP servislerinde
+     * sıra önemli olabilir). Optional alanlar (reference, startdate,
+     * expiredate, exclusion*, blacklistfilter, optinfilter, x, sendingrulefilter,
+     * domesticfilter, forceEnglish, iys*, simcheck*, mnpcheck*, bannedwordsfilter,
+     * realtimeop) boş bırakılır — IYS regulation params ayrı sub-faz scope.
+     *
+     * <p>Required: {@code onlengthproblem} (enum). Default {@code RejectAllPackage};
+     * uzun multipart için {@code SendAllPackage} (WSDL-verified 2026-05-20).
+     */
+    static String buildSendSMSSingleSoapEnvelope(String user, String pass, String originator,
+                                                 String phone, String text,
+                                                 String channel,
+                                                 String onLengthProblem) {
+        String onLength = (onLengthProblem == null || onLengthProblem.isBlank())
+            ? SOAP_ON_LENGTH_PROBLEM_DEFAULT : onLengthProblem;
+        String channelValue = (channel == null || channel.isBlank())
+            ? CHANNEL_DEFAULT : channel;
+        StringBuilder sb = new StringBuilder(768);
+        sb.append("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+        sb.append("<soap:Envelope")
+          .append(" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"")
+          .append(" xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"")
+          .append(" xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\">");
+        sb.append("<soap:Body>");
+        sb.append("<SendSMSSingle xmlns=\"").append(SOAP_NS).append("\">");
+        sb.append("<user>").append(xmlEscape(user)).append("</user>");
+        sb.append("<password>").append(xmlEscape(pass)).append("</password>");
+        sb.append("<originator>").append(xmlEscape(originator)).append("</originator>");
+        sb.append("<reference></reference>");
+        sb.append("<startdate></startdate>");
+        sb.append("<expiredate></expiredate>");
+        // WSDL: messages = single string, receipents = single string
+        sb.append("<messages>").append(xmlEscape(text)).append("</messages>");
+        sb.append("<receipents>").append(xmlEscape(phone)).append("</receipents>");
+        sb.append("<exclusionstarttime></exclusionstarttime>");
+        sb.append("<exclusionexpiretime></exclusionexpiretime>");
+        sb.append("<channel>").append(xmlEscape(channelValue)).append("</channel>");
+        sb.append("<blacklistfilter></blacklistfilter>");
+        sb.append("<optinfilter></optinfilter>");
+        sb.append("<x></x>");
+        sb.append("<onlengthproblem>").append(xmlEscape(onLength)).append("</onlengthproblem>");
+        // Optional regulation fields blank — Faz 23 IYS enforcement ayrı sub-faz
+        sb.append("</SendSMSSingle>");
         sb.append("</soap:Body>");
         sb.append("</soap:Envelope>");
         return sb.toString();
