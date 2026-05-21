@@ -44,6 +44,7 @@ class AdminErasureControllerSecurityTest {
     @Autowired ObjectMapper objectMapper;
 
     @MockBean ErasureService erasureService;
+    @MockBean NotifyOrgAccessGuard orgAccessGuard;
 
     @Test
     @WithAnonymousUser
@@ -115,6 +116,33 @@ class AdminErasureControllerSecurityTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(body))
             .andExpect(status().isOk());
+    }
+
+    @Test
+    @WithMockUser(authorities = {"ROLE_PRIVACY_OFFICER"})
+    void crossOrgErasureRequest_returns403_orgGuardDenies() throws Exception {
+        // Codex 019e4950 P1 #6 absorb: tenant-scoped DPO authz.
+        // DPO/legal sadece kendi org'unun verisini silebilmeli;
+        // cross-org çağrı NotifyOrgAccessGuard tarafından 403 dönmeli.
+        org.mockito.Mockito.doThrow(new org.springframework.security.access.AccessDeniedException(
+            "JWT trusted org set does not include other-tenant"
+        )).when(orgAccessGuard).requireOrgAccessOrThrow(org.mockito.ArgumentMatchers.eq("other-tenant"));
+
+        String body = objectMapper.writeValueAsString(Map.of(
+            "org_id", "other-tenant",
+            "subscriber_id", "1204",
+            "reason", "subject_request",
+            "evidence_ref", "TICKET-DPO-2026-002"
+        ));
+
+        mockMvc.perform(post("/api/v1/admin/notify/erasure")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body))
+            .andExpect(status().isForbidden());
+
+        // ErasureService hiç çağrılmadı (guard önce throw)
+        org.mockito.Mockito.verify(erasureService, org.mockito.Mockito.never())
+            .eraseSubscriber(any());
     }
 
     /**

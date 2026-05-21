@@ -52,9 +52,14 @@ public class AdminErasureController {
     private static final Logger log = LoggerFactory.getLogger(AdminErasureController.class);
 
     private final ErasureService erasureService;
+    private final NotifyOrgAccessGuard orgAccessGuard;
 
-    public AdminErasureController(ErasureService erasureService) {
+    public AdminErasureController(
+        ErasureService erasureService,
+        NotifyOrgAccessGuard orgAccessGuard
+    ) {
         this.erasureService = erasureService;
+        this.orgAccessGuard = orgAccessGuard;
     }
 
     @PostMapping
@@ -77,6 +82,13 @@ public class AdminErasureController {
             description = "Validation failed")
     })
     public ResponseEntity<Map<String, Object>> erase(@Valid @RequestBody EraseRequest request) {
+        // Codex 019e4950 P1 #6 absorb: tenant-scoped DPO authz guard.
+        // ROLE_PRIVACY_OFFICER yetkisi yetmiyor — DPO/legal sadece kendi
+        // org'unun verisini silebilmeli. NotifyOrgAccessGuard JWT
+        // org_id/tenant_id/allowed_orgs claim chain ile match check yapar;
+        // cross-org çağrı 403 AccessDeniedException.
+        orgAccessGuard.requireOrgAccessOrThrow(request.orgId());
+
         // Codex 019e4950 P1 absorb: PII leakage guard. subscriber_id ve
         // free-form reason INFO log'da görünür → KVKK Madde 12 (data
         // minimization) ihlali. subscriber_id HMAC mask + reason short
