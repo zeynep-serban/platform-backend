@@ -348,6 +348,66 @@ class IntentSubmissionServiceIntegrationTest extends AbstractPostgresTest {
             .hasMessageContaining("in-app");
     }
 
+    // ─── Faz 23.7 M7 T4.2 PR-W2.5 — Push channel + external reject ────────
+    // (Codex 019e4a3d P3 follow-up — submit gate integration coverage)
+
+    @Test
+    void externalRecipientWithPushChannelRejectedAtSubmit() {
+        // push + external → reject at submit (browser PushManager.subscribe
+        // subscriber identity'sine bağlı; external recipient'ın push
+        // subscription'ı olamaz)
+        SubmitIntentRequest req = new SubmitIntentRequest(
+            UUID.randomUUID().toString(),
+            "push-ext-fail",
+            "trace-push-ext-fail",
+            "default",
+            "auth.password-reset",
+            NotificationIntent.Severity.info,
+            NotificationIntent.DataClassification.security,
+            List.of(new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.external,
+                null, "ext@example.com", null, "External", "tr-TR"
+            )),
+            new SubmitIntentRequest.TemplateRef("auth-password-reset", null, "tr-TR"),
+            List.of("push"),
+            Map.of("k", "v"),
+            null, null, null, null, null
+        );
+
+        assertThatThrownBy(() -> service.submit(req))
+            .isInstanceOf(com.serban.notify.exception.InvalidRequestException.class)
+            .hasMessageContaining("push")
+            .hasMessageContaining("subscriber");
+    }
+
+    @Test
+    void mixedEmailPushExternalRejectedAtSubmit() {
+        // Mixed channels: external recipient is fine for email but blocks for push
+        // → submit gate rejects (push channel requires subscriber recipient
+        // type regardless of other channels)
+        SubmitIntentRequest req = new SubmitIntentRequest(
+            UUID.randomUUID().toString(),
+            "mixed-push-ext-fail",
+            "trace-mixed-push-ext",
+            "default",
+            "auth.password-reset",
+            NotificationIntent.Severity.info,
+            NotificationIntent.DataClassification.security,
+            List.of(new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.external,
+                null, "ext@example.com", null, "External", "tr-TR"
+            )),
+            new SubmitIntentRequest.TemplateRef("auth-password-reset", null, "tr-TR"),
+            List.of("email", "push"),
+            Map.of("k", "v"),
+            null, null, null, null, null
+        );
+
+        assertThatThrownBy(() -> service.submit(req))
+            .isInstanceOf(com.serban.notify.exception.InvalidRequestException.class)
+            .hasMessageContaining("push");
+    }
+
     private SubmitIntentRequest newRequest(String intentId, String idemKey) {
         return new SubmitIntentRequest(
             intentId,
