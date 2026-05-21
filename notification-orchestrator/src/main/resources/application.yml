@@ -232,6 +232,15 @@ notify:
     # Q4 REVISE: dynamic config + cache + failover
     cache-ttl-seconds: ${NOTIFY_PROVIDER_CACHE_TTL_SECONDS:30}
   adapters:
+    # Faz 23.6 M7 T4.1.1 — Slack Block Kit payload mode (Codex 019e493f).
+    # Default 'text' for backward compat; opt-in 'blockkit' enables
+    # Header + Section + Context blocks with severity badge + provenance
+    # (org_id, topic_key, correlation_id, occurred_at). Threading + actions
+    # are deferred to a separate PR (Slack Web API path).
+    # default-webhook-url is consumed by DeliveryPlanService directly via
+    # @Value("${notify.adapters.slack.default-webhook-url:}").
+    slack:
+      payload-mode: ${NOTIFY_ADAPTERS_SLACK_PAYLOAD_MODE:text}
     webhook:
       # Q3 PARTIAL: kid-aware HMAC registry (active + next; rotation)
       hmac-registry:

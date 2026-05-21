@@ -9,7 +9,9 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.containing;
+import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalToJson;
+import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
@@ -34,7 +36,9 @@ class SlackWebhookAdapterTest {
         .build();
 
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final SlackWebhookAdapter adapter = new SlackWebhookAdapter(objectMapper);
+    // Faz 23.6 M7 T4.1.1 — constructor signature now takes payloadMode;
+    // default 'text' preserves existing test semantics (plain webhook payload).
+    private final SlackWebhookAdapter adapter = new SlackWebhookAdapter(objectMapper, "text");
 
     @Test
     void slack2xxDelivered() {
@@ -110,6 +114,74 @@ class SlackWebhookAdapterTest {
     @Test
     void slackChannelKey() {
         assertThat(adapter.channelKey()).isEqualTo("slack");
+    }
+
+    // ─── Faz 23.6 M7 T4.1.1 — Block Kit mode tests ────────────────────
+
+    @Test
+    void blockKitModeSendsBlockKitPayload() throws Exception {
+        slack.stubFor(post(urlEqualTo("/blockkit"))
+            .willReturn(aResponse().withStatus(200)));
+
+        // Block-kit mode adapter (separate instance — payload-mode='blockkit')
+        SlackWebhookAdapter bkAdapter = new SlackWebhookAdapter(objectMapper, "blockkit");
+        java.util.Map<String, Object> routingMeta = new java.util.LinkedHashMap<>();
+        routingMeta.put("severity", "critical");
+        routingMeta.put("org_id", "default");
+        routingMeta.put("topic_key", "ops.drift-alarm");
+        routingMeta.put("correlation_id", "corr-1");
+        DeliveryTarget target = new DeliveryTarget(
+            "slack", "channel", null, "hash",
+            slack.url("/blockkit"), "slack-default", routingMeta
+        );
+        RenderedMessage msg = new RenderedMessage("Test subject", null, "Body text", "tr-TR");
+
+        ChannelAdapter.DeliveryAttemptResult r = bkAdapter.send(target, msg);
+
+        assertThat(r.status()).isEqualTo(ChannelAdapter.DeliveryAttemptResult.Status.DELIVERED);
+        // Verify the request payload had a "blocks" array.
+        slack.verify(postRequestedFor(urlEqualTo("/blockkit"))
+            .withRequestBody(matchingJsonPath("$.blocks[0].type", equalTo("header")))
+            .withRequestBody(matchingJsonPath("$.blocks[1].type", equalTo("section")))
+            .withRequestBody(matchingJsonPath("$.blocks[2].type", equalTo("context")))
+            .withRequestBody(matchingJsonPath("$.text", equalTo("Body text"))));
+    }
+
+    @Test
+    void textModeIgnoresBlockKitBuilder() {
+        // Default 'text' mode adapter sends plain {"text": "..."} payload.
+        slack.stubFor(post(urlEqualTo("/text-mode"))
+            .willReturn(aResponse().withStatus(200)));
+
+        java.util.Map<String, Object> routingMeta = java.util.Map.of("severity", "critical");
+        DeliveryTarget target = new DeliveryTarget(
+            "slack", "channel", null, "hash",
+            slack.url("/text-mode"), "slack-default", routingMeta
+        );
+        RenderedMessage msg = new RenderedMessage("Subject", null, "Plain body", "tr-TR");
+
+        ChannelAdapter.DeliveryAttemptResult r = adapter.send(target, msg);
+
+        assertThat(r.status()).isEqualTo(ChannelAdapter.DeliveryAttemptResult.Status.DELIVERED);
+        slack.verify(postRequestedFor(urlEqualTo("/text-mode"))
+            .withRequestBody(equalToJson("{\"text\":\"Plain body\"}")));
+    }
+
+    @Test
+    void unknownModeFallsBackToText() {
+        // Defensive: invalid mode value normalizes to 'text' (no crash).
+        SlackWebhookAdapter fallbackAdapter = new SlackWebhookAdapter(objectMapper, "INVALID_MODE");
+        slack.stubFor(post(urlEqualTo("/fallback"))
+            .willReturn(aResponse().withStatus(200)));
+
+        DeliveryTarget target = target(slack.url("/fallback"));
+        RenderedMessage msg = new RenderedMessage("Sub", null, "Body", "tr-TR");
+
+        ChannelAdapter.DeliveryAttemptResult r = fallbackAdapter.send(target, msg);
+
+        assertThat(r.status()).isEqualTo(ChannelAdapter.DeliveryAttemptResult.Status.DELIVERED);
+        slack.verify(postRequestedFor(urlEqualTo("/fallback"))
+            .withRequestBody(equalToJson("{\"text\":\"Body\"}")));
     }
 
     private static DeliveryTarget target(String url) {

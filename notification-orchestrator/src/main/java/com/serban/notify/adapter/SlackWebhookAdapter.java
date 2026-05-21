@@ -10,21 +10,37 @@ import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.core5.http.io.entity.StringEntity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Slack incoming webhook adapter (Faz 23.1 PR3 — Codex 019df9ae Q6 AGREE).
+ * Slack incoming webhook adapter (Faz 23.1 PR3 + Faz 23.6 M7 T4.1.1
+ * Block Kit migration).
  *
- * <p>PR3 scope: incoming webhook URL POST only.
- * Slack Web API (bot token + chat.postMessage + Block Kit + threading) is
- * Faz 23.6 (v1) scope.
+ * <p><b>Payload mode</b> (Codex {@code 019e493f} AGREE):
+ * <ul>
+ *   <li>{@code text} (default): plain {@code {"text": "..."}} payload,
+ *       backward-compatible behavior for installations that didn't
+ *       opt into Block Kit yet.</li>
+ *   <li>{@code blockkit} (opt-in via {@code NOTIFY_SLACK_PAYLOAD_MODE}):
+ *       Block Kit JSON with header severity badge + section body +
+ *       context provenance ({@code org_id}, {@code topic_key},
+ *       {@code correlation_id}, {@code occurred_at}). Always includes
+ *       a {@code text} fallback for notification preview +
+ *       accessibility.</li>
+ * </ul>
  *
- * <p>Status semantics:
+ * <p>Slack Web API path (bot token + {@code chat.postMessage} +
+ * threading + interactive actions) is a separate PR (T4.1.3 — Codex
+ * iter-1 deferred).
+ *
+ * <p>Status semantics (unchanged):
  * <ul>
  *   <li>HTTP 2xx → DELIVERED</li>
  *   <li>HTTP 4xx → FAILED (permanent: invalid URL, malformed payload)</li>
@@ -37,11 +53,22 @@ public class SlackWebhookAdapter implements ChannelAdapter {
     private static final Logger log = LoggerFactory.getLogger(SlackWebhookAdapter.class);
     private static final int CONNECT_TIMEOUT_SEC = 5;
     private static final int RESPONSE_TIMEOUT_SEC = 10;
+    static final String MODE_TEXT = "text";
+    static final String MODE_BLOCKKIT = "blockkit";
 
     private final ObjectMapper objectMapper;
+    private final String payloadMode;
 
-    public SlackWebhookAdapter(ObjectMapper objectMapper) {
+    public SlackWebhookAdapter(
+        ObjectMapper objectMapper,
+        @Value("${notify.adapters.slack.payload-mode:text}") String payloadMode
+    ) {
         this.objectMapper = objectMapper;
+        String normalized = payloadMode != null
+            ? payloadMode.trim().toLowerCase(Locale.ROOT)
+            : MODE_TEXT;
+        this.payloadMode = (MODE_BLOCKKIT.equals(normalized) ? MODE_BLOCKKIT : MODE_TEXT);
+        log.info("SlackWebhookAdapter activated: payloadMode={}", this.payloadMode);
     }
 
     @Override
@@ -58,10 +85,14 @@ public class SlackWebhookAdapter implements ChannelAdapter {
             return DeliveryAttemptResult.failed("empty message (no body_text or subject)", null);
         }
 
+        Object payloadObject = MODE_BLOCKKIT.equals(payloadMode)
+            ? SlackBlockKitPayloadBuilder.build(target, message, text)
+            : Map.of("text", text);
+
         try (CloseableHttpClient client = newClient()) {
             HttpPost post = new HttpPost(target.targetRef());
             post.setHeader("Content-Type", "application/json; charset=utf-8");
-            String payload = objectMapper.writeValueAsString(Map.of("text", text));
+            String payload = objectMapper.writeValueAsString(payloadObject);
             post.setEntity(new StringEntity(payload, java.nio.charset.StandardCharsets.UTF_8));
 
             String providerMsgId = "slack-" + UUID.randomUUID();
