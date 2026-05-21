@@ -154,6 +154,26 @@
             <version>3.9.2</version>
             <scope>test</scope>
         </dependency>
+        <!-- Faz 23.7 M7 T4.2 PR-W2.1 — WebPush Protocol implementation
+             (RFC 8030 + RFC 8291 + VAPID RFC 8292). nl.martijndwars:web-push
+             library handles ECDH-derived AES-128-GCM encryption + JWT-VAPID
+             signing + push service HTTP POST. BouncyCastle transitive dep —
+             dependency tree görünür, CVE scan'e tabi.
+             Codex 019e49e7 plan-time AGREE Opsiyon A: lib boundary'i bizde,
+             status mapping + audit metadata + failure cleanup adapter
+             katmanında yönetilir. -->
+        <dependency>
+            <groupId>nl.martijndwars</groupId>
+            <artifactId>web-push</artifactId>
+            <version>5.1.1</version>
+        </dependency>
+        <!-- BouncyCastle explicit version pin (web-push transitive dependency
+             clear-view). -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+            <version>1.78.1</version>
+        </dependency>
     </dependencies>
 
     <build>
