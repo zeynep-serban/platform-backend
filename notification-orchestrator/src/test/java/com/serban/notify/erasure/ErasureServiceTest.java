@@ -45,6 +45,7 @@ class ErasureServiceTest {
     private NotificationInboxRepository inboxRepo;
     private AuditEventPublisher audit;
     private ErasureRequestLedgerService ledgerService;
+    private com.serban.notify.redaction.PiiRedactor piiRedactor;
     private ErasureService service;
 
     @BeforeEach
@@ -54,6 +55,12 @@ class ErasureServiceTest {
         inboxRepo = mock(NotificationInboxRepository.class);
         audit = mock(AuditEventPublisher.class);
         ledgerService = mock(ErasureRequestLedgerService.class);
+        piiRedactor = mock(com.serban.notify.redaction.PiiRedactor.class);
+
+        // PiiRedactor stub — Codex 019e4950 P1 #5 (PR-K5): subscriber_id_hash
+        // audit details için HMAC pseudonymize.
+        when(piiRedactor.hashRecipient(anyString(), anyString(), anyString()))
+            .thenReturn("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
 
         // Default ledger stub — every openRequest returns a fresh entry
         // with synthetic UUID + due_at (KVKK 30-day SLA). Tests can
@@ -72,7 +79,7 @@ class ErasureServiceTest {
         when(ledgerService.openRequest(anyString(), anyString(), any(), any()))
             .thenReturn(stub);
 
-        service = new ErasureService(intentRepo, deliveryRepo, inboxRepo, audit, ledgerService);
+        service = new ErasureService(intentRepo, deliveryRepo, inboxRepo, audit, ledgerService, piiRedactor);
     }
 
     @Test

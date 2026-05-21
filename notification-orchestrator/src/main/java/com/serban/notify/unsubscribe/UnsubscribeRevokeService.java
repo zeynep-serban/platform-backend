@@ -124,9 +124,10 @@ public class UnsubscribeRevokeService {
             auditDetails);
 
         // Codex iter-1 (019e12d4) absorb: publishStandalone audit event.
-        // PiiRedactor hashes subscriber for KVKK-compliant audit trail.
+        // Codex 019e4950 P1 #5 absorb (PR-K5): subscriber_id ham YERINE
+        // HMAC pseudonymize (subscriber_id_hash). KVKK Madde 12 uyumu.
         String recipientHash = piiRedactor.hashRecipient(orgId, "subscriber", subscriberId);
-        auditDetails.put("subscriber_id", subscriberId);
+        auditDetails.put("subscriber_id_hash", recipientHash);
         auditPublisher.publishStandalone(
             EVENT_UNSUBSCRIBED,
             orgId,

@@ -4,6 +4,7 @@ import com.serban.notify.audit.AuditEventPublisher;
 import com.serban.notify.domain.ErasureRequestLedger;
 import com.serban.notify.domain.NotificationDelivery;
 import com.serban.notify.domain.NotificationIntent;
+import com.serban.notify.redaction.PiiRedactor;
 import com.serban.notify.repository.NotificationDeliveryRepository;
 import com.serban.notify.repository.NotificationInboxRepository;
 import com.serban.notify.repository.NotificationIntentRepository;
@@ -64,19 +65,22 @@ public class ErasureService {
     private final NotificationInboxRepository inboxRepo;
     private final AuditEventPublisher audit;
     private final ErasureRequestLedgerService ledgerService;
+    private final PiiRedactor piiRedactor;
 
     public ErasureService(
         NotificationIntentRepository intentRepo,
         NotificationDeliveryRepository deliveryRepo,
         NotificationInboxRepository inboxRepo,
         AuditEventPublisher audit,
-        ErasureRequestLedgerService ledgerService
+        ErasureRequestLedgerService ledgerService,
+        PiiRedactor piiRedactor
     ) {
         this.intentRepo = intentRepo;
         this.deliveryRepo = deliveryRepo;
         this.inboxRepo = inboxRepo;
         this.audit = audit;
         this.ledgerService = ledgerService;
+        this.piiRedactor = piiRedactor;
     }
 
     /**
@@ -248,7 +252,11 @@ public class ErasureService {
                 Map<String, Object> details = new HashMap<>();
                 details.put("erasure_reason", request.reason());
                 details.put("evidence_ref", request.evidenceRef());
-                details.put("subscriber_id", request.subscriberId());  // NOT email/phone
+                // Codex 019e4950 P1 #5 absorb: KVKK Madde 12 data minimization.
+                // subscriber_id ham id YERINE HMAC pseudonymize (subject_id_hash).
+                details.put("subscriber_id_hash", piiRedactor.hashRecipient(
+                    request.orgId(), "subscriber", request.subscriberId()
+                ));
                 details.put("deliveries_anonymized", deliveriesAnonymized);
                 // Codex 019e4950 P0 #1 absorb: ledger correlation
                 details.put("ledger_request_id", ledgerEntry.getRequestId().toString());
@@ -274,7 +282,10 @@ public class ErasureService {
             Map<String, Object> inboxDetails = new HashMap<>();
             inboxDetails.put("erasure_reason", request.reason());
             inboxDetails.put("evidence_ref", request.evidenceRef());
-            inboxDetails.put("subscriber_id", request.subscriberId());
+            // Codex 019e4950 P1 #5 absorb: HMAC pseudonymize
+            inboxDetails.put("subscriber_id_hash", piiRedactor.hashRecipient(
+                request.orgId(), "subscriber", request.subscriberId()
+            ));
             inboxDetails.put("inbox_rows_deleted", inboxRowsDeleted);
             // Codex 019e4950 P0 #1 absorb: ledger correlation
             inboxDetails.put("ledger_request_id", ledgerEntry.getRequestId().toString());

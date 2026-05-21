@@ -543,7 +543,9 @@ class SubscriberPreferenceServiceTest {
             details.capture()
         );
         assertThat(details.getValue()).containsEntry("deleted_count", 7);
-        assertThat(details.getValue()).containsEntry("subscriber_id", "1204");
+        // Codex 019e4950 P1 #5 absorb (PR-K5): subscriber_id ham YERINE HMAC hash
+        assertThat(details.getValue()).containsKey("subscriber_id_hash");
+        assertThat(details.getValue()).doesNotContainKey("subscriber_id");
     }
 
     @Test
@@ -594,8 +596,10 @@ class SubscriberPreferenceServiceTest {
         assertThat(details.getValue())
             .containsEntry("channel", "email")
             .containsEntry("deleted_override_count", 3)
-            .containsEntry("shadow_deny_count", 0)
-            .containsEntry("subscriber_id", "1204");
+            .containsEntry("shadow_deny_count", 0);
+        // Codex 019e4950 P1 #5 absorb (PR-K5): subscriber_id ham YERINE HMAC hash
+        assertThat(details.getValue()).containsKey("subscriber_id_hash");
+        assertThat(details.getValue()).doesNotContainKey("subscriber_id");
     }
 
     @Test

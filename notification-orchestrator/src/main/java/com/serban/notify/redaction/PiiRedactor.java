@@ -63,7 +63,11 @@ public class PiiRedactor {
         // Faz 23.2 PR-B iter-1 absorb: KVKK erasure audit fields (Codex Q3+P1)
         "erasure_reason",            // KVKK §11 reason (subject_request, expired_consent)
         "evidence_ref",              // ticket/letter/audit operator reference
-        "subscriber_id",             // erasure target (NOT email/phone — pseudonymous boundary)
+        // Faz 23.2 M3 R2 PR-K5 (Codex 019e4950 P1 #5 absorb): subscriber_id
+        // ham id YERINE HMAC pseudonymize. Yeni caller'lar subscriber_id_hash
+        // kullanır; eski "subscriber_id" key 90-day retention purge ile silinir.
+        "subscriber_id",             // [DEPRECATED] backward-compat; 90-day retention sonrası kaldırılır
+        "subscriber_id_hash",        // KVKK Madde 12 uyumu — HMAC-SHA256 with org-namespaced Vault pepper
         "deliveries_anonymized",     // count of recipient_id null'lanan delivery row
         "inbox_rows_deleted",        // Faz 23.3 PR-E.1 (Codex iter-2 P2 absorb): inbox hard delete count
         "provider_code",             // Faz 23.4 PR-F: DLR provider terminal code (00/04/05/16/17/70)

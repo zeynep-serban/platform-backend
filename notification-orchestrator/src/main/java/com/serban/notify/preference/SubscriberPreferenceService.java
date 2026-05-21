@@ -403,7 +403,8 @@ public class SubscriberPreferenceService {
             orgId,
             recipientHash,
             Map.of(
-                "subscriber_id", subscriberId,
+                // Codex 019e4950 P1 #5 absorb (PR-K5): HMAC pseudonymize.
+                "subscriber_id_hash", recipientHash,
                 "deleted_count", deleted
             )
         );
@@ -495,7 +496,8 @@ public class SubscriberPreferenceService {
             orgId,
             recipientHash,
             Map.of(
-                "subscriber_id", subscriberId,
+                // Codex 019e4950 P1 #5 absorb (PR-K5): HMAC pseudonymize.
+                "subscriber_id_hash", recipientHash,
                 "channel", channel,
                 "deleted_override_count", deletedOverrides,
                 "shadow_deny_count", shadowDenyCount
