@@ -31,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, classes = {ApiGatewayApplication.class, GatewaySecurityTest.JwtTestConfig.class})
 @TestPropertySource(properties = {
+        "spring.profiles.active=test",
         "eureka.client.enabled=false",
         "spring.cloud.discovery.enabled=false",
         "spring.cloud.gateway.server.webflux.discovery.locator.enabled=false",
@@ -119,6 +120,26 @@ class GatewaySecurityTest {
                             .addHeader("Content-Type", "application/json")
                             .setBody("{\"action\":\"REVOKED\"}");
                 }
+                // Faz 22.1.1 H2 endpoint-admin gateway integration —
+                // downstream stubs for the 3 gateway routes (agent/admin/status).
+                // After RewritePath the gateway forwards to /api/v1/agent/**
+                // and /api/v1/admin/** which match endpoint-admin-service
+                // controllers; the /api/v1/endpoint-agents/** path stays as-is.
+                if (path != null && path.equals("/api/v1/agent/heartbeat")) {
+                    return new MockResponse().setResponseCode(202)
+                            .addHeader("Content-Type", "application/json")
+                            .setBody("{\"accepted\":true}");
+                }
+                if (path != null && path.equals("/api/v1/admin/endpoint-devices")) {
+                    return new MockResponse().setResponseCode(200)
+                            .addHeader("Content-Type", "application/json")
+                            .setBody("{\"items\":[]}");
+                }
+                if (path != null && path.equals("/api/v1/endpoint-agents/status")) {
+                    return new MockResponse().setResponseCode(200)
+                            .addHeader("Content-Type", "application/json")
+                            .setBody("{\"service\":\"endpoint-admin-service\"}");
+                }
                 return new MockResponse().setResponseCode(404);
             }
         };
@@ -131,24 +152,97 @@ class GatewaySecurityTest {
         if (stub != null) stub.shutdown();
     }
 
+    /**
+     * Sustaining route registrar — Codex 019e4c3f AGREE pattern.
+     *
+     * Previous implementation hardcoded numeric `routes[N]` slot indices,
+     * which made adding a new route (notification-orchestrator at slot 2,
+     * then endpoint-admin at slots 3/4/5, ...) a fragile manual edit
+     * that re-broke on every concurrent addition (H1 source PR + Faz 23
+     * gateway routes both wanted slot 2 — collision).
+     *
+     * This helper auto-increments the slot counter and tracks route IDs,
+     * so route additions are order-independent and test assertions
+     * reference paths (HTTP URI) not numeric slot positions.
+     */
+    private static final class RouteRegistrar {
+        private final DynamicPropertyRegistry reg;
+        private final java.util.function.Supplier<Object> uri;
+        private final java.util.Map<String, Integer> idToSlot = new java.util.HashMap<>();
+        private int nextSlot = 0;
+
+        RouteRegistrar(DynamicPropertyRegistry reg, java.util.function.Supplier<Object> uri) {
+            this.reg = reg;
+            this.uri = uri;
+        }
+
+        /** Register a route with no filters. */
+        void route(String id, String pathPredicate) {
+            registerHead(id, pathPredicate);
+        }
+
+        /** Register a route with one or more filters. */
+        void routeWithFilters(String id, String pathPredicate, String... filters) {
+            int slot = registerHead(id, pathPredicate);
+            for (int i = 0; i < filters.length; i++) {
+                int idx = i;
+                String f = filters[idx];
+                reg.add("spring.cloud.gateway.server.webflux.routes[" + slot + "].filters[" + idx + "]", () -> f);
+            }
+        }
+
+        private int registerHead(String id, String pathPredicate) {
+            int slot = nextSlot++;
+            idToSlot.put(id, slot);
+            String prefix = "spring.cloud.gateway.server.webflux.routes[" + slot + "]";
+            reg.add(prefix + ".id", () -> id);
+            reg.add(prefix + ".uri", uri);
+            reg.add(prefix + ".predicates[0]", () -> pathPredicate);
+            return slot;
+        }
+
+        int slotOf(String id) {
+            Integer s = idToSlot.get(id);
+            if (s == null) {
+                throw new IllegalStateException("Route id not registered: " + id);
+            }
+            return s;
+        }
+    }
+
     @DynamicPropertySource
     static void routeProps(DynamicPropertyRegistry reg) {
-        reg.add("spring.cloud.gateway.server.webflux.routes[0].id", () -> "user-service-route");
-        reg.add("spring.cloud.gateway.server.webflux.routes[0].uri", () -> stub.url("/").toString());
-        reg.add("spring.cloud.gateway.server.webflux.routes[0].predicates[0]", () -> "Path=/api/users/**");
+        RouteRegistrar routes = new RouteRegistrar(reg, () -> stub.url("/").toString());
 
-        reg.add("spring.cloud.gateway.server.webflux.routes[1].id", () -> "variant-service-route");
-        reg.add("spring.cloud.gateway.server.webflux.routes[1].uri", () -> stub.url("/").toString());
-        reg.add("spring.cloud.gateway.server.webflux.routes[1].predicates[0]", () -> "Path=/api/variants/**");
+        routes.route("user-service-route", "Path=/api/users/**");
+        routes.route("variant-service-route", "Path=/api/variants/**");
 
         // Faz 23.6 hardening: notify SSE route exposed on stub for the
         // CookieAwareBearerTokenConverter contract tests below.
-        reg.add("spring.cloud.gateway.server.webflux.routes[2].id", () -> "notification-orchestrator-v1-route");
-        reg.add("spring.cloud.gateway.server.webflux.routes[2].uri", () -> stub.url("/").toString());
-        reg.add("spring.cloud.gateway.server.webflux.routes[2].predicates[0]", () -> "Path=/api/v1/notify/**");
+        routes.route("notification-orchestrator-v1-route", "Path=/api/v1/notify/**");
+
+        // Faz 22.1.1 H2 endpoint-admin gateway integration — Codex 019e4c3f
+        // AGREE. The agent route is public (permitAll in SecurityConfig)
+        // and rewrites `/api/v1/endpoint-agent/**` to the downstream
+        // `/api/v1/agent/**` surface. The admin route requires JWT and
+        // rewrites `/api/v1/endpoint-admin/**` to `/api/v1/admin/**`.
+        // The status route is a read-only passthrough at
+        // `/api/v1/endpoint-agents/**` (no RewritePath).
+        routes.routeWithFilters(
+                "endpoint-admin-agent-route",
+                "Path=/api/v1/endpoint-agent/**",
+                "RewritePath=/api/v1/endpoint-agent/(?<segment>.*), /api/v1/agent/${segment}");
+        routes.routeWithFilters(
+                "endpoint-admin-admin-route",
+                "Path=/api/v1/endpoint-admin/**",
+                "RewritePath=/api/v1/endpoint-admin/(?<segment>.*), /api/v1/admin/${segment}");
+        routes.route("endpoint-admin-status-route", "Path=/api/v1/endpoint-agents/**");
 
         reg.add("SECURITY_JWT_ISSUER", () -> "auth-service");
-        reg.add("SECURITY_JWT_AUDIENCE", () -> "user-service,frontend");
+        // Faz 22.1.1 H2: endpoint-admin REST bearer JWT regression — the
+        // global CookieAwareBearerTokenConverter (Faz 23.6) cookie fallback
+        // does not break Authorization-header REST flow for admin routes.
+        reg.add("SECURITY_JWT_AUDIENCE", () -> "user-service,frontend,endpoint-admin-service");
     }
 
     private String token() {
@@ -487,6 +581,90 @@ class GatewaySecurityTest {
         }
         org.junit.jupiter.api.Assertions.assertNotNull(exportReq, "export request not captured");
         org.junit.jupiter.api.Assertions.assertEquals("mask", exportReq.getHeader("X-PII-Policy"));
+    }
+
+    // ─── Faz 22.1.1 H2 — endpoint-admin gateway integration tests ─────────
+    // Codex 019e4c3f AGREE: the agent route is permitAll + rewrites
+    // /api/v1/endpoint-agent/** to /api/v1/agent/** (HMAC-only auth at the
+    // service layer); the admin route requires a JWT; the status route is
+    // a read-only passthrough requiring a JWT by default.
+    //
+    // These assertions rely on the path predicate (the route stub URL is
+    // resolved at runtime via the RouteRegistrar helper above), so future
+    // route additions cannot break them via numeric-slot drift.
+
+    @Test
+    void endpoint_agent_route_is_permitAll_and_rewrites_to_agent_surface() {
+        if (isLocalProfile()) {
+            return;
+        }
+        webClient.post().uri("http://localhost:" + port + "/api/v1/endpoint-agent/heartbeat")
+                .header("Content-Type", "application/json")
+                .bodyValue("{}")
+                .exchange()
+                .expectStatus().isAccepted();
+    }
+
+    @Test
+    void endpoint_admin_route_requires_jwt() {
+        if (isLocalProfile()) {
+            return;
+        }
+        webClient.get().uri("http://localhost:" + port + "/api/v1/endpoint-admin/endpoint-devices")
+                .exchange()
+                .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void endpoint_admin_route_with_jwt_rewrites_to_admin_surface() {
+        if (isLocalProfile()) {
+            return;
+        }
+        String t = token();
+        webClient.get().uri("http://localhost:" + port + "/api/v1/endpoint-admin/endpoint-devices")
+                .header("Authorization", "Bearer " + t)
+                .exchange()
+                .expectStatus().isOk();
+    }
+
+    @Test
+    void endpoint_agent_status_requires_jwt_by_default() {
+        if (isLocalProfile()) {
+            return;
+        }
+        webClient.get().uri("http://localhost:" + port + "/api/v1/endpoint-agents/status")
+                .exchange()
+                .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void endpoint_agent_status_with_jwt_forwards() {
+        if (isLocalProfile()) {
+            return;
+        }
+        String t = token();
+        webClient.get().uri("http://localhost:" + port + "/api/v1/endpoint-agents/status")
+                .header("Authorization", "Bearer " + t)
+                .exchange()
+                .expectStatus().isOk();
+    }
+
+    // Faz 22.1.1 H2 regression — Codex 019e4c81 absorb: the global
+    // CookieAwareBearerTokenConverter (Faz 23.6) changed the gateway's
+    // resource-server bearer-token resolution to fall back to the
+    // erp_access_token cookie if no Authorization header is present. The
+    // endpoint-admin REST flow uses Authorization header (no cookie), so
+    // this regression check pins the header-only contract.
+    @Test
+    void endpoint_admin_route_accepts_authorization_header_after_sse_cookie_addition() {
+        if (isLocalProfile()) {
+            return;
+        }
+        String t = token();
+        webClient.get().uri("http://localhost:" + port + "/api/v1/endpoint-admin/endpoint-devices")
+                .header("Authorization", "Bearer " + t)
+                .exchange()
+                .expectStatus().isOk();
     }
 
     @Configuration

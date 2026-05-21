@@ -52,6 +52,7 @@ public class SecurityConfig {
                 .pathMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 .matchers(EndpointRequest.to("health", "info", "prometheus")).permitAll()
                 .pathMatchers("/api/auth/cookie/**").permitAll()
+                .pathMatchers("/api/v1/endpoint-agent/**").permitAll()
                 // 2026-04-19: theme-registry public CSS-var metadata — frontend
                 // theme-context.provider bootstraps BEFORE auth context, so this
                 // call goes without Authorization header. Registry data is not

@@ -81,6 +81,30 @@ spring:
           uri: ${NOTIFY_URL:http://notification-orchestrator:8089}
           predicates:
             - Path=/api/v1/notify/**
+        # Faz 22.1.1 H2 endpoint-admin gateway routes (Codex 019e4c3f AGREE):
+        # Path-segment rewrite so the gateway-public URL surface stays
+        # `/api/v1/endpoint-{agent,admin,status}/**` while the downstream
+        # service contract maps to its native `/api/v1/{agent,admin}/**`
+        # path (matches endpoint-admin-service controllers). The `status`
+        # route is read-only and does NOT rewrite (frontend hits
+        # `/api/v1/endpoint-agents/...` directly). Service contract:
+        # endpoint-admin-service listens on 8096 (HTTP) with mgmt 8081.
+        - id: endpoint-admin-agent-route
+          uri: ${ENDPOINT_ADMIN_SERVICE_URL:http://endpoint-admin-service:8096}
+          predicates:
+            - Path=/api/v1/endpoint-agent/**
+          filters:
+            - RewritePath=/api/v1/endpoint-agent/(?<segment>.*), /api/v1/agent/$\{segment}
+        - id: endpoint-admin-admin-route
+          uri: ${ENDPOINT_ADMIN_SERVICE_URL:http://endpoint-admin-service:8096}
+          predicates:
+            - Path=/api/v1/endpoint-admin/**
+          filters:
+            - RewritePath=/api/v1/endpoint-admin/(?<segment>.*), /api/v1/admin/$\{segment}
+        - id: endpoint-admin-status-route
+          uri: ${ENDPOINT_ADMIN_SERVICE_URL:http://endpoint-admin-service:8096}
+          predicates:
+            - Path=/api/v1/endpoint-agents/**
 
   security:
     oauth2:
