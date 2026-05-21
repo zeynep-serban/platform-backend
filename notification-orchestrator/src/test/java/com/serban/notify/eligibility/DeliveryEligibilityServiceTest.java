@@ -129,6 +129,59 @@ class DeliveryEligibilityServiceTest {
         verify(authzClient).check(anyString(), anyString(), anyString(), anyString(), anyString());
     }
 
+    @Test
+    void pushNoEndpointMarkerBlocksWithBlockedNoPushEndpoint() {
+        // Faz 23.7 M7 T4.2 PR-W2.5+W2.6 (Codex 019e4a3d P1 absorb):
+        // DeliveryPlanService 0-endpoint subscriber için marker target
+        // (targetRef=PUSH_NO_ENDPOINT_TARGET_REF) üretir. Eligibility
+        // guard yakalar → BLOCKED_NO_PUSH_ENDPOINT terminal status.
+        DeliveryEligibilityService svc = service(true, true);
+
+        DeliveryTarget noEndpointMarker = new DeliveryTarget(
+            "push", "subscriber", "sub-X", "rh-push-marker",
+            com.serban.notify.delivery.DeliveryPlanService.PUSH_NO_ENDPOINT_TARGET_REF,
+            "webpush"
+        );
+
+        var decision = svc.evaluate(intent(), externalAllowedTemplate(false), noEndpointMarker);
+
+        assertThat(decision.blocked()).isTrue();
+        assertThat(decision.status())
+            .isEqualTo(com.serban.notify.domain.NotificationDelivery.Status.BLOCKED_NO_PUSH_ENDPOINT);
+        assertThat(decision.policy()).isEqualTo("no_push_endpoint");
+        assertThat(decision.reason()).contains("no active push endpoint");
+        // Adapter çağrılmaz; preference + authz check'leri de tetiklenmez
+        verify(prefService, never()).evaluate(any(), anyString(), anyString());
+        verify(authzClient, never())
+            .check(anyString(), anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void pushActiveEndpointPassesNoEndpointGuard() {
+        // Normal push target (targetRef=endpoint UUID) marker guard'ı
+        // tetiklemez; subscriber preference + authz akışına devam eder.
+        DeliveryEligibilityService svc = service(true, true);
+        when(prefService.evaluate(any(), anyString(), anyString()))
+            .thenReturn(
+                com.serban.notify.preference.SubscriberPreferenceService.PreferenceDecision
+                    .allow("test_allow"));
+        when(authzClient.check(anyString(), anyString(), anyString(), anyString(), anyString()))
+            .thenReturn(AuthzClient.AuthzDecision.allow("tuple_match"));
+
+        DeliveryTarget activeEndpoint = new DeliveryTarget(
+            "push", "subscriber", "sub-A", "rh-push-active",
+            "11111111-2222-3333-4444-555555555555",
+            "webpush"
+        );
+
+        var decision = svc.evaluate(intent(), externalAllowedTemplate(false), activeEndpoint);
+
+        assertThat(decision.blocked()).isFalse();
+        // Preference + authz check'leri tetiklendi (subscriber path)
+        verify(prefService).evaluate(any(), anyString(), anyString());
+        verify(authzClient).check(anyString(), anyString(), anyString(), anyString(), anyString());
+    }
+
     private DeliveryEligibilityService service(boolean prefsOn, boolean authzOn) {
         return new DeliveryEligibilityService(prefService, authzClient, prefsOn, authzOn);
     }

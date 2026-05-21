@@ -106,6 +106,23 @@ public class DeliveryEligibilityService {
     public EligibilityDecision evaluate(
         NotificationIntent intent, NotificationTemplate template, DeliveryTarget target
     ) {
+        // Guard 0a (Faz 23.7 M7 T4.2 PR-W2.5+W2.6 — Codex 019e4a3d P1):
+        // push channel + no-endpoint marker → BLOCKED_NO_PUSH_ENDPOINT.
+        // DeliveryPlanService 0-endpoint subscriber için marker target
+        // üretir (zombie intent state'i önle; eski "sessiz skip" pattern'i
+        // push-only intent'leri PROCESSING limbo'da bırakıyordu). Adapter
+        // çağrılmaz; raw endpoint detayı audit'e girmez.
+        if ("push".equals(target.channel())
+            && com.serban.notify.delivery.DeliveryPlanService.PUSH_NO_ENDPOINT_TARGET_REF
+                .equals(target.targetRef())) {
+            return EligibilityDecision.blocked(
+                NotificationDelivery.Status.BLOCKED_NO_PUSH_ENDPOINT,
+                "no_push_endpoint",
+                "subscriber has no active push endpoint (browser/device not "
+                    + "subscribed or all endpoints soft-deleted)"
+            );
+        }
+
         // Guard 0 (Faz 23.8 M7 T4.3.b): email suppression list match
         // Provider IP reputation koruma — hard-bounce / spam-complaint /
         // soft-bounce-repeated alıcılar SMTP edge'e gönderilmez. Critical

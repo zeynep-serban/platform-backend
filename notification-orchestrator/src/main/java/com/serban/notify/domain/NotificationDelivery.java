@@ -35,7 +35,18 @@ public class NotificationDelivery {
          * reputation koruma + KVKK 23.2.B sürdürülmüş erasure (raw email
          * never stored — recipient_hash join only).
          */
-        BLOCKED_BY_SUPPRESSION
+        BLOCKED_BY_SUPPRESSION,
+        /**
+         * Faz 23.7 M7 T4.2 PR-W2.5+W2.6 (Codex {@code 019e49e7} P5 +
+         * {@code 019e4a3d} P1 absorb): push channel subscriber'ın aktif
+         * push endpoint kayıtı yok (browser/device hiç subscribe etmemiş
+         * veya tüm endpoint'ler soft-deleted / RFC 8030 410). Terminal
+         * BLOCKED status — push-only intent zombie state'e düşmesin diye
+         * plan-time marker target ile dispatch öncesi guard'a düşer +
+         * delivery row + audit event üretilir. Adapter çağrılmaz; raw
+         * subscriber endpoint detayı audit'e girmez (recipient_hash join only).
+         */
+        BLOCKED_NO_PUSH_ENDPOINT
     }
 
     /**

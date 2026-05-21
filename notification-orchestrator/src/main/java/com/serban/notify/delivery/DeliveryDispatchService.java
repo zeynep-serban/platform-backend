@@ -417,9 +417,14 @@ public class DeliveryDispatchService {
             // duplicate). Allow ACCEPTED → ACCEPTED idempotent path so
             // attempt_count++ still meaningful.
             switch (delivery.getStatus()) {
+                // Faz 23.7 M7 T4.2 PR-W2.5+W2.6 (Codex 019e4a3d iter-3 P2):
+                // BLOCKED_BY_SUPPRESSION + BLOCKED_NO_PUSH_ENDPOINT da
+                // terminal BLOCKED set'inde; V17 + V20 trigger ile hizalı.
                 case DELIVERED, FAILED, BOUNCED,
                      BLOCKED_BY_PREFERENCE, BLOCKED_BY_AUTHZ,
-                     BLOCKED_BY_IDEMPOTENCY, BLOCKED_EXTERNAL_NOT_ALLOWED -> {
+                     BLOCKED_BY_IDEMPOTENCY, BLOCKED_EXTERNAL_NOT_ALLOWED,
+                     BLOCKED_BY_SUPPRESSION,
+                     BLOCKED_NO_PUSH_ENDPOINT -> {
                     log.info("upsert skip (terminal-regress guard {}): intentId={} channel={} hash={}",
                         delivery.getStatus(), intent.getIntentId(),
                         target.channel(), target.recipientHash());

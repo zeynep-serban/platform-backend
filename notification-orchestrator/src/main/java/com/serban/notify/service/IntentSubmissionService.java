@@ -79,14 +79,18 @@ public class IntentSubmissionService {
     /**
      * PR2 Kernel allowed channels (Codex post-impl bulgu #4 absorb).
      * PR3+'da SMTP/Slack/Webhook adapter'lar geldikçe set genişletilir.
-     * push-fcm, push-apns, web-push, whatsapp, voice PR3-23.X tier'larında.
+     * push-fcm, push-apns, whatsapp, voice mobile/cross-channel PR3-23.X
+     * tier'larında.
      * Faz 23.3.1: sms (NetGSM) eklendi.
      * Faz 23.3 PR-E.2: in-app (inbox) eklendi.
      * Faz 23.6 M7 T4.1.2 (Codex `019e496d` AGREE): teams (Power Automate
      * flow webhook adapter — TeamsPowerAutomateAdapter) eklendi.
+     * Faz 23.7 M7 T4.2 PR-W2.5 (Codex {@code 019e49e7} P5 AGREE): push
+     * (Web Push Protocol RFC 8030 — DefaultWebPushSender + WebPushAdapter;
+     * mobile FCM/APNS Faz 22.2 dep, scope dışı).
      */
     private static final java.util.Set<String> PR2_ALLOWED_CHANNELS =
-        java.util.Set.of("email", "sms", "in-app", "slack", "teams", "webhook");
+        java.util.Set.of("email", "sms", "in-app", "slack", "teams", "webhook", "push");
 
     @Transactional
     public SubmitIntentResponse submit(SubmitIntentRequest request) {
@@ -312,6 +316,10 @@ public class IntentSubmissionService {
         boolean hasSmsChannel = request.channels().contains("sms");
         boolean hasEmailChannel = request.channels().contains("email");
         boolean hasInAppChannel = request.channels().contains("in-app");
+        // Faz 23.7 M7 T4.2 PR-W2.5 (Codex 019e49e7 P5): push channel
+        // requires subscriber type (no Web Push Protocol endpoint
+        // registration without an account).
+        boolean hasPushChannel = request.channels().contains("push");
 
         // Recipient type-specific zorunluluk
         for (SubmitIntentRequest.RecipientRef ref : request.recipients()) {
@@ -328,6 +336,14 @@ public class IntentSubmissionService {
                     throw new com.serban.notify.exception.InvalidRequestException(
                         "in-app channel requires subscriber recipient type "
                             + "(external recipients have no inbox account)"
+                    );
+                }
+                // Faz 23.7 M7 T4.2 PR-W2.5: push channel forbids external
+                // recipient (browser push endpoint registration subscriber-bound).
+                if (hasPushChannel) {
+                    throw new com.serban.notify.exception.InvalidRequestException(
+                        "push channel requires subscriber recipient type "
+                            + "(external recipients have no push subscription)"
                     );
                 }
                 boolean hasEmail = ref.email() != null && !ref.email().isBlank();

@@ -109,6 +109,39 @@ class IntentStatusResolverTest {
         assertThat(resolver.resolve(List.of(d1, d2))).isNull();
     }
 
+    // ─── Faz 23.7 M7 T4.2 PR-W2.5+W2.6 (Codex 019e4a3d iter-2 P1) ────────
+
+    @Test
+    void mixedDeliveredAndBlockedNoPushEndpointPartiallyFailed() {
+        // email DELIVERED + push BLOCKED_NO_PUSH_ENDPOINT (subscriber Web
+        // Push subscribe etmemiş) → resolver PARTIALLY_FAILED dönmeli;
+        // önceki davranış COMPLETED (yanlış) idi.
+        var d1 = delivery(NotificationDelivery.Status.DELIVERED);
+        var d2 = delivery(NotificationDelivery.Status.BLOCKED_NO_PUSH_ENDPOINT);
+        assertThat(resolver.resolve(List.of(d1, d2)))
+            .isEqualTo(NotificationIntent.Status.PARTIALLY_FAILED);
+    }
+
+    @Test
+    void allBlockedNoPushEndpointReturnsFailed() {
+        // push-only intent + 0 endpoint → tek BLOCKED_NO_PUSH_ENDPOINT
+        // delivery; resolver FAILED dönmeli (zombie state önlendi).
+        var d1 = delivery(NotificationDelivery.Status.BLOCKED_NO_PUSH_ENDPOINT);
+        assertThat(resolver.resolve(List.of(d1)))
+            .isEqualTo(NotificationIntent.Status.FAILED);
+    }
+
+    @Test
+    void mixedDeliveredAndBlockedBySuppressionPartiallyFailed() {
+        // Faz 23.8 M7 T4.3.b scope gap: BLOCKED_BY_SUPPRESSION da
+        // terminal-failure set'inde değildi. Codex 019e4a3d iter-2 absorb
+        // ile aynı satıra eklendi.
+        var d1 = delivery(NotificationDelivery.Status.DELIVERED);
+        var d2 = delivery(NotificationDelivery.Status.BLOCKED_BY_SUPPRESSION);
+        assertThat(resolver.resolve(List.of(d1, d2)))
+            .isEqualTo(NotificationIntent.Status.PARTIALLY_FAILED);
+    }
+
     private NotificationDelivery delivery(NotificationDelivery.Status status) {
         NotificationDelivery d = new NotificationDelivery();
         d.setStatus(status);

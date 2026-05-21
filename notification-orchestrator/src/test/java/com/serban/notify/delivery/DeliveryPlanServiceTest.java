@@ -39,6 +39,7 @@ class DeliveryPlanServiceTest {
     private PiiRedactor redactor;
     private ChannelAdapterRegistry registry;
     private com.serban.notify.preference.SubscriberPreferenceService prefService;
+    private com.serban.notify.repository.SubscriberPushEndpointRepository pushEndpointRepo;
     private DeliveryPlanService service;
 
     @BeforeEach
@@ -51,16 +52,19 @@ class DeliveryPlanServiceTest {
         when(registry.supports("email")).thenReturn(true);
         when(registry.supports("sms")).thenReturn(true);
         when(registry.supports("in-app")).thenReturn(true);
+        when(registry.supports("push")).thenReturn(true);
         when(registry.supports("slack")).thenReturn(true);
         when(registry.supports("webhook")).thenReturn(true);
         when(registry.supports("unknown")).thenReturn(false);
         when(registry.supportedChannels())
-            .thenReturn(java.util.Set.of("email", "sms", "in-app", "slack", "webhook"));
+            .thenReturn(java.util.Set.of("email", "sms", "in-app", "push", "slack", "webhook"));
 
         // PR5: SubscriberPreferenceService dependency injected; tests provide
         // ref.email() / ref.phone() directly when contact lookup not desired.
         prefService = mock(com.serban.notify.preference.SubscriberPreferenceService.class);
-        service = new DeliveryPlanService(redactor, registry, prefService);
+        // Faz 23.7 M7 T4.2 PR-W2.5: push endpoint repo for fan-out planning
+        pushEndpointRepo = mock(com.serban.notify.repository.SubscriberPushEndpointRepository.class);
+        service = new DeliveryPlanService(redactor, registry, prefService, pushEndpointRepo);
     }
 
     @Test
@@ -486,6 +490,176 @@ class DeliveryPlanServiceTest {
         assertThat(targets).hasSize(4);
         assertThat(targets).extracting(DeliveryTarget::channel)
             .containsExactly("email", "email", "in-app", "in-app");
+    }
+
+    // ─── Faz 23.7 M7 T4.2 PR-W2.5 — Push fan-out tests ────────────────────
+
+    @Test
+    void planPushFanoutPerActiveEndpoint() {
+        // Subscriber sub-A: 2 active endpoints (Chrome + Firefox simülasyonu)
+        // → 2 DeliveryTarget; her endpoint için ayrı NotificationDelivery row.
+        NotificationIntent intent = intent(new String[] { "push" }, null);
+        intent.setIntentId("intent-push-1");
+        com.serban.notify.domain.SubscriberPushEndpoint ep1 =
+            new com.serban.notify.domain.SubscriberPushEndpoint();
+        java.util.UUID epId1 = java.util.UUID.fromString("aaaaaaaa-1111-2222-3333-444444444444");
+        ep1.setEndpointId(epId1);
+        ep1.setOrgId("default");
+        ep1.setSubscriberId("sub-A");
+        ep1.setEndpointUrl("https://fcm.googleapis.com/fcm/send/chrome-token");
+        ep1.setP256dhKey("p256dh-chrome");
+        ep1.setAuthSecret("auth-chrome");
+
+        com.serban.notify.domain.SubscriberPushEndpoint ep2 =
+            new com.serban.notify.domain.SubscriberPushEndpoint();
+        java.util.UUID epId2 = java.util.UUID.fromString("bbbbbbbb-1111-2222-3333-444444444444");
+        ep2.setEndpointId(epId2);
+        ep2.setOrgId("default");
+        ep2.setSubscriberId("sub-A");
+        ep2.setEndpointUrl("https://updates.push.services.mozilla.com/wpush/firefox-token");
+        ep2.setP256dhKey("p256dh-firefox");
+        ep2.setAuthSecret("auth-firefox");
+
+        when(pushEndpointRepo.findActiveBySubscriber("default", "sub-A"))
+            .thenReturn(java.util.List.of(ep1, ep2));
+
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "sub-A", null, null, null, "tr-TR"
+            )
+        );
+
+        List<DeliveryTarget> targets = service.plan(intent, recipients);
+
+        assertThat(targets).hasSize(2);
+        assertThat(targets).extracting(DeliveryTarget::channel)
+            .containsExactly("push", "push");
+        assertThat(targets).extracting(DeliveryTarget::recipientType)
+            .containsExactly("subscriber", "subscriber");
+        assertThat(targets).extracting(DeliveryTarget::recipientId)
+            .containsExactly("sub-A", "sub-A");
+        // targetRef = endpoint UUID string (WebPushAdapter repository lookup)
+        assertThat(targets).extracting(DeliveryTarget::targetRef)
+            .containsExactly(epId1.toString(), epId2.toString());
+        assertThat(targets).extracting(DeliveryTarget::providerKey)
+            .containsOnly("webpush");
+    }
+
+    @Test
+    void planPushNoActiveEndpointEmitsMarkerTarget() {
+        // Codex 019e4a3d P1 absorb: 0-endpoint sessiz skip pattern push-only
+        // intent zombie state'e düşürüyordu. Yerine marker target üretilir
+        // (PUSH_NO_ENDPOINT_TARGET_REF), DeliveryEligibilityService bunu
+        // BLOCKED_NO_PUSH_ENDPOINT terminal delivery row'a çevirir.
+        NotificationIntent intent = intent(new String[] { "push" }, null);
+        intent.setIntentId("intent-push-empty");
+        when(pushEndpointRepo.findActiveBySubscriber("default", "sub-X"))
+            .thenReturn(java.util.List.of());
+
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "sub-X", null, null, null, "tr-TR"
+            )
+        );
+
+        List<DeliveryTarget> targets = service.plan(intent, recipients);
+
+        assertThat(targets).hasSize(1);
+        assertThat(targets.get(0).channel()).isEqualTo("push");
+        assertThat(targets.get(0).recipientId()).isEqualTo("sub-X");
+        assertThat(targets.get(0).targetRef())
+            .isEqualTo(DeliveryPlanService.PUSH_NO_ENDPOINT_TARGET_REF);
+        assertThat(targets.get(0).providerKey()).isEqualTo("webpush");
+    }
+
+    @Test
+    void planPushRejectsExternalRecipient() {
+        // Push subscription account-bound (browser PushManager.subscribe
+        // subscriber identity'sine bağlı). External recipient → reject.
+        NotificationIntent intent = intent(new String[] { "push" }, null);
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.external,
+                null, "ext@example.com", null, null, "tr-TR"
+            )
+        );
+
+        assertThatThrownBy(() -> service.plan(intent, recipients))
+            .isInstanceOf(InvalidRequestException.class)
+            .hasMessageContaining("subscriber");
+    }
+
+    @Test
+    void planPushRejectsBlankSubscriberId() {
+        NotificationIntent intent = intent(new String[] { "push" }, null);
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "", null, null, null, "tr-TR"
+            )
+        );
+
+        assertThatThrownBy(() -> service.plan(intent, recipients))
+            .isInstanceOf(InvalidRequestException.class)
+            .hasMessageContaining("subscriberId");
+    }
+
+    @Test
+    void planPushMultipleSubscribersEachWithOwnEndpoints() {
+        // 2 subscribers × farklı endpoint sayıları (sub-A: 1, sub-B: 2)
+        // → 3 toplam target. Subscriber boundary intact.
+        NotificationIntent intent = intent(new String[] { "push" }, null);
+        intent.setIntentId("intent-push-multi");
+
+        com.serban.notify.domain.SubscriberPushEndpoint epA =
+            new com.serban.notify.domain.SubscriberPushEndpoint();
+        epA.setEndpointId(java.util.UUID.fromString("11111111-aaaa-bbbb-cccc-dddddddddddd"));
+        epA.setOrgId("default");
+        epA.setSubscriberId("sub-A");
+        epA.setEndpointUrl("https://example.push/a");
+        epA.setP256dhKey("p");
+        epA.setAuthSecret("a");
+        when(pushEndpointRepo.findActiveBySubscriber("default", "sub-A"))
+            .thenReturn(java.util.List.of(epA));
+
+        com.serban.notify.domain.SubscriberPushEndpoint epB1 =
+            new com.serban.notify.domain.SubscriberPushEndpoint();
+        epB1.setEndpointId(java.util.UUID.fromString("22222222-aaaa-bbbb-cccc-dddddddddddd"));
+        epB1.setOrgId("default");
+        epB1.setSubscriberId("sub-B");
+        epB1.setEndpointUrl("https://example.push/b1");
+        epB1.setP256dhKey("p");
+        epB1.setAuthSecret("a");
+
+        com.serban.notify.domain.SubscriberPushEndpoint epB2 =
+            new com.serban.notify.domain.SubscriberPushEndpoint();
+        epB2.setEndpointId(java.util.UUID.fromString("33333333-aaaa-bbbb-cccc-dddddddddddd"));
+        epB2.setOrgId("default");
+        epB2.setSubscriberId("sub-B");
+        epB2.setEndpointUrl("https://example.push/b2");
+        epB2.setP256dhKey("p");
+        epB2.setAuthSecret("a");
+        when(pushEndpointRepo.findActiveBySubscriber("default", "sub-B"))
+            .thenReturn(java.util.List.of(epB1, epB2));
+
+        List<SubmitIntentRequest.RecipientRef> recipients = List.of(
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "sub-A", null, null, null, "tr-TR"
+            ),
+            new SubmitIntentRequest.RecipientRef(
+                SubmitIntentRequest.RecipientRef.Type.subscriber,
+                "sub-B", null, null, null, "tr-TR"
+            )
+        );
+
+        List<DeliveryTarget> targets = service.plan(intent, recipients);
+
+        assertThat(targets).hasSize(3);
+        assertThat(targets).extracting(DeliveryTarget::recipientId)
+            .containsExactly("sub-A", "sub-B", "sub-B");
     }
 
     private NotificationIntent intent(String[] channels, Map<String, Object> routing) {
