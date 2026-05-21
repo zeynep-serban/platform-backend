@@ -103,7 +103,11 @@ class WebPushAdapterTest {
     }
 
     @Test
-    void httpStatus410GoneFailsAndSoftDeletes() throws Exception {
+    void httpStatus410GoneFailsAndSoftDeletesEndpointLevel() throws Exception {
+        // Codex 019e4a3d P2 follow-up absorb: endpoint-level soft-delete
+        // (önceki softDeleteBySubscriber multi-endpoint subscriber'ın
+        // Chrome+Firefox+iPad TÜM endpoint'lerini siliyordu — şimdi
+        // softDeleteByEndpointId sadece o cihazı siler).
         when(sender.send(anyString(), anyString(), anyString(), any(), anyInt()))
             .thenReturn(new WebPushSender.SendResult(410, "Gone"));
 
@@ -111,9 +115,12 @@ class WebPushAdapterTest {
 
         assertThat(result.status()).isEqualTo(ChannelAdapter.DeliveryAttemptResult.Status.FAILED);
         assertThat(result.failureReason()).isEqualTo("subscription_expired");
-        // 410 immediate soft delete
-        verify(endpointRepo).softDeleteBySubscriber(eq("acme"), eq("1204"), any());
+        // 410 immediate soft delete — ENDPOINT-LEVEL (cihaz boundary preserved)
+        verify(endpointRepo).softDeleteByEndpointId(eq(ENDPOINT_ID), any());
         verify(endpointRepo).incrementFailure(eq(ENDPOINT_ID), any(), eq("410_GONE"));
+        // Subscriber-level delete (multi-endpoint regression guard) tetiklenmez
+        verify(endpointRepo, never())
+            .softDeleteBySubscriber(anyString(), anyString(), any());
     }
 
     @Test
@@ -127,12 +134,14 @@ class WebPushAdapterTest {
         assertThat(result.failureReason()).isEqualTo("endpoint_not_found");
         // First hit: increment but NO soft delete (threshold 3)
         verify(endpointRepo).incrementFailure(eq(ENDPOINT_ID), any(), eq("404_NOT_FOUND"));
-        verify(endpointRepo, never()).softDeleteBySubscriber(anyString(), anyString(), any());
+        verify(endpointRepo, never()).softDeleteByEndpointId(any(), any());
+        verify(endpointRepo, never())
+            .softDeleteBySubscriber(anyString(), anyString(), any());
     }
 
     @Test
-    void httpStatus404ThirdHitTriggersSoftDelete() throws Exception {
-        // Pre-existing 2 failures → 3rd hit triggers soft delete
+    void httpStatus404ThirdHitTriggersEndpointLevelSoftDelete() throws Exception {
+        // Pre-existing 2 failures → 3rd hit triggers soft delete (ENDPOINT-LEVEL)
         SubscriberPushEndpoint endpoint = new SubscriberPushEndpoint();
         endpoint.setEndpointId(ENDPOINT_ID);
         endpoint.setOrgId("acme");
@@ -147,7 +156,10 @@ class WebPushAdapterTest {
 
         adapter.send(target(ENDPOINT_ID.toString()), message("t", "b"));
 
-        verify(endpointRepo).softDeleteBySubscriber(eq("acme"), eq("1204"), any());
+        verify(endpointRepo).softDeleteByEndpointId(eq(ENDPOINT_ID), any());
+        // Subscriber-level delete (multi-endpoint regression guard) tetiklenmez
+        verify(endpointRepo, never())
+            .softDeleteBySubscriber(anyString(), anyString(), any());
     }
 
     @Test

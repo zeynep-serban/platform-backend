@@ -151,6 +151,12 @@ public class WebPushAdapter implements ChannelAdapter {
 
         if (code == 404 || code == 410) {
             // Subscription expired or unknown — endpoint cleanup.
+            // Codex 019e4a3d P2 follow-up absorb: endpoint-level soft-delete
+            // (önceki softDeleteBySubscriber subscriber'ın TÜM endpoint'lerini
+            // siliyordu — multi-endpoint subscriber Chrome+Firefox+iPad
+            // birinde 410 Gone alınca diğer cihazların subscription'ı da
+            // kaybediliyordu). softDeleteByEndpointId ile sadece o cihazın
+            // endpoint kayıtı soft-delete edilir; diğer cihazlar etkilenmez.
             log.info("webpush endpoint stale (HTTP {}): endpointId={} cleanup",
                 code, endpointId);
             int newCount = endpoint.getFailureCount() + 1;
@@ -161,9 +167,8 @@ public class WebPushAdapter implements ChannelAdapter {
             );
             // Threshold: 1 hit (410 Gone) immediate; 404 needs 3 consecutive.
             if (code == 410 || newCount >= FAILURE_SOFT_DELETE_THRESHOLD) {
-                endpointRepo.softDeleteBySubscriber(
-                    endpoint.getOrgId(),
-                    endpoint.getSubscriberId(),
+                endpointRepo.softDeleteByEndpointId(
+                    endpointId,
                     OffsetDateTime.now()
                 );
                 log.info("webpush endpoint soft-deleted: endpointId={}", endpointId);
