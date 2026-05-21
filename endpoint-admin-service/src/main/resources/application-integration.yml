@@ -1,0 +1,12 @@
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://keycloak:8080/realms/serban
+          jwk-set-uri: http://keycloak:8080/realms/serban/protocol/openid-connect/certs
+          audiences: endpoint-admin-service,frontend,account,serban-web
+
+security:
+  jwt:
+    allowed-client-ids: frontend,admin-cli,serban-web,account

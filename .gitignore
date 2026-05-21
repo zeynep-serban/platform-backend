@@ -15,6 +15,7 @@ docs/deploy/env/*.local
 
 # Maven build output
 target/
+**/target/
 /.claude/
 
 # Python (etl-worker)

@@ -9,6 +9,25 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      service:
+        description: "Service image to build, or all"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - auth-service
+          - user-service
+          - variant-service
+          - core-data-service
+          - report-service
+          - endpoint-admin-service
+          - schema-service
+          - permission-service
+          - api-gateway
+          - discovery-server
+          - notification-orchestrator
 
 permissions:
   contents: read
@@ -33,6 +52,7 @@ jobs:
           - variant-service
           - core-data-service
           - report-service
+          - endpoint-admin-service
           - schema-service
           - permission-service
           - api-gateway
@@ -41,12 +61,15 @@ jobs:
 
     steps:
       - name: Checkout
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.service == 'all' || inputs.service == matrix.service }}
         uses: actions/checkout@v4
 
       - name: Setup Docker Buildx
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.service == 'all' || inputs.service == matrix.service }}
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.service == 'all' || inputs.service == matrix.service }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -54,10 +77,12 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Derive short SHA
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.service == 'all' || inputs.service == matrix.service }}
         id: sha
         run: echo "short=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
 
       - name: Build + Push image
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.service == 'all' || inputs.service == matrix.service }}
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -72,6 +97,7 @@ jobs:
           provenance: false
 
       - name: Summary — digest (19.9 pin için kanıt)
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.service == 'all' || inputs.service == matrix.service }}
         run: |
           echo "### ${{ matrix.service }} image push" >> $GITHUB_STEP_SUMMARY
           echo "- **Tag**: \`sha-${{ steps.sha.outputs.short }}\`" >> $GITHUB_STEP_SUMMARY
@@ -87,6 +113,7 @@ jobs:
       # gitops deploy-backend-testai.yml digest-pin mode ile @sha256:
       # direct pin yapar (D30 immutable cutover-ready).
       - name: Save digest as artifact (B.3 dispatch payload prep)
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.service == 'all' || inputs.service == matrix.service }}
         run: |
           mkdir -p /tmp/digests
           DIGEST_RAW="${{ steps.build.outputs.digest }}"
@@ -98,7 +125,9 @@ jobs:
             exit 1
           fi
           echo "${DIGEST_HEX}" > "/tmp/digests/${{ matrix.service }}"
-      - uses: actions/upload-artifact@v4
+      - name: Upload digest artifact
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.service == 'all' || inputs.service == matrix.service }}
+        uses: actions/upload-artifact@v4
         with:
           name: digest-${{ matrix.service }}
           path: /tmp/digests/${{ matrix.service }}
@@ -115,6 +144,12 @@ jobs:
   dispatch:
     name: Dispatch backend-testai-deploy to gitops
     needs: build-and-push
+    # Codex 019e4c81 post-impl REVISE absorb: only dispatch on push to main
+    # or workflow_dispatch with service=all. Targeted single-service rebuild
+    # produces partial digest map; gitops digest-pin deploy workflow expects
+    # full N-service map and would fail-by-missing-service. Build-only dry-run
+    # remains supported (matrix step runs); deploy dispatch skipped.
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.service == 'all') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

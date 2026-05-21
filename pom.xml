@@ -22,6 +22,7 @@
         <module>user-service</module>
         <module>variant-service</module>
         <module>core-data-service</module>
+        <module>endpoint-admin-service</module>
         <module>report-service</module>
         <module>notification-orchestrator</module>
     </modules>

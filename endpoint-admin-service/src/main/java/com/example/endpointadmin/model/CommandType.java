@@ -1,0 +1,13 @@
+package com.example.endpointadmin.model;
+
+public enum CommandType {
+    COLLECT_INVENTORY,
+    LOCK_USER_LOGIN,
+    UNLOCK_USER_LOGIN,
+    CHANGE_LOCAL_PASSWORD,
+    SMB_LIST_ALLOWED_PATH,
+    SMB_READ_FILE_METADATA,
+    SMB_DOWNLOAD_FILE,
+    SMB_UPLOAD_FILE,
+    ROTATE_CREDENTIAL
+}

@@ -1,0 +1,80 @@
+spring:
+  threads:
+    virtual:
+      enabled: true
+  application:
+    name: endpoint-admin-service
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:${ENDPOINT_ADMIN_DB_URL:jdbc:postgresql://localhost:5432/endpoint_admin}}
+    username: ${SPRING_DATASOURCE_USERNAME:${ENDPOINT_ADMIN_DB_USERNAME:postgres}}
+    password: ${SPRING_DATASOURCE_PASSWORD:${ENDPOINT_ADMIN_DB_PASSWORD:postgres}}
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+    properties:
+      hibernate:
+        default_schema: ${ENDPOINT_ADMIN_DB_SCHEMA:endpoint_admin_service}
+        format_sql: true
+    show-sql: false
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: 0
+    table: endpoint_admin_flyway_history
+    default-schema: ${ENDPOINT_ADMIN_DB_SCHEMA:endpoint_admin_service}
+    schemas: ${ENDPOINT_ADMIN_DB_SCHEMA:endpoint_admin_service}
+    locations: ${ENDPOINT_ADMIN_FLYWAY_LOCATIONS:classpath:db/migration}
+
+server:
+  port: ${SERVER_PORT:8096}
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka
+  instance:
+    prefer-ip-address: ${EUREKA_PREFER_IP_ADDRESS:false}
+    hostname: ${EUREKA_INSTANCE_HOSTNAME:127.0.0.1}
+    instance-id: ${spring.application.name}:${eureka.instance.hostname}:${server.port}
+
+security:
+  jwt:
+    audience: ${SECURITY_JWT_AUDIENCE:endpoint-admin-service,frontend,account,serban-web}
+    allowed-client-ids: ${SECURITY_AUTH_ALLOWED_CLIENT_IDS:frontend,admin-cli,serban-web,account}
+
+endpoint-admin:
+  enrollment:
+    default-token-ttl-minutes: ${ENDPOINT_ADMIN_ENROLLMENT_DEFAULT_TOKEN_TTL_MINUTES:1440}
+    max-token-ttl-minutes: ${ENDPOINT_ADMIN_ENROLLMENT_MAX_TOKEN_TTL_MINUTES:10080}
+    token-pepper: ${ENDPOINT_ADMIN_ENROLLMENT_TOKEN_PEPPER:}
+    consume-rate-limit-per-minute: ${ENDPOINT_ADMIN_ENROLLMENT_CONSUME_RATE_LIMIT_PER_MINUTE:5}
+  secrets:
+    encryption-key: ${ENDPOINT_ADMIN_SECRET_ENCRYPTION_KEY:}
+    encryption-key-version: ${ENDPOINT_ADMIN_SECRET_ENCRYPTION_KEY_VERSION:local-v1}
+    rotation-grace-hours: ${ENDPOINT_ADMIN_SECRET_ROTATION_GRACE_HOURS:24}
+  agent-auth:
+    timestamp-window-seconds: ${ENDPOINT_ADMIN_AGENT_AUTH_TIMESTAMP_WINDOW_SECONDS:300}
+    nonce-ttl-seconds: ${ENDPOINT_ADMIN_AGENT_AUTH_NONCE_TTL_SECONDS:600}
+    nonce-cleanup-interval-ms: ${ENDPOINT_ADMIN_AGENT_AUTH_NONCE_CLEANUP_INTERVAL_MS:600000}
+    nonce-cleanup-initial-delay-ms: ${ENDPOINT_ADMIN_AGENT_AUTH_NONCE_CLEANUP_INITIAL_DELAY_MS:600000}
+  commands:
+    claim-ttl-seconds: ${ENDPOINT_ADMIN_COMMAND_CLAIM_TTL_SECONDS:300}
+  tenant:
+    local-default-tenant-id: ${ENDPOINT_ADMIN_LOCAL_DEFAULT_TENANT_ID:00000000-0000-0000-0000-000000000001}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    prometheus:
+      enabled: true
+    metrics:
+      enabled: true
+
+logging:
+  level:
+    org.springframework.security: INFO
+    org.springframework.web: INFO

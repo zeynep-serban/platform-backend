@@ -1,0 +1,2 @@
+-- Baseline migration for endpoint-admin-service.
+-- Domain tables are intentionally introduced in BE-003 with explicit contracts.
