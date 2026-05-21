@@ -98,12 +98,22 @@ public class AdminErasureController {
         boolean anyMutation = result.intentsErased() > 0
             || result.deliveriesAnonymized() > 0
             || result.inboxRowsDeleted() > 0;
-        return ResponseEntity.ok(Map.of(
-            "intents_erased", result.intentsErased(),
-            "deliveries_anonymized", result.deliveriesAnonymized(),
-            "inbox_rows_deleted", result.inboxRowsDeleted(),
-            "status", anyMutation ? "completed" : "no_op"
-        ));
+
+        // Codex 019e4950 P0 #1 absorb: KVKK Madde 13.2 ledger response.
+        // Caller'a request_id + due_at (30-gün) görünür yapılır → operator
+        // SLA takibi + Slack #compliance kanalı korelasyon için kullanır.
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("intents_erased", result.intentsErased());
+        body.put("deliveries_anonymized", result.deliveriesAnonymized());
+        body.put("inbox_rows_deleted", result.inboxRowsDeleted());
+        body.put("status", anyMutation ? "completed" : "no_op");
+        if (result.ledgerRequestId() != null) {
+            body.put("ledger_request_id", result.ledgerRequestId().toString());
+        }
+        if (result.dueAt() != null) {
+            body.put("due_at", result.dueAt().toString());
+        }
+        return ResponseEntity.ok(body);
     }
 
     /**

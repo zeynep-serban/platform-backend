@@ -129,6 +129,29 @@ class PiiRedactorTest {
     }
 
     @Test
+    void filterAuditDetails_keepsLedgerCorrelation_forKvkkArt13Event() {
+        // Faz 23.2 M3 R2 PR-K1 (Codex 019e4950 P0 #1) — KVKK Madde 13.2
+        // ledger correlation: erasure audit event'inde ledger_request_id +
+        // request_source + due_at hayatta kalmalı (DPO/legal audit trail).
+        Map<String, Object> raw = Map.of(
+            "ledger_request_id", "11111111-2222-3333-4444-555555555555",
+            "request_source", "SELF_SERVICE",
+            "due_at", "2026-06-20T11:30:00Z",
+            "evidence_ref", "self-service-kvkk-art-11",
+            "subscriber_id", "1204",
+            "leaked_pii", "should-be-dropped"
+        );
+        Map<String, Object> filtered = redactor.filterAuditDetails(raw);
+        assertThat(filtered).containsEntry(
+            "ledger_request_id", "11111111-2222-3333-4444-555555555555");
+        assertThat(filtered).containsEntry("request_source", "SELF_SERVICE");
+        assertThat(filtered).containsEntry("due_at", "2026-06-20T11:30:00Z");
+        assertThat(filtered).containsKey("evidence_ref");
+        assertThat(filtered).containsKey("subscriber_id");
+        assertThat(filtered).doesNotContainKey("leaked_pii");
+    }
+
+    @Test
     void hashRecipientThrowsOnNullArguments() {
         try {
             redactor.hashRecipient(null, "external", "user@example.com");

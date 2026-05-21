@@ -1,6 +1,7 @@
 package com.serban.notify.erasure;
 
 import com.serban.notify.audit.AuditEventPublisher;
+import com.serban.notify.domain.ErasureRequestLedger;
 import com.serban.notify.domain.NotificationDelivery;
 import com.serban.notify.domain.NotificationIntent;
 import com.serban.notify.repository.NotificationDeliveryRepository;
@@ -9,8 +10,10 @@ import com.serban.notify.repository.NotificationIntentRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -41,6 +44,7 @@ class ErasureServiceTest {
     private NotificationDeliveryRepository deliveryRepo;
     private NotificationInboxRepository inboxRepo;
     private AuditEventPublisher audit;
+    private ErasureRequestLedgerService ledgerService;
     private ErasureService service;
 
     @BeforeEach
@@ -49,7 +53,26 @@ class ErasureServiceTest {
         deliveryRepo = mock(NotificationDeliveryRepository.class);
         inboxRepo = mock(NotificationInboxRepository.class);
         audit = mock(AuditEventPublisher.class);
-        service = new ErasureService(intentRepo, deliveryRepo, inboxRepo, audit);
+        ledgerService = mock(ErasureRequestLedgerService.class);
+
+        // Default ledger stub — every openRequest returns a fresh entry
+        // with synthetic UUID + due_at (KVKK 30-day SLA). Tests can
+        // override by re-stubbing when needed.
+        ErasureRequestLedger stub = new ErasureRequestLedger();
+        stub.setRequestId(UUID.fromString("00000000-0000-0000-0000-000000001204"));
+        stub.setOrgId("acme");
+        stub.setSubjectRefHmac("hmac-redacted");
+        stub.setRequestSource(ErasureRequestLedger.RequestSource.ADMIN);
+        stub.setStatus(ErasureRequestLedger.Status.RECEIVED);
+        stub.setReceivedAt(OffsetDateTime.now());
+        stub.setDueAt(OffsetDateTime.now().plusDays(30));
+        stub.setIdempotencyKey("admin-acme-test");
+        when(ledgerService.openRequest(anyString(), anyString(), anyString(), any()))
+            .thenReturn(stub);
+        when(ledgerService.openRequest(anyString(), anyString(), any(), any()))
+            .thenReturn(stub);
+
+        service = new ErasureService(intentRepo, deliveryRepo, inboxRepo, audit, ledgerService);
     }
 
     @Test
@@ -220,6 +243,53 @@ class ErasureServiceTest {
 
         assertThat(result.intentsErased()).isEqualTo(1);
         assertThat(result.inboxRowsDeleted()).isEqualTo(5);
+    }
+
+    @Test
+    void legalHoldLedgerThrowsAndBlocksErasure() {
+        // Codex 019e499c REVISE P1 #3 absorb: LEGAL_HOLD durumundaki
+        // ledger row üzerinde erasure çalıştırılamaz.
+        ErasureRequestLedger holdEntry = new ErasureRequestLedger();
+        holdEntry.setRequestId(UUID.fromString("00000000-0000-0000-0000-00000000beef"));
+        holdEntry.setOrgId("acme");
+        holdEntry.setStatus(ErasureRequestLedger.Status.LEGAL_HOLD);
+        holdEntry.setLegalHoldReasonCode("COURT_ORDER");
+        holdEntry.setDueAt(OffsetDateTime.now().plusDays(30));
+        when(ledgerService.openRequest(anyString(), anyString(), any(), any()))
+            .thenReturn(holdEntry);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+            service.eraseSubscriber(new ErasureService.EraseRequest(
+                "acme", "1204", "subject_request", "court-order-ticket"
+            ))
+        ).isInstanceOf(ErasureService.LegalHoldException.class);
+
+        // Erasure işlemleri YAPILMAMALI — intent/delivery/inbox repo
+        // hiç çağrılmamış olmalı.
+        verify(intentRepo, never()).findIntentsBySubscriber(anyString(), anyString());
+        verify(inboxRepo, never()).deleteByOrgIdAndSubscriberId(anyString(), anyString());
+    }
+
+    @Test
+    void completedLedgerReturnsIdempotentNoOpWithoutMutating() {
+        // Idempotent ikinci çağrı — ledger zaten COMPLETED → no-op.
+        ErasureRequestLedger completedEntry = new ErasureRequestLedger();
+        completedEntry.setRequestId(UUID.fromString("00000000-0000-0000-0000-000000003456"));
+        completedEntry.setOrgId("acme");
+        completedEntry.setStatus(ErasureRequestLedger.Status.COMPLETED);
+        completedEntry.setDueAt(OffsetDateTime.now().plusDays(30));
+        completedEntry.setClosedAt(OffsetDateTime.now());
+        when(ledgerService.openRequest(anyString(), anyString(), any(), any()))
+            .thenReturn(completedEntry);
+
+        var result = service.eraseSubscriber(new ErasureService.EraseRequest(
+            "acme", "1204", "subject_request", "ticket-replay"
+        ));
+
+        assertThat(result.intentsErased()).isZero();
+        assertThat(result.inboxRowsDeleted()).isZero();
+        // Hiçbir erasure işlemi yapılmadı
+        verify(intentRepo, never()).findIntentsBySubscriber(anyString(), anyString());
     }
 
     private NotificationIntent newIntent(String intentId, Map<String, Object> payload) {

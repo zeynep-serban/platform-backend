@@ -93,7 +93,11 @@ public class PiiRedactor {
         "segment_count",             // SMS billed segment sayısı (JetSMS multipart, NetGSM concat)
         "encoding",                  // SMS provider encoding label (ISO-8859-9, UCS-2, GSM-7)
         // Faz 23.3.2 PR-A3.1.1 (Codex P2 absorb): JetSMS SOAP outbound channel
-        "actual_channel"             // SMS provider channel kodu (JetSMS VFO/VF)
+        "actual_channel",            // SMS provider channel kodu (JetSMS VFO/VF)
+        // Faz 23.2 M3 R2 PR-K1 (Codex 019e4950 P0 #1 absorb): KVKK Madde 13.2 ledger
+        "ledger_request_id",         // erasure_request_ledger.request_id (audit chain)
+        "request_source",            // SELF_SERVICE / ADMIN / LEGAL / DPO / COMPLIANCE_AUDIT
+        "due_at"                     // KVKK 30-gün SLA hedef tarihi (UTC ISO)
     );
 
     private final NotifyConfig.RedactionConfig redactionConfig;
