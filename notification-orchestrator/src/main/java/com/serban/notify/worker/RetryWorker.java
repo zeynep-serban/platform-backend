@@ -329,7 +329,7 @@ public class RetryWorker {
                 delivery.getRecipientHash(), delivery.getChannel(), details);
         }
 
-        metrics.dispatchOutcome(delivery.getChannel(), result.status().name());
+        metrics.dispatchOutcome(delivery.getChannel(), result.status().name(), intent.getOrgId());
 
         // Post-attempt: if exhausted on this attempt → DLQ (DLQ resolves intent terminal)
         if (delivery.getStatus() == NotificationDelivery.Status.RETRY
@@ -371,7 +371,7 @@ public class RetryWorker {
         reloaded.setProcessingOwner(null);
         reloaded.setClaimToken(null);
         intentRepo.save(reloaded);
-        metrics.intentTerminated(terminal.name());
+        metrics.intentTerminated(terminal.name(), reloaded.getOrgId());
         log.info("RetryWorker resolved intent terminal: intentId={} terminal={}",
             intent.getIntentId(), terminal);
     }

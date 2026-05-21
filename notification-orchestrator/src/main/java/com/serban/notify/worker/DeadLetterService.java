@@ -124,7 +124,7 @@ public class DeadLetterService {
                 intent.setProcessingOwner(null);
                 intent.setClaimToken(null);
                 intentRepo.save(intent);
-                metrics.intentTerminated(terminal.name());
+                metrics.intentTerminated(terminal.name(), intent.getOrgId());
             }
         }
 

@@ -149,7 +149,7 @@ public class OutboxPoller {
             intentRepo.save(intent);
             audit.publish("INTENT_EXPIRED", intent, null, null,
                 Map.of("expire_at", String.valueOf(intent.getExpireAt())));
-            metrics.intentTerminated("EXPIRED");
+            metrics.intentTerminated("EXPIRED", intent.getOrgId());
         }
         return expired.size();
     }
@@ -230,7 +230,7 @@ public class OutboxPoller {
             // double-write race-free since save is last write wins).
             if (reloaded.getStatus() != terminal) {
                 reloaded.setStatus(terminal);
-                metrics.intentTerminated(terminal.name());
+                metrics.intentTerminated(terminal.name(), reloaded.getOrgId());
             }
             if (reloaded.getTerminatedAt() == null) {
                 reloaded.setTerminatedAt(now);
@@ -243,7 +243,7 @@ public class OutboxPoller {
 
         // Per-channel outcome metrics
         for (var d : deliveries) {
-            metrics.dispatchOutcome(d.getChannel(), d.getStatus().name());
+            metrics.dispatchOutcome(d.getChannel(), d.getStatus().name(), intent.getOrgId());
         }
     }
 

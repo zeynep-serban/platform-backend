@@ -92,10 +92,29 @@ public class WorkerMetrics {
             .register(registry).increment(amount);
     }
 
-    public void dispatchOutcome(String channel, String status) {
+    /**
+     * Dispatch outcome counter with org_id tag for per-tenant breakdown
+     * (Faz 23.8 M7 T4.3.6 follow-up — per-tenant Grafana dashboard activation
+     * için backend `org_id` Counter Tag retrofit; Codex 019e4bf5 P3 follow-up).
+     *
+     * <p>Cardinality: orgId per-tenant; default cluster ~1-10 org; M8
+     * multi-tenant ramp ~100-500 org. Channel/status combinatoric cap
+     * intent-based (channel × status ~6 × 8 = 48 per org); 500 × 48 = 24000
+     * series — Prometheus default cardinality safe (recommended &lt;100K).
+     */
+    public void dispatchOutcome(String channel, String status, String orgId) {
         Counter.builder("notify.dispatch.outcome")
-            .tags(Tags.of("channel", channel, "status", status))
+            .tags(Tags.of("channel", channel, "status", status, "org_id", orgIdTagValue(orgId)))
             .register(registry).increment();
+    }
+
+    /**
+     * Backward-compat overload — passes "unknown" for org_id. Deprecated;
+     * new callers MUST provide orgId for per-tenant dashboard activation.
+     */
+    @Deprecated
+    public void dispatchOutcome(String channel, String status) {
+        dispatchOutcome(channel, status, "unknown");
     }
 
     public void retryScheduled(String channel) {
@@ -110,10 +129,28 @@ public class WorkerMetrics {
             .register(registry).increment();
     }
 
-    public void intentTerminated(String terminal) {
+    /**
+     * Intent terminal transition counter with org_id tag for per-tenant
+     * breakdown (Faz 23.8 M7 T4.3.6 follow-up — Codex 019e4bf5 P3).
+     */
+    public void intentTerminated(String terminal, String orgId) {
         Counter.builder("notify.intent.terminated")
-            .tags(Tags.of("terminal", terminal))
+            .tags(Tags.of("terminal", terminal, "org_id", orgIdTagValue(orgId)))
             .register(registry).increment();
+    }
+
+    /** Backward-compat overload. Deprecated; new callers pass orgId. */
+    @Deprecated
+    public void intentTerminated(String terminal) {
+        intentTerminated(terminal, "unknown");
+    }
+
+    /**
+     * org_id tag value normalization — null/blank → "unknown" (cardinality
+     * safety; metric label can't be null in Micrometer).
+     */
+    private static String orgIdTagValue(String orgId) {
+        return (orgId == null || orgId.isBlank()) ? "unknown" : orgId;
     }
 
     public void error(String worker, String stage) {
