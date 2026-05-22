@@ -47,7 +47,11 @@ public class EmailSuppression {
         DSN,
         PROVIDER_WEBHOOK,
         MANUAL_API,
-        SMTP_IMMEDIATE
+        SMTP_IMMEDIATE,
+        /** Faz 23.8 M7 T4.3.5 — Office 365 Postmaster ARF mailbox-pull FBL. */
+        ARF_MAILBOX,
+        /** Faz 23.8 M7 T4.3.5 — forward-compat webhook-push FBL (no PR-1 caller). */
+        POSTMASTER_WEBHOOK
     }
 
     @jakarta.persistence.Id
@@ -95,7 +99,11 @@ public class EmailSuppression {
     @Column(name = "last_provider", length = 64)
     private String lastProvider;
 
-    @Column(name = "last_provider_msg_id", length = 128)
+    // V22 widened last_provider_msg_id 128 -> 255 (align with
+    // notification_delivery.provider_msg_id); entity mapping kept in sync so
+    // Hibernate ddl-auto=validate does not fail context startup
+    // (Codex 019e4fc6 iter-2 HIGH #2).
+    @Column(name = "last_provider_msg_id", length = 255)
     private String lastProviderMsgId;
 
     @Column(name = "last_event_fingerprint", length = 128)

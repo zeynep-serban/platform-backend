@@ -2,6 +2,7 @@ package com.serban.notify.repository;
 
 import com.serban.notify.domain.NotificationDelivery;
 import com.serban.notify.repository.projection.DeliveryLogRow;
+import com.serban.notify.repository.projection.FblDeliveryResolution;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -27,6 +28,45 @@ public interface NotificationDeliveryRepository extends JpaRepository<Notificati
      */
     Optional<NotificationDelivery> findByIntentIdAndChannelAndRecipientHash(
         String intentId, String channel, String recipientHash
+    );
+
+    /**
+     * FBL tenant + recipient resolution by provider_msg_id correlation
+     * (Faz 23.8 M7 T4.3.5 — Codex 019e4fc6).
+     *
+     * <p>An ARF spam-complaint report carries no platform {@code org_id}.
+     * The FBL service extracts {@code X-Notify-Message-ID} / original
+     * {@code Message-ID} candidates from the ARF original-message part and
+     * correlates them here against {@code provider_msg_id} (which carries
+     * the {@code uq_delivery_provider_msg_id} UNIQUE index — at most one
+     * row). The join to {@code NotificationIntent} yields the tenant
+     * {@code org_id}.
+     *
+     * <p>Returns the authoritative {@code recipient_hash} straight from the
+     * delivery row — callers MUST NOT recompute it from the ARF address.
+     *
+     * <p>Codex 019e4fc6 iter-2 HIGH #1: the query is restricted to
+     * {@code channel = 'email'}. Subscriber SMS and subscriber email
+     * deliveries both hash the {@code subscriberId} into {@code
+     * recipient_hash}; without the channel filter a forged or coincidental
+     * ARF correlator matching a non-email delivery could write an
+     * email-channel suppression row for that subscriber — permanently
+     * blocking their email. An ARF spam complaint is, by definition,
+     * about an email delivery.
+     */
+    @Query("""
+        SELECT i.orgId AS orgId,
+               d.recipientHash AS recipientHash,
+               d.recipientType AS recipientType,
+               d.intentId AS intentId,
+               d.channel AS channel
+        FROM NotificationDelivery d
+        JOIN NotificationIntent i ON i.intentId = d.intentId
+        WHERE d.providerMsgId = :providerMsgId
+          AND d.channel = 'email'
+        """)
+    Optional<FblDeliveryResolution> resolveFblByProviderMsgId(
+        @Param("providerMsgId") String providerMsgId
     );
 
     /**

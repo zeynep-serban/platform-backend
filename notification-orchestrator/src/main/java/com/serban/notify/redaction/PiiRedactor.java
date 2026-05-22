@@ -101,7 +101,10 @@ public class PiiRedactor {
         // Faz 23.2 M3 R2 PR-K1 (Codex 019e4950 P0 #1 absorb): KVKK Madde 13.2 ledger
         "ledger_request_id",         // erasure_request_ledger.request_id (audit chain)
         "request_source",            // SELF_SERVICE / ADMIN / LEGAL / DPO / COMPLIANCE_AUDIT
-        "due_at"                     // KVKK 30-gün SLA hedef tarihi (UTC ISO)
+        "due_at",                    // KVKK 30-gün SLA hedef tarihi (UTC ISO)
+        // Faz 23.8 M7 T4.3.5 FBL (Codex 019e4fc6): spam-complaint audit fields
+        "feedback_type",             // ARF Feedback-Type (abuse) — RFC 5965
+        "event_fingerprint"          // email_bounce_event idempotency key (SHA-256 hex)
     );
 
     private final NotifyConfig.RedactionConfig redactionConfig;
