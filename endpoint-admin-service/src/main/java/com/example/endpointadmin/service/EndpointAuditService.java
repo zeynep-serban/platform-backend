@@ -45,6 +45,7 @@ public class EndpointAuditService {
         return repository.save(event);
     }
 
+
     public List<EndpointAuditEventDto> listEvents(UUID tenantId,
                                                   UUID deviceId,
                                                   UUID commandId,
