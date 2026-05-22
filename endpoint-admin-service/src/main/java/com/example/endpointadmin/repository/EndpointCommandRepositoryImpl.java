@@ -41,6 +41,7 @@ public class EndpointCommandRepositoryImpl implements EndpointCommandRepositoryC
                     WHERE c.status = 'QUEUED'
                       AND c.visible_after_at <= :now
                       AND (c.expires_at IS NULL OR c.expires_at > :now)
+                      AND c.approval_status IN ('NOT_REQUIRED', 'APPROVED')
                       AND d.status = 'ONLINE'
                     ORDER BY c.priority ASC, c.issued_at ASC
                     FOR UPDATE SKIP LOCKED

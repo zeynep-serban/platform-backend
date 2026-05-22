@@ -1,5 +1,6 @@
 package com.example.endpointadmin.dto.v1.admin;
 
+import com.example.endpointadmin.model.ApprovalStatus;
 import com.example.endpointadmin.model.CommandStatus;
 import com.example.endpointadmin.model.CommandType;
 
@@ -14,6 +15,7 @@ public record EndpointCommandDto(
         CommandType type,
         String idempotencyKey,
         CommandStatus status,
+        ApprovalStatus approvalStatus,
         Map<String, Object> payload,
         Integer priority,
         Integer attemptCount,

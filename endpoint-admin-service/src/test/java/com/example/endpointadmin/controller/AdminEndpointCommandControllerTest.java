@@ -2,6 +2,7 @@ package com.example.endpointadmin.controller;
 
 import com.example.endpointadmin.config.SecurityConfigLocal;
 import com.example.endpointadmin.dto.v1.admin.EndpointCommandDto;
+import com.example.endpointadmin.model.ApprovalStatus;
 import com.example.endpointadmin.model.CommandStatus;
 import com.example.endpointadmin.model.CommandType;
 import com.example.endpointadmin.security.AdminTenantContext;
@@ -69,6 +70,7 @@ class AdminEndpointCommandControllerTest {
                 .andExpect(jsonPath("$.deviceId").value(DEVICE_ID.toString()))
                 .andExpect(jsonPath("$.type").value("COLLECT_INVENTORY"))
                 .andExpect(jsonPath("$.status").value("QUEUED"))
+                .andExpect(jsonPath("$.approvalStatus").value("NOT_REQUIRED"))
                 .andExpect(jsonPath("$.payload.reason").value("inventory refresh"));
 
         verify(commandService).createCommand(eq(context), eq(DEVICE_ID), any());
@@ -110,11 +112,37 @@ class AdminEndpointCommandControllerTest {
                 .andExpect(jsonPath("$[0].status").value("QUEUED"));
     }
 
+    @Test
+    void approveCommandReturnsApprovalDecision() throws Exception {
+        AdminTenantContext context = adminContext();
+        when(tenantContextResolver.resolveRequired()).thenReturn(context);
+        when(commandService.approveCommand(eq(context), eq(COMMAND_ID), any()))
+                .thenReturn(commandDto(ApprovalStatus.APPROVED));
+
+        mockMvc.perform(post("/api/v1/admin/endpoint-commands/{commandId}/approval", COMMAND_ID)
+                        .contentType("application/json")
+                        .content("""
+                                {
+                                  "decision": "APPROVE",
+                                  "reason": "verified with security team"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(COMMAND_ID.toString()))
+                .andExpect(jsonPath("$.approvalStatus").value("APPROVED"));
+
+        verify(commandService).approveCommand(eq(context), eq(COMMAND_ID), any());
+    }
+
     private AdminTenantContext adminContext() {
         return new AdminTenantContext(TENANT_ID, "admin@example.com");
     }
 
     private EndpointCommandDto commandDto() {
+        return commandDto(ApprovalStatus.NOT_REQUIRED);
+    }
+
+    private EndpointCommandDto commandDto(ApprovalStatus approvalStatus) {
         Instant now = Instant.parse("2026-04-28T10:00:00Z");
         return new EndpointCommandDto(
                 COMMAND_ID,
@@ -123,6 +151,7 @@ class AdminEndpointCommandControllerTest {
                 CommandType.COLLECT_INVENTORY,
                 "inventory-001",
                 CommandStatus.QUEUED,
+                approvalStatus,
                 Map.of("reason", "inventory refresh"),
                 100,
                 0,

@@ -38,6 +38,10 @@ public interface EndpointCommandRepository extends JpaRepository<EndpointCommand
               and command.visibleAfterAt <= :now
               and (command.expiresAt is null or command.expiresAt > :now)
               and command.attemptCount < command.maxAttempts
+              and command.approvalStatus in (
+                    com.example.endpointadmin.model.ApprovalStatus.NOT_REQUIRED,
+                    com.example.endpointadmin.model.ApprovalStatus.APPROVED
+              )
               and (
                     command.status = :queuedStatus
                     or (
@@ -66,4 +70,15 @@ public interface EndpointCommandRepository extends JpaRepository<EndpointCommand
             """)
     Optional<EndpointCommand> findByIdAndDeviceIdForUpdate(@Param("commandId") UUID commandId,
                                                            @Param("deviceId") UUID deviceId);
+
+    /** BE-017 — pessimistic-lock load for the dual-control approval decision. */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("""
+            select command
+            from EndpointCommand command
+            where command.tenantId = :tenantId
+              and command.id = :commandId
+            """)
+    Optional<EndpointCommand> findByTenantIdAndIdForUpdate(@Param("tenantId") UUID tenantId,
+                                                           @Param("commandId") UUID commandId);
 }

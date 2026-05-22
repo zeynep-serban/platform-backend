@@ -1,6 +1,7 @@
 package com.example.endpointadmin.controller;
 
 import com.example.commonauth.openfga.RequireModule;
+import com.example.endpointadmin.dto.v1.admin.ApproveEndpointCommandRequest;
 import com.example.endpointadmin.dto.v1.admin.CreateEndpointCommandRequest;
 import com.example.endpointadmin.dto.v1.admin.EndpointCommandDto;
 import com.example.endpointadmin.security.AdminTenantContext;
@@ -50,6 +51,19 @@ public class AdminEndpointCommandController {
         }
         AdminTenantContext context = tenantContextResolver.resolveRequired();
         return commandService.createCommand(context, request.deviceId(), request);
+    }
+
+    /**
+     * BE-017 — a second admin records the dual-control decision on a
+     * destructive command pending approval. Manager-relation gated; the
+     * service enforces that the approver is not the issuer.
+     */
+    @PostMapping("/endpoint-commands/{commandId}/approval")
+    @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.MANAGER)
+    public EndpointCommandDto approveCommand(@PathVariable UUID commandId,
+                                             @Valid @RequestBody ApproveEndpointCommandRequest request) {
+        AdminTenantContext context = tenantContextResolver.resolveRequired();
+        return commandService.approveCommand(context, commandId, request);
     }
 
     @GetMapping("/endpoint-commands")

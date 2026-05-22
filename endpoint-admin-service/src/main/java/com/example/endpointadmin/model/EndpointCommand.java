@@ -63,6 +63,11 @@ public class EndpointCommand {
     @Column(name = "status", nullable = false, length = 32)
     private CommandStatus status = CommandStatus.QUEUED;
 
+    /** BE-017 — dual-control approval gate, orthogonal to {@link #status}. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "approval_status", nullable = false, length = 32)
+    private ApprovalStatus approvalStatus = ApprovalStatus.NOT_REQUIRED;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "payload", nullable = false, columnDefinition = "jsonb")
     private Map<String, Object> payload = new HashMap<>();
@@ -186,6 +191,14 @@ public class EndpointCommand {
 
     public void setStatus(CommandStatus status) {
         this.status = status;
+    }
+
+    public ApprovalStatus getApprovalStatus() {
+        return approvalStatus;
+    }
+
+    public void setApprovalStatus(ApprovalStatus approvalStatus) {
+        this.approvalStatus = approvalStatus;
     }
 
     public Map<String, Object> getPayload() {
