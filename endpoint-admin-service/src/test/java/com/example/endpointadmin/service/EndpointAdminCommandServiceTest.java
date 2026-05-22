@@ -1,5 +1,6 @@
 package com.example.endpointadmin.service;
 
+import com.example.endpointadmin.audit.NoOpAuditChainLock;
 import com.example.endpointadmin.config.TimeConfig;
 import com.example.endpointadmin.dto.v1.admin.CreateEndpointCommandRequest;
 import com.example.endpointadmin.dto.v1.admin.EndpointCommandDto;
@@ -34,7 +35,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("test")
-@Import({TimeConfig.class, EndpointAdminCommandService.class, EndpointAuditService.class})
+@Import({TimeConfig.class, EndpointAdminCommandService.class, EndpointAuditService.class,
+        NoOpAuditChainLock.class})
 class EndpointAdminCommandServiceTest {
 
     private static final UUID TENANT_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");

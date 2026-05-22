@@ -104,6 +104,30 @@
             <artifactId>h2</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- BE-016 (Codex 019e4f8e): PostgreSQL Testcontainers for the
+             append-only trigger + pg_advisory_xact_lock integration test.
+             H2 (PostgreSQL mode) cannot reliably exercise the UPDATE/DELETE
+             reject trigger or real advisory locking — those need a genuine
+             Postgres engine. H2 still covers hash canonicalization +
+             service-flow unit tests. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>1.20.4</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>1.20.4</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>1.20.4</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <dependencyManagement>

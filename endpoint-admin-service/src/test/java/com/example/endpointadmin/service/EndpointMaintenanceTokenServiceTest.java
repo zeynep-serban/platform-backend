@@ -40,6 +40,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         TimeConfig.class,
         EndpointMaintenanceTokenService.class,
         EndpointAuditService.class,
+        com.example.endpointadmin.audit.NoOpAuditChainLock.class,
         EnrollmentTokenGenerator.class,
         EnrollmentTokenHasher.class
 })

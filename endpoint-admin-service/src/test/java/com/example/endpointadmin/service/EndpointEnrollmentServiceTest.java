@@ -42,6 +42,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         EndpointDeviceService.class,
         DeviceCredentialService.class,
         EndpointAuditService.class,
+        com.example.endpointadmin.audit.NoOpAuditChainLock.class,
         EnrollmentTokenGenerator.class,
         EnrollmentTokenHasher.class,
         EnrollmentAttemptLimiter.class,

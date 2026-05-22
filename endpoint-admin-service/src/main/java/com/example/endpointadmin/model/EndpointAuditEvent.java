@@ -3,16 +3,18 @@ package com.example.endpointadmin.model;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.FetchType;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Index;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
+import org.springframework.data.domain.Persistable;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -32,11 +34,17 @@ import java.util.UUID;
                 @Index(name = "idx_endpoint_audit_events_type",
                         columnList = "event_type")
         })
-public class EndpointAuditEvent {
+public class EndpointAuditEvent implements Persistable<UUID> {
 
+    // BE-016: id is application-assigned (EndpointAuditService) because it is
+    // part of the canonical hash payload and must be known before INSERT.
+    // Persistable.isNew() drives Spring Data to call persist() (a clean
+    // INSERT) instead of merge() (which would issue a redundant SELECT).
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
+
+    @Transient
+    private boolean persisted = false;
 
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
@@ -76,6 +84,22 @@ public class EndpointAuditEvent {
     @Column(name = "occurred_at", nullable = false, updatable = false)
     private Instant occurredAt;
 
+    // BE-016 audit integrity hash-chain (Codex 019e4f8e). All four columns
+    // are nullable: legacy pre-BE-016 rows keep them NULL. The application
+    // layer (EndpointAuditService) populates them for every new row, and the
+    // DB-level append-only trigger makes the chain tamper-evident.
+    @Column(name = "prev_event_hash", length = 64, updatable = false)
+    private String prevEventHash;
+
+    @Column(name = "event_hash", length = 64, updatable = false)
+    private String eventHash;
+
+    @Column(name = "event_hash_alg", length = 32, updatable = false)
+    private String eventHashAlg;
+
+    @Column(name = "event_hash_version", updatable = false)
+    private Integer eventHashVersion;
+
     @PrePersist
     void prePersist() {
         if (occurredAt == null) {
@@ -83,8 +107,24 @@ public class EndpointAuditEvent {
         }
     }
 
+    @PostPersist
+    @PostLoad
+    void markPersisted() {
+        this.persisted = true;
+    }
+
+    @Override
     public UUID getId() {
         return id;
+    }
+
+    public void setId(UUID id) {
+        this.id = id;
+    }
+
+    @Override
+    public boolean isNew() {
+        return !persisted;
     }
 
     public UUID getTenantId() {
@@ -173,6 +213,38 @@ public class EndpointAuditEvent {
 
     public void setOccurredAt(Instant occurredAt) {
         this.occurredAt = occurredAt;
+    }
+
+    public String getPrevEventHash() {
+        return prevEventHash;
+    }
+
+    public void setPrevEventHash(String prevEventHash) {
+        this.prevEventHash = prevEventHash;
+    }
+
+    public String getEventHash() {
+        return eventHash;
+    }
+
+    public void setEventHash(String eventHash) {
+        this.eventHash = eventHash;
+    }
+
+    public String getEventHashAlg() {
+        return eventHashAlg;
+    }
+
+    public void setEventHashAlg(String eventHashAlg) {
+        this.eventHashAlg = eventHashAlg;
+    }
+
+    public Integer getEventHashVersion() {
+        return eventHashVersion;
+    }
+
+    public void setEventHashVersion(Integer eventHashVersion) {
+        this.eventHashVersion = eventHashVersion;
     }
 
     @Override
