@@ -192,6 +192,17 @@ public class DeliveryEligibilityService {
                 "can_receive", "template", intent.getTemplateId()
             );
             if (!decision.allowed()) {
+                // Faz 23.2 v2 (Codex 019e59eb REVISE absorb): per-channel
+                // authz deny counter (notify.authz.denied{channel,reason_class}).
+                // Layer-2 OpenFGA enforce path observability — drives Grafana
+                // dashboard + per-channel SLO alert. reasonClass normalized
+                // whitelist for cardinality safety.
+                if (workerMetrics != null) {
+                    workerMetrics.authzDeny(
+                        target.channel(),
+                        WorkerMetrics.classifyAuthzReason(decision.reason())
+                    );
+                }
                 return EligibilityDecision.blocked(
                     NotificationDelivery.Status.BLOCKED_BY_AUTHZ,
                     "authz_deny",
@@ -199,6 +210,28 @@ public class DeliveryEligibilityService {
                 );
             }
         }
+        // Channel-addressed recipients (slack/webhook/teams) currently SKIP
+        // Layer-2 OpenFGA authz. Codex 019e59eb + 019e59f3 REVISE: enforcement
+        // deferred — requires the following follow-up chain (in order):
+        //   (a) OpenFGA model extension: `notification_channel` type +
+        //       `notification_topic.can_receive: [subscriber, notification_channel]`
+        //       union; gitops repo `platform-k8s-gitops` →
+        //       `docs/notify/m3-supplement-openfga-model-extension-plan-2026-05-14.md`
+        //       (Phase 1 governance authority).
+        //   (b) permission-service `InternalAuthorizationController`
+        //       `principal_type` validation widening (accept
+        //       `notification_channel` or `channel`); platform-backend repo.
+        //   (c) Opaque channel-id pattern: raw webhook URL MUST NOT enter
+        //       OpenFGA tuple store / metric label / log; derive stable
+        //       opaque id from provider-config or routing endpoint record.
+        //   (d) Tuple seed/backfill runbook for existing channel deliveries
+        //       (so first enforce flip doesn't black-out live channels).
+        //   (e) Grafana/PrometheusRule update for
+        //       `notify_authz_denied_total{channel=slack|webhook|teams}`
+        //       canary alerts.
+        //   (f) Cluster canary evidence: enforce flag flip on TEST overlay
+        //       first, observe deny rate, then promote to prod.
+        // Subscriber/external Layer-2 fully enforced as of this PR.
 
         return EligibilityDecision.allow();
     }
