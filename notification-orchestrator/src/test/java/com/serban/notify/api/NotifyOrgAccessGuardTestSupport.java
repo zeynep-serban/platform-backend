@@ -52,7 +52,8 @@ final class NotifyOrgAccessGuardTestSupport {
                 "default",
                 List.of("subscriberId", "userId", "sub"),
                 false
-            )
+            ),
+            new NotifyConfig.KvkkConfig(false, List.of("userId", "uid"))
         );
         return new NotifyOrgAccessGuard(config, registry);
     }

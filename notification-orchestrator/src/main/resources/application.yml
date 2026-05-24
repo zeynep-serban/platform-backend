@@ -354,6 +354,23 @@ notify:
     # `notify_subscriber_identity_denied_total{reason=...}` counter.
     subscriber-identity-strict: ${NOTIFY_SECURITY_SUBSCRIBER_IDENTITY_STRICT:false}
 
+  # Faz 23.2.B PR-K6 — Tenant-scoped DPO authz (Codex thread `019e59ea`
+  # iter-3 AGREE absorb). When `dpo-authz-enabled=true`, AdminErasureController
+  # adds an OpenFGA `organization:<orgId>#can_erasure@user:<userId>` check
+  # on top of the existing ROLE_PRIVACY_OFFICER + NotifyOrgAccessGuard
+  # stack. Default `false` for backward-compat — operator flips per overlay
+  # once the OpenFGA model includes the `dpo` relation + per-org tuples
+  # are seeded + test burn-in evidence captured.
+  #
+  # dpo-user-id-claims: bounded JWT claim allowlist for resolving the
+  # OpenFGA `user:<numeric-id>` principal. Order matters — first non-blank
+  # claim value wins. `sub` is intentionally NOT permitted (Keycloak UUID
+  # ≠ OpenFGA numeric user id namespace). Operators tightening: set to
+  # `userId` alone once tokens always carry the canonical claim.
+  kvkk:
+    dpo-authz-enabled: ${NOTIFY_KVKK_DPO_AUTHZ_ENABLED:false}
+    dpo-user-id-claims: ${NOTIFY_KVKK_DPO_USER_ID_CLAIMS:userId,uid}
+
 logging:
   level:
     root: ${LOGGING_LEVEL_ROOT:INFO}

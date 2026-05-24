@@ -156,4 +156,64 @@ class InternalAuthorizationControllerTest {
                 .content(body))
             .andExpect(status().isBadRequest());
     }
+
+    /**
+     * Faz 23.2.B PR-K6 — tenant-scoped DPO authz.
+     *
+     * <p>Codex thread {@code 019e59ea} iter-1 mandatory fix: previous
+     * allowlist `^(subscriber|external)$` would 400 on `user`, which
+     * notification-orchestrator's {@code DpoAuthzService} sends as
+     * {@code principal_type=user} when checking
+     * {@code organization:<org-id>#can_erasure@user:<numeric-id>}.
+     *
+     * <p>Without this widening every K6 DPO check would fail-closed DENY
+     * at the permission-service boundary, hiding tuple correctness.
+     */
+    @Test
+    void userPrincipalAccepted_K6_dpoAuthz() throws Exception {
+        when(authzService.checkPrincipal(
+            "user:1204", "can_erasure", "organization", "org-X"
+        )).thenReturn(true);
+
+        String body = objectMapper.writeValueAsString(Map.of(
+            "principal_type", "user",
+            "principal_id", "1204",
+            "relation", "can_erasure",
+            "object_type", "organization",
+            "object_id", "org-X"
+        ));
+
+        mockMvc.perform(post("/api/v1/internal/authz/check")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.allowed").value(true))
+            .andExpect(jsonPath("$.reason").value("tuple_match"));
+    }
+
+    /**
+     * Faz 23.2.B PR-K6 — K6 negative path: user principal with no DPO
+     * tuple resolves to deny via OpenFGA Check.
+     */
+    @Test
+    void userPrincipal_noDpoTuple_returnsDeny() throws Exception {
+        when(authzService.checkPrincipal(
+            "user:9999", "can_erasure", "organization", "org-X"
+        )).thenReturn(false);
+
+        String body = objectMapper.writeValueAsString(Map.of(
+            "principal_type", "user",
+            "principal_id", "9999",
+            "relation", "can_erasure",
+            "object_type", "organization",
+            "object_id", "org-X"
+        ));
+
+        mockMvc.perform(post("/api/v1/internal/authz/check")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.allowed").value(false))
+            .andExpect(jsonPath("$.reason").value("no_tuple"));
+    }
 }

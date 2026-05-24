@@ -45,6 +45,23 @@ class AdminErasureControllerSecurityTest {
 
     @MockBean ErasureService erasureService;
     @MockBean NotifyOrgAccessGuard orgAccessGuard;
+    @MockBean com.serban.notify.authz.DpoAuthzService dpoAuthzService;
+    @MockBean com.serban.notify.authz.DpoUserIdResolver dpoUserIdResolver;
+
+    /**
+     * K6 default mock: DPO authz allows everything. This preserves
+     * the pre-K6 security-test invariant (legacy ROLE_PRIVACY_OFFICER
+     * + orgAccessGuard stack is what the test is exercising). Tests
+     * specific to K6 enforcement live in
+     * {@code AdminErasureControllerK6DpoAuthzTest}.
+     */
+    @org.junit.jupiter.api.BeforeEach
+    void setUpDpoAuthzDefault() {
+        when(dpoAuthzService.canEraseForOrg(
+            org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.any()
+        )).thenReturn(true);
+    }
 
     @Test
     @WithAnonymousUser

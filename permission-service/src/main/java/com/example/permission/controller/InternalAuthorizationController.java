@@ -51,6 +51,9 @@ import java.util.Map;
  *
  * <p>Principal type → OpenFGA user-ref mapping:
  * <ul>
+ *   <li>{@code user} → {@code user:{id}} (Faz 23.2.B PR-K6 — tenant-scoped
+ *       DPO authz: numeric user id from {@code userId}/{@code uid} JWT claim,
+ *       NOT the Keycloak UUID {@code sub})</li>
  *   <li>{@code subscriber} → {@code subscriber:{id}}</li>
  *   <li>{@code external} → {@code external:{id}} (id = email hash)</li>
  * </ul>
@@ -105,7 +108,10 @@ public class InternalAuthorizationController {
      *
      * <p>Validation:
      * <ul>
-     *   <li>principal_type: subscriber | external (lowercase, regex)</li>
+     *   <li>principal_type: user | subscriber | external (lowercase, regex)
+     *       — Faz 23.2.B PR-K6 widens `user` for tenant-scoped DPO authz
+     *       (organization#can_erasure@user:&lt;numeric-id&gt;); previous
+     *       allowlist was {subscriber, external} only.</li>
      *   <li>principal_id: alphanumeric + dash/underscore (no colons —
      *       avoid OpenFGA user-ref ambiguity)</li>
      *   <li>relation, object_type, object_id: non-blank, length-bounded</li>
@@ -120,8 +126,8 @@ public class InternalAuthorizationController {
     public record InternalAuthzCheckRequest(
         @JsonProperty("principal_type")
         @NotBlank
-        @Pattern(regexp = "^(subscriber|external)$",
-                 message = "principal_type must be 'subscriber' or 'external'")
+        @Pattern(regexp = "^(user|subscriber|external)$",
+                 message = "principal_type must be 'user', 'subscriber' or 'external'")
         String principalType,
 
         @JsonProperty("principal_id")

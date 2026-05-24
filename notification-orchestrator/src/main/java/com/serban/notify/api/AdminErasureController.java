@@ -1,6 +1,8 @@
 package com.serban.notify.api;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.serban.notify.authz.DpoAuthzService;
+import com.serban.notify.authz.DpoUserIdResolver;
 import com.serban.notify.erasure.ErasureService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -12,6 +14,7 @@ import jakarta.validation.constraints.Size;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -53,13 +56,19 @@ public class AdminErasureController {
 
     private final ErasureService erasureService;
     private final NotifyOrgAccessGuard orgAccessGuard;
+    private final DpoAuthzService dpoAuthzService;
+    private final DpoUserIdResolver dpoUserIdResolver;
 
     public AdminErasureController(
         ErasureService erasureService,
-        NotifyOrgAccessGuard orgAccessGuard
+        NotifyOrgAccessGuard orgAccessGuard,
+        DpoAuthzService dpoAuthzService,
+        DpoUserIdResolver dpoUserIdResolver
     ) {
         this.erasureService = erasureService;
         this.orgAccessGuard = orgAccessGuard;
+        this.dpoAuthzService = dpoAuthzService;
+        this.dpoUserIdResolver = dpoUserIdResolver;
     }
 
     @PostMapping
@@ -88,6 +97,34 @@ public class AdminErasureController {
         // org_id/tenant_id/allowed_orgs claim chain ile match check yapar;
         // cross-org çağrı 403 AccessDeniedException.
         orgAccessGuard.requireOrgAccessOrThrow(request.orgId());
+
+        // Faz 23.2.B PR-K6 (Codex thread `019e59ea` iter-3 AGREE absorb):
+        // tenant-scoped DPO authz least-privilege gate.
+        //
+        // The role+orgAccess stack above prevents cross-tenant access
+        // ("you can only act on orgs in your trusted JWT set") but does
+        // NOT enforce "this user is DPO for THIS specific org". When
+        // `notify.kvkk.dpo-authz-enabled=true`, this guard adds an
+        // OpenFGA `organization:<orgId>#can_erasure@user:<userId>`
+        // tuple check on top.
+        //
+        // Default OFF (rollout pattern): existing controllers continue
+        // with legacy role+orgAccess behavior until OpenFGA model is
+        // extended with `organization#can_erasure` + per-org `dpo`
+        // tuples are seeded + test overlay burn-in evidence captured.
+        //
+        // Fail-closed: missing userId claim (jwt.sub is NOT used — sub
+        // is the Keycloak UUID, not the OpenFGA numeric user id) ⇒
+        // DpoUserIdResolver returns null ⇒ DpoAuthzService denies when
+        // flag is on.
+        String dpoUserId = dpoUserIdResolver.resolveOrNull();
+        if (!dpoAuthzService.canEraseForOrg(dpoUserId, request.orgId())) {
+            log.info("KVKK erasure DPO authz denied: orgId={} userIdPresent={}",
+                request.orgId(), dpoUserId != null);
+            throw new AccessDeniedException(
+                "user is not DPO for org " + request.orgId()
+            );
+        }
 
         // Codex 019e4950 P1 absorb: PII leakage guard. subscriber_id ve
         // free-form reason INFO log'da görünür → KVKK Madde 12 (data

@@ -32,7 +32,8 @@ public record NotifyConfig(
     @NotNull AuditConfig audit,
     @NotNull RedactionConfig redaction,
     @NotNull WorkerConfig worker,
-    @NotNull SecurityConfig security
+    @NotNull SecurityConfig security,
+    @NotNull KvkkConfig kvkk
 ) {
 
     public record DispatchConfig(
@@ -172,4 +173,60 @@ public record NotifyConfig(
         // overload, update every test fixture to the three-arg form
         // (passing `false` to preserve legacy silent-pass behaviour).
     }
+
+    /**
+     * Faz 23.2.B PR-K6 — Tenant-Scoped DPO Authz config (Codex thread
+     * {@code 019e59ea} iter-3 AGREE absorb).
+     *
+     * <h3>{@code dpoAuthzEnabled}</h3>
+     *
+     * <p>Per-tenant DPO (Data Protection Officer) authorization gate on
+     * {@code AdminErasureController}. When {@code true}, the existing
+     * {@code ROLE_PRIVACY_OFFICER} + {@code NotifyOrgAccessGuard} stack is
+     * augmented with an OpenFGA tuple check
+     * {@code organization:<orgId>#can_erasure@user:<numericId>}.
+     *
+     * <p>Default {@code false} for backward-compat: in environments where
+     * the OpenFGA model has not yet been extended with the {@code dpo}
+     * relation, or DPO tuples have not been seeded, the legacy role+org
+     * stack stays primary. Operator flips per overlay once:
+     * <ol>
+     *   <li>OpenFGA model {@code 01KS8QE…} or successor includes
+     *       {@code organization#can_erasure: [user] or dpo or admin}</li>
+     *   <li>{@code organization:<id>#dpo@user:<id>} tuples seeded per org</li>
+     *   <li>Test overlay burn-in shows no unexpected 403 from
+     *       {@code DpoAuthzService}</li>
+     * </ol>
+     *
+     * <p>Fail-closed: when enabled, missing claim or unreachable
+     * permission-service ⇒ 403 (NOT default-allow).
+     *
+     * <h3>{@code dpoUserIdClaims}</h3>
+     *
+     * <p>Bounded JWT claim allowlist for resolving the OpenFGA
+     * {@code user:<numeric-id>} identity. Codex iter-2 absorb: the JWT
+     * {@code sub} claim is the Keycloak UUID, while OpenFGA tuples are
+     * written with the numeric DB user id (see
+     * {@code AuthorizationControllerV1} historical comment). Resolver
+     * scans the configured claim names in order and returns the first
+     * non-blank value; {@code sub} fallback is intentionally NOT
+     * permitted to prevent silent tuple-namespace mismatch.
+     *
+     * <p>Default {@code [userId, uid]} — {@code userId} is the canonical
+     * frontend-injected claim from auth-service / permission-service;
+     * {@code uid} is a documented legacy fallback. Operators tightening
+     * the contract set
+     * {@code NOTIFY_KVKK_DPO_USER_ID_CLAIMS=userId} once tokens always
+     * carry the canonical claim.
+     *
+     * <p>The {@link Pattern} restricts inputs to the four known names —
+     * typos in env override fail boot rather than silently disabling the
+     * resolver (matches the {@code subscriberIdentityClaims} pattern).
+     */
+    public record KvkkConfig(
+        @DefaultValue("false") boolean dpoAuthzEnabled,
+        @NotEmpty
+        @DefaultValue({"userId", "uid"})
+        List<@Pattern(regexp = "userId|uid|user_id|username") String> dpoUserIdClaims
+    ) {}
 }

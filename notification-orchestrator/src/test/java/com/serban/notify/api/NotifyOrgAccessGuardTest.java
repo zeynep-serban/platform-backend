@@ -177,7 +177,8 @@ class NotifyOrgAccessGuardTest {
             new NotifyConfig.AuditConfig(90, false, "0 0 2 * * *", 24, false, 3, true),
             new NotifyConfig.RedactionConfig("test-pepper"),
             new NotifyConfig.WorkerConfig(5000L, 25, 50, 60000L, ""),
-            security
+            security,
+            new NotifyConfig.KvkkConfig(false, List.of("userId", "uid"))
         );
         // Faz 24 / PR-5.1 (Codex thread `019e040c` PARTIAL iter-1):
         // pass the per-test MeterRegistry so each test can assert
