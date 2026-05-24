@@ -9,7 +9,12 @@ from pathlib import Path
 
 TYPE_LINE_RE = re.compile(r"^type\s+([a-zA-Z_][a-zA-Z0-9_]*)$")
 DEFINE_LINE_RE = re.compile(r"^define\s+([a-zA-Z_][a-zA-Z0-9_]*):\s+(.+)$")
-DIRECT_TYPE_RE = re.compile(r"\[([a-zA-Z_][a-zA-Z0-9_]*)\]")
+# Match the full bracket group; comma-split lets multi-type direct lists like
+# `[service_account, user]` render correctly (R23 Codex 019e59ed iter-2).
+# Single-type `[user]` still resolves to a single direct related type, so the
+# fix is backward-compatible with the legacy DSL slice (lines 1-76).
+DIRECT_BRACKET_RE = re.compile(r"\[([^\]]*)\]")
+IDENT_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 
 
 def parse_term(term: str) -> dict:
@@ -61,11 +66,31 @@ def build_type_definition(type_name: str, relations: dict[str, str]) -> dict:
 
     direct_types = []
     seen = set()
-    for match in DIRECT_TYPE_RE.findall(expr):
-      if match in seen:
-        continue
-      seen.add(match)
-      direct_types.append({"type": match, "condition": ""})
+    for bracket_match in DIRECT_BRACKET_RE.finditer(expr):
+      inner = bracket_match.group(1)
+      if not inner.strip():
+        # `[]` direct type list — official OpenFGA parser rejects.
+        raise ValueError(
+          f"Empty OpenFGA DSL direct type list in expression: {expr!r}"
+        )
+      for raw in inner.split(","):
+        ident = raw.strip()
+        if not ident:
+          # R23 Codex 019e59ed iter-3: empty comma token (`[user,]`,
+          # `[user,, service_account]`) is a DSL typo the official
+          # OpenFGA parser rejects. Fail-fast so renderer-authoritative
+          # path can't silently accept malformed direct type lists.
+          raise ValueError(
+            f"Empty OpenFGA DSL identifier in direct type list: '[{inner}]'"
+          )
+        if not IDENT_RE.fullmatch(ident):
+          raise ValueError(
+            f"Unsupported OpenFGA DSL identifier in direct type list: {ident!r}"
+          )
+        if ident in seen:
+          continue
+        seen.add(ident)
+        direct_types.append({"type": ident, "condition": ""})
 
     relation_meta[relation_name] = {
       "directly_related_user_types": direct_types,

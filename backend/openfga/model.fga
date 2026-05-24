@@ -74,3 +74,43 @@ type report_group
     define can_edit: [user] but not blocked
     define can_view: [user] or can_edit but not blocked
     define blocked: [user]
+
+# ── Faz 23.7 M3-supplement: Notification authorization (Codex 019e2651 Yol A) ──
+# Channel-level notification authz (ADR-0013 Layer 2). The notification-
+# orchestrator AuthzClient calls permission-service /api/v1/internal/authz/check
+# with {principal_type:subscriber, relation:can_receive, object_type:template}.
+# Until this extension the OpenFGA model held only ERP types, so every
+# subscriber-recipient delivery resolved to BLOCKED_BY_AUTHZ by construction.
+#
+# Topic-based inheritance (Codex refinement): a subscriber is granted
+# `can_receive` on a notification_topic; templates inherit it via their `topic`
+# relation. Per-template direct grant is intentionally NOT modeled — governance:
+# topic-scoped grants only, future topic-federation friendly.
+#
+# `template` is the transition-compat alias of `notification_template`: the
+# orchestrator AuthzClient currently sends object_type=template; once the
+# backend migrates to object_type=notification_template the `template` type
+# can be retired.
+
+type subscriber
+  relations
+    define member: [user]
+
+type service_account
+
+type notification_topic
+  relations
+    define can_receive: [subscriber]
+    define can_publish: [service_account, user]
+
+type notification_template
+  relations
+    define topic: [notification_topic]
+    define can_receive: can_receive from topic
+    define can_publish: can_publish from topic
+
+type template
+  relations
+    define topic: [notification_topic]
+    define can_receive: can_receive from topic
+    define can_publish: can_publish from topic
