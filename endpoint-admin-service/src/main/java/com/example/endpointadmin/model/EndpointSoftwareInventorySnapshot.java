@@ -112,6 +112,26 @@ public class EndpointSoftwareInventorySnapshot {
     @Column(name = "apps_available", nullable = false)
     private boolean appsAvailable = false;
 
+    // ── BE-021A AG-026A wingetEgress evidence (V9) ─────────────────────
+    // The four fields below are NULLable so they stay backwards-compatible
+    // with the BE-020I-only ingest path. They are populated together (or
+    // not at all) by the EndpointSoftwareInventoryService when an agent
+    // COLLECT_INVENTORY result carries the `inventory.wingetEgress` sibling
+    // block. BE-021A reads them inline for its install-preflight decision.
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "latest_winget_egress_command_result_id")
+    private EndpointCommandResult latestWingetEgressCommandResult;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "winget_egress", columnDefinition = "jsonb")
+    private Map<String, Object> wingetEgress;
+
+    @Column(name = "winget_egress_collected_at")
+    private Instant wingetEgressCollectedAt;
+
+    @Column(name = "winget_egress_schema_version")
+    private Integer wingetEgressSchemaVersion;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -277,6 +297,40 @@ public class EndpointSoftwareInventorySnapshot {
 
     public void setAppsAvailable(boolean appsAvailable) {
         this.appsAvailable = appsAvailable;
+    }
+
+    // ── BE-021A AG-026A wingetEgress accessors ─────────────────────────
+
+    public EndpointCommandResult getLatestWingetEgressCommandResult() {
+        return latestWingetEgressCommandResult;
+    }
+
+    public void setLatestWingetEgressCommandResult(EndpointCommandResult value) {
+        this.latestWingetEgressCommandResult = value;
+    }
+
+    public Map<String, Object> getWingetEgress() {
+        return wingetEgress;
+    }
+
+    public void setWingetEgress(Map<String, Object> wingetEgress) {
+        this.wingetEgress = wingetEgress;
+    }
+
+    public Instant getWingetEgressCollectedAt() {
+        return wingetEgressCollectedAt;
+    }
+
+    public void setWingetEgressCollectedAt(Instant wingetEgressCollectedAt) {
+        this.wingetEgressCollectedAt = wingetEgressCollectedAt;
+    }
+
+    public Integer getWingetEgressSchemaVersion() {
+        return wingetEgressSchemaVersion;
+    }
+
+    public void setWingetEgressSchemaVersion(Integer wingetEgressSchemaVersion) {
+        this.wingetEgressSchemaVersion = wingetEgressSchemaVersion;
     }
 
     public Instant getCreatedAt() {

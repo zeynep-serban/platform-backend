@@ -88,6 +88,23 @@ public class GlobalExceptionHandler {
                 "Request body could not be parsed.");
     }
 
+    /**
+     * BE-021A (Codex 019e6b88 iter-1 absorb): missing
+     * {@code @RequestParam} (e.g. {@code catalogItemId} omitted from the
+     * install-preflight GET) must surface as 400, not the generic
+     * {@code Exception} catch-all 500. Spring throws
+     * {@link org.springframework.web.bind.MissingServletRequestParameterException}.
+     */
+    @ExceptionHandler(org.springframework.web.bind.MissingServletRequestParameterException.class)
+    public ResponseEntity<ErrorResponse> handleMissingRequestParam(
+            org.springframework.web.bind.MissingServletRequestParameterException ex) {
+        String paramName = ex.getParameterName();
+        String paramType = ex.getParameterType();
+        String message = "Missing required parameter '" + paramName
+                + "' (" + paramType + ").";
+        return build(HttpStatus.BAD_REQUEST, "MISSING_PARAMETER", message);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleGeneric(Exception ex) {
         log.error("Unhandled exception", ex);

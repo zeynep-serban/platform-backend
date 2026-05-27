@@ -8,6 +8,8 @@ import com.example.endpointadmin.model.EndpointSoftwareInventorySnapshot;
 import com.example.endpointadmin.model.SoftwareInstallSource;
 import com.example.endpointadmin.repository.EndpointSoftwareInventorySnapshotRepository;
 import com.example.endpointadmin.security.AdminTenantContext;
+import com.example.endpointadmin.security.WinGetEgressPayloadPolicy;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
@@ -68,14 +70,18 @@ public class EndpointSoftwareInventoryService {
     private final EndpointSoftwareInventorySnapshotRepository snapshotRepository;
     private final EndpointAuditService auditService;
     private final Clock clock;
+    private final WinGetEgressPayloadPolicy winGetEgressPayloadPolicy;
 
+    @Autowired
     public EndpointSoftwareInventoryService(
             EndpointSoftwareInventorySnapshotRepository snapshotRepository,
             EndpointAuditService auditService,
-            Clock clock) {
+            Clock clock,
+            WinGetEgressPayloadPolicy winGetEgressPayloadPolicy) {
         this.snapshotRepository = snapshotRepository;
         this.auditService = auditService;
         this.clock = clock;
+        this.winGetEgressPayloadPolicy = winGetEgressPayloadPolicy;
     }
 
     // ----------------------------------------------------------------
@@ -107,7 +113,22 @@ public class EndpointSoftwareInventoryService {
             return IngestOutcome.SKIPPED;
         }
         Map<String, Object> inventory = extractInventoryMap(details);
-        if (inventory == null) {
+
+        // BE-021A AG-026A wingetEgress sibling capture: when the agent
+        // ships `details.inventory.wingetEgress` (or top-level
+        // `details.wingetEgress` flat layout), validate the block via
+        // the fail-closed WinGetEgressPayloadPolicy and prepare it for
+        // persistence. The egress block can ride alongside an inventory
+        // payload OR arrive by itself (the agent supports
+        // `includeWinGetEgress=true && includeSoftware=false`); when no
+        // inventory block is present the service still upserts the
+        // snapshot row so the egress evidence has a place to live.
+        Map<String, Object> wingetEgress = extractWingetEgressMap(details);
+        if (wingetEgress != null) {
+            winGetEgressPayloadPolicy.validate(wingetEgress);
+        }
+
+        if (inventory == null && wingetEgress == null) {
             return IngestOutcome.SKIPPED;
         }
 
@@ -126,16 +147,35 @@ public class EndpointSoftwareInventoryService {
             return s;
         });
 
-        // Always refresh summary fields when present in the payload.
-        applySummary(snapshot, inventory, now);
-        snapshot.setLatestSummaryCommandResult(result);
+        // Always refresh summary fields when the agent shipped a software
+        // inventory block. wingetEgress-only payloads (rare but supported
+        // by the agent's two independent `includeSoftware` /
+        // `includeWinGetEgress` opt-in bits) keep prior summary fields.
+        if (inventory != null) {
+            applySummary(snapshot, inventory, now);
+            snapshot.setLatestSummaryCommandResult(result);
+        } else if (firstIngest) {
+            // First-ingest wingetEgress-only path: the schemaVersion +
+            // supported NOT NULL DB columns still need defaults so the
+            // row can be inserted. Use the AG-026A egress schema
+            // version (always 1 today; agent supports independently)
+            // and Supported=true because the agent ran the preflight
+            // (Supported=false on non-Windows is handled by the agent
+            // and the wingetEgress block would NOT be present in that
+            // case — DetectSourceEgress returns the stub).
+            snapshot.setSchemaVersion(
+                    snapshot.getSchemaVersion() == null
+                            ? 1 : snapshot.getSchemaVersion());
+            snapshot.setSupported(true);
+            snapshot.setSummaryCollectedAt(now);
+        }
 
         // Full apps replacement only when the agent shipped the apps[] key
         // AND the value is an explicit array (Iterable). Codex 019e6ac8 P2
         // absorb: `apps: null` / `apps: "oops"` malformed payloads must
         // not wipe prior items; reject 400 instead. `apps: []` IS a valid
         // explicit "no software" snapshot and replaces items intentionally.
-        boolean hasAppsKey = inventory.containsKey("apps");
+        boolean hasAppsKey = inventory != null && inventory.containsKey("apps");
         Object appsNode = hasAppsKey ? inventory.get("apps") : null;
         boolean hasFullPayload = hasAppsKey && appsNode instanceof Iterable<?>;
         if (hasAppsKey && !hasFullPayload) {
@@ -154,6 +194,28 @@ public class EndpointSoftwareInventoryService {
             snapshot.setAppsCollectedAt(now);
             snapshot.setAppsStoredCount(next.size());
             snapshot.setAppsAvailable(true);
+        }
+
+        // BE-021A AG-026A wingetEgress materialization. The payload was
+        // already schema-validated by WinGetEgressPayloadPolicy above.
+        // Persist the full sanitised JSONB blob + collected-at + result
+        // FK + schema version. A future agent build that ships a new
+        // SourceEgressSchemaVersion will be rejected by the validator
+        // before reaching this branch (Codex 019e6b88 risk control —
+        // BLOCK winget_egress_schema_unsupported is computed by
+        // BE-021A from this stored schemaVersion).
+        boolean hasWingetEgress = wingetEgress != null;
+        if (hasWingetEgress) {
+            // Defensive copy: a downstream call could otherwise mutate the
+            // incoming details map and corrupt the persisted JSONB.
+            snapshot.setWingetEgress(new LinkedHashMap<>(wingetEgress));
+            snapshot.setWingetEgressCollectedAt(now);
+            snapshot.setLatestWingetEgressCommandResult(result);
+            Integer egressSchema = readInt(wingetEgress, "schemaVersion");
+            snapshot.setWingetEgressSchemaVersion(
+                    egressSchema != null
+                            ? egressSchema
+                            : WinGetEgressPayloadPolicy.ACCEPTED_SCHEMA_VERSION);
         }
 
         snapshotRepository.saveAndFlush(snapshot);
@@ -187,6 +249,16 @@ public class EndpointSoftwareInventoryService {
         auditMetadata.put("wingetReady", snapshot.getWingetReady());
         auditMetadata.put("fullSnapshot", hasFullPayload);
         auditMetadata.put("appsAvailable", snapshot.isAppsAvailable());
+        // BE-021A wingetEgress audit signals — schemaVersion + presence only.
+        // The raw JSONB blob is NOT included in audit metadata (Codex
+        // 019e6b88 acceptance: ingest audit must not carry raw egress
+        // / apps payloads).
+        auditMetadata.put("wingetEgressIngested", hasWingetEgress);
+        if (hasWingetEgress) {
+            auditMetadata.put(
+                    "wingetEgressSchemaVersion",
+                    snapshot.getWingetEgressSchemaVersion());
+        }
 
         auditService.record(
                 tenantId,
@@ -277,6 +349,54 @@ public class EndpointSoftwareInventoryService {
         // node only when it has at least one recognized inventory key.
         if (hasRecognizedSoftwareShape(details)) {
             return details;
+        }
+        return null;
+    }
+
+    /**
+     * BE-021A — extract the AG-026A {@code wingetEgress} block from a
+     * COLLECT_INVENTORY result payload regardless of the layout the
+     * agent shipped. Two recognised positions:
+     *
+     * <ul>
+     *   <li>{@code details.inventory.wingetEgress} — preferred (sibling
+     *       to {@code inventory.software}; the agent
+     *       {@code internal/inventory.Snapshot.WinGetEgress} field maps
+     *       here when {@code IncludeWinGetEgress=true}).</li>
+     *   <li>{@code details.wingetEgress} — flat fallback for agent
+     *       payload shapes that promote sub-blocks to the top level
+     *       (mirrors the BE-020I {@code details.{schemaVersion, apps, ...}}
+     *       flat layout tolerance).</li>
+     * </ul>
+     *
+     * <p>Returns {@code null} when neither position carries a block, or
+     * when the block is not a map (the latter is a validation failure
+     * caller surfaces via {@link WinGetEgressPayloadPolicy}).
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> extractWingetEgressMap(
+            Map<String, Object> details) {
+        Object inventoryNode = details.get("inventory");
+        if (inventoryNode instanceof Map<?, ?> inventoryMap) {
+            Object egressNode = ((Map<String, Object>) inventoryMap).get("wingetEgress");
+            if (egressNode instanceof Map<?, ?> egressMap) {
+                return (Map<String, Object>) egressMap;
+            }
+            if (egressNode != null) {
+                // Caller will reject through the policy validator.
+                throw new IllegalArgumentException(
+                        "details.inventory.wingetEgress must be an object, got "
+                                + egressNode.getClass().getSimpleName());
+            }
+        }
+        Object flat = details.get("wingetEgress");
+        if (flat instanceof Map<?, ?> flatMap) {
+            return (Map<String, Object>) flatMap;
+        }
+        if (flat != null) {
+            throw new IllegalArgumentException(
+                    "details.wingetEgress must be an object, got "
+                            + flat.getClass().getSimpleName());
         }
         return null;
     }

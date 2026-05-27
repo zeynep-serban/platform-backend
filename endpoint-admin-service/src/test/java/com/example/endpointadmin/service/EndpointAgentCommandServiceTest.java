@@ -40,7 +40,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         EndpointAuditService.class,
         com.example.endpointadmin.audit.NoOpAuditChainLock.class,
         EndpointSoftwareInventoryService.class,
-        com.example.endpointadmin.security.SoftwareInventoryPayloadPolicy.class
+        com.example.endpointadmin.security.SoftwareInventoryPayloadPolicy.class,
+        // BE-021A — the inventory service now also depends on the
+        // wingetEgress validator (fail-closed schema + PII guard).
+        com.example.endpointadmin.security.WinGetEgressPayloadPolicy.class
 })
 class EndpointAgentCommandServiceTest {
 

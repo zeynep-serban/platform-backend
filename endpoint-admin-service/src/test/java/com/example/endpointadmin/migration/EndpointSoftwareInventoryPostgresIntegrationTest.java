@@ -134,4 +134,65 @@ class EndpointSoftwareInventoryPostgresIntegrationTest {
                 "idx_endpoint_software_inventory_items_tenant_display_name_lower",
                 "idx_endpoint_software_inventory_items_tenant_publisher");
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // BE-021A V9 column + constraint + FK checks (Codex 019e6b88
+    // plan-time AGREE acceptance #1).
+
+    @Test
+    void v9DeclaresExpectedWingetEgressColumns() {
+        List<String> columns = jdbcTemplate.queryForList(
+                "SELECT column_name FROM information_schema.columns "
+                        + "WHERE table_schema = 'public' "
+                        + "AND table_name = 'endpoint_software_inventory_snapshots'",
+                String.class);
+        assertThat(columns).contains(
+                "winget_egress",
+                "winget_egress_collected_at",
+                "latest_winget_egress_command_result_id",
+                "winget_egress_schema_version");
+
+        String jsonbType = jdbcTemplate.queryForObject(
+                "SELECT data_type FROM information_schema.columns "
+                        + "WHERE table_schema = 'public' "
+                        + "AND table_name = 'endpoint_software_inventory_snapshots' "
+                        + "AND column_name = 'winget_egress'",
+                String.class);
+        assertThat(jsonbType).isEqualTo("jsonb");
+    }
+
+    @Test
+    void v9DeclaresEgressSchemaAndPairCheckConstraints() {
+        List<String> checks = jdbcTemplate.queryForList(
+                "SELECT conname FROM pg_catalog.pg_constraint "
+                        + "WHERE conrelid = "
+                        + "'public.endpoint_software_inventory_snapshots'::regclass "
+                        + "AND contype = 'c'",
+                String.class);
+        assertThat(checks).contains(
+                "ck_endpoint_software_inventory_snapshots_egress_schema",
+                "ck_endpoint_software_inventory_snapshots_egress_pair");
+    }
+
+    @Test
+    void v9DeclaresEgressForeignKeyWithSetNullCascade() {
+        List<String> egressForeignKeys = jdbcTemplate.queryForList(
+                "SELECT conname FROM pg_catalog.pg_constraint "
+                        + "WHERE conrelid = "
+                        + "'public.endpoint_software_inventory_snapshots'::regclass "
+                        + "AND contype = 'f' "
+                        + "AND conname = 'fk_endpoint_software_inventory_snapshots_egress_result'",
+                String.class);
+        assertThat(egressForeignKeys).hasSize(1);
+
+        // ON DELETE SET NULL semantics: when a referenced
+        // endpoint_command_results row is deleted, the FK column should
+        // be cleared rather than cascading the delete to the snapshot.
+        // pg_catalog.pg_constraint.confdeltype = 'n' for SET NULL.
+        String confdeltype = jdbcTemplate.queryForObject(
+                "SELECT confdeltype::text FROM pg_catalog.pg_constraint "
+                        + "WHERE conname = 'fk_endpoint_software_inventory_snapshots_egress_result'",
+                String.class);
+        assertThat(confdeltype).isEqualTo("n");
+    }
 }

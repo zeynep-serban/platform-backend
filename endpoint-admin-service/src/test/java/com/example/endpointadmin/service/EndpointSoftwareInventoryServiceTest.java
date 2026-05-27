@@ -56,7 +56,9 @@ import static org.assertj.core.api.Assertions.assertThat;
         TimeConfig.class,
         EndpointSoftwareInventoryService.class,
         EndpointAuditService.class,
-        NoOpAuditChainLock.class
+        NoOpAuditChainLock.class,
+        com.example.endpointadmin.security.SoftwareInventoryPayloadPolicy.class,
+        com.example.endpointadmin.security.WinGetEgressPayloadPolicy.class
 })
 class EndpointSoftwareInventoryServiceTest {
 
@@ -412,6 +414,206 @@ class EndpointSoftwareInventoryServiceTest {
         assertThat(snapshotRepository
                 .findByTenantIdAndDevice_Id(TENANT_A, device.getId()))
                 .isEmpty();
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // BE-021A AG-026A wingetEgress ingest tests
+
+    @Test
+    void wingetEgressBlockMaterializedAlongsideSummaryAndApps() {
+        EndpointDevice device = persistDevice(TENANT_A, "PC-A");
+        EndpointCommand command = persistCommand(device);
+        EndpointCommandResult result = persistResult(command);
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        inventory.put("schemaVersion", 1);
+        inventory.put("supported", true);
+        inventory.put("appCount", 1);
+        inventory.put("wingetReady", true);
+        inventory.put("apps", List.of(
+                appMap("7-Zip", "24.07", "Igor Pavlov", "HKLM")));
+        inventory.put("wingetEgress", wellFormedWingetEgress());
+        details.put("inventory", inventory);
+
+        EndpointSoftwareInventoryService.IngestOutcome outcome =
+                service.ingest(device, command, result, details);
+
+        assertThat(outcome).isEqualTo(
+                EndpointSoftwareInventoryService.IngestOutcome.INGESTED);
+        flushAndClear();
+
+        EndpointSoftwareInventorySnapshot saved = snapshotRepository
+                .findByTenantIdAndDevice_Id(TENANT_A, device.getId())
+                .orElseThrow();
+        assertThat(saved.getWingetEgress()).isNotNull();
+        assertThat(saved.getWingetEgressSchemaVersion()).isEqualTo(1);
+        assertThat(saved.getWingetEgressCollectedAt()).isNotNull();
+        assertThat(saved.getLatestWingetEgressCommandResult())
+                .as("egress result FK must point to ingest result")
+                .isNotNull();
+        assertThat(saved.getLatestWingetEgressCommandResult().getId())
+                .isEqualTo(result.getId());
+    }
+
+    @Test
+    void wingetEgressOnlyPayloadIsAcceptedFirstIngest() {
+        // includeWinGetEgress=true && includeSoftware=false agent path:
+        // wingetEgress arrives without an inventory.software block.
+        // The ingest service must still create the snapshot row so the
+        // egress evidence has a place to live (Codex 019e6b88 wire-
+        // shape contract).
+        EndpointDevice device = persistDevice(TENANT_A, "PC-A");
+        EndpointCommand command = persistCommand(device);
+        EndpointCommandResult result = persistResult(command);
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        inventory.put("wingetEgress", wellFormedWingetEgress());
+        details.put("inventory", inventory);
+
+        EndpointSoftwareInventoryService.IngestOutcome outcome =
+                service.ingest(device, command, result, details);
+
+        assertThat(outcome).isEqualTo(
+                EndpointSoftwareInventoryService.IngestOutcome.INGESTED);
+        flushAndClear();
+
+        EndpointSoftwareInventorySnapshot saved = snapshotRepository
+                .findByTenantIdAndDevice_Id(TENANT_A, device.getId())
+                .orElseThrow();
+        assertThat(saved.getWingetEgress()).isNotNull();
+        // Summary fields stay at defaults — agent did not ship them.
+        assertThat(saved.isAppsAvailable()).isFalse();
+        assertThat(saved.getAppCount()).isNull();
+    }
+
+    @Test
+    void wingetEgressSchemaMismatchIsRejected() {
+        EndpointDevice device = persistDevice(TENANT_A, "PC-A");
+        EndpointCommand command = persistCommand(device);
+        EndpointCommandResult result = persistResult(command);
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        Map<String, Object> egress = new LinkedHashMap<>(wellFormedWingetEgress());
+        egress.put("schemaVersion", 999); // not the pinned schema
+        inventory.put("wingetEgress", egress);
+        details.put("inventory", inventory);
+
+        try {
+            service.ingest(device, command, result, details);
+            assertThat(false).as("expected schema-mismatch reject").isTrue();
+        } catch (IllegalArgumentException ex) {
+            assertThat(ex.getMessage()).contains("schemaVersion");
+        }
+        flushAndClear();
+
+        // No snapshot row was inserted for the rejected payload.
+        assertThat(snapshotRepository
+                .findByTenantIdAndDevice_Id(TENANT_A, device.getId()))
+                .isEmpty();
+    }
+
+    @Test
+    void wingetEgressForbiddenPiiIsRejected() {
+        EndpointDevice device = persistDevice(TENANT_A, "PC-A");
+        EndpointCommand command = persistCommand(device);
+        EndpointCommandResult result = persistResult(command);
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        Map<String, Object> egress = new LinkedHashMap<>(wellFormedWingetEgress());
+        // Smuggle a SID literal into a free-form error reason: the
+        // WinGetEgressPayloadPolicy must catch it via the inherited
+        // SoftwareInventoryPayloadPolicy regex set.
+        egress.put("probeError",
+                "Failure at S-1-5-21-1111111111-2222222222-3333333333-1001");
+        inventory.put("wingetEgress", egress);
+        details.put("inventory", inventory);
+
+        try {
+            service.ingest(device, command, result, details);
+            assertThat(false).as("expected PII reject").isTrue();
+        } catch (IllegalArgumentException ex) {
+            assertThat(ex.getMessage()).contains("SID");
+        }
+        flushAndClear();
+        assertThat(snapshotRepository
+                .findByTenantIdAndDevice_Id(TENANT_A, device.getId()))
+                .isEmpty();
+    }
+
+    @Test
+    void wingetEgressAuditMetadataPresenceFlagOnly() {
+        EndpointDevice device = persistDevice(TENANT_A, "PC-A");
+        EndpointCommand command = persistCommand(device);
+        EndpointCommandResult result = persistResult(command);
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        inventory.put("schemaVersion", 1);
+        inventory.put("supported", true);
+        inventory.put("apps", List.of(
+                appMap("7-Zip", "24.07", "Igor Pavlov", "HKLM")));
+        inventory.put("wingetEgress", wellFormedWingetEgress());
+        details.put("inventory", inventory);
+
+        service.ingest(device, command, result, details);
+        flushAndClear();
+
+        // Audit metadata exposes the schemaVersion + presence boolean
+        // but MUST NOT carry the raw egress JSONB (Codex 019e6b88
+        // audit boundary).
+        var lastAudit = auditRepository
+                .findTop50ByTenantIdOrderByOccurredAtDesc(TENANT_A)
+                .stream()
+                .filter(e -> e.getEventType()
+                        .startsWith("ENDPOINT_SOFTWARE_INVENTORY"))
+                .findFirst()
+                .orElseThrow();
+        assertThat(lastAudit.getMetadata())
+                .containsEntry("wingetEgressIngested", true)
+                .containsEntry("wingetEgressSchemaVersion", 1);
+        // The raw payload sub-keys must NOT be in the audit metadata.
+        assertThat(lastAudit.getMetadata())
+                .doesNotContainKeys("sources", "packageQuery", "egress");
+    }
+
+    private Map<String, Object> wellFormedWingetEgress() {
+        Map<String, Object> egress = new LinkedHashMap<>();
+        egress.put("supported", true);
+        egress.put("schemaVersion", 1);
+        egress.put("probeDurationMs", 4380);
+        egress.put("timeout", false);
+        egress.put("sources", List.of(Map.of(
+                "name", "winget",
+                "argument", "https://cdn.winget.microsoft.com/cache",
+                "type", "Microsoft.PreIndexed.Package",
+                "trustLevel", "Trusted")));
+        Map<String, Object> pq = new LinkedHashMap<>();
+        pq.put("packageId", "7zip.7zip");
+        pq.put("found", true);
+        pq.put("exitCode", 0);
+        pq.put("durationMs", 1820);
+        pq.put("timeout", false);
+        egress.put("packageQuery", pq);
+        Map<String, Object> e = new LinkedHashMap<>();
+        e.put("dns", List.of(Map.of(
+                "target", "cdn.winget.microsoft.com",
+                "ok", true,
+                "durationMs", 12)));
+        e.put("tcp", List.of(Map.of(
+                "target", "cdn.winget.microsoft.com:443",
+                "ok", true,
+                "durationMs", 38)));
+        e.put("https", List.of(Map.of(
+                "target", "https://cdn.winget.microsoft.com",
+                "ok", true,
+                "durationMs", 152)));
+        e.put("proxyConfigured", false);
+        egress.put("egress", e);
+        return egress;
     }
 
     @Test
