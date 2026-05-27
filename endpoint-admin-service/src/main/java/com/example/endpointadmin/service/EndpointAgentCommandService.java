@@ -4,6 +4,7 @@ import com.example.endpointadmin.dto.v1.agent.AgentCommandResponse;
 import com.example.endpointadmin.dto.v1.agent.AgentCommandResultRequest;
 import com.example.endpointadmin.model.CommandResultStatus;
 import com.example.endpointadmin.model.CommandStatus;
+import com.example.endpointadmin.model.CommandType;
 import com.example.endpointadmin.model.DeviceStatus;
 import com.example.endpointadmin.model.EndpointCommand;
 import com.example.endpointadmin.model.EndpointCommandResult;
@@ -11,6 +12,7 @@ import com.example.endpointadmin.repository.EndpointCommandRepository;
 import com.example.endpointadmin.repository.EndpointCommandResultRepository;
 import com.example.endpointadmin.security.DeviceCredentialException;
 import com.example.endpointadmin.security.DeviceCredentialResult;
+import com.example.endpointadmin.security.SoftwareInventoryPayloadPolicy;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
@@ -31,15 +33,21 @@ public class EndpointAgentCommandService {
 
     private final EndpointCommandRepository commandRepository;
     private final EndpointCommandResultRepository resultRepository;
+    private final SoftwareInventoryPayloadPolicy inventoryPayloadPolicy;
+    private final EndpointSoftwareInventoryService softwareInventoryService;
     private final Clock clock;
     private final Duration claimTtl;
 
     public EndpointAgentCommandService(EndpointCommandRepository commandRepository,
                                        EndpointCommandResultRepository resultRepository,
+                                       SoftwareInventoryPayloadPolicy inventoryPayloadPolicy,
+                                       EndpointSoftwareInventoryService softwareInventoryService,
                                        Clock clock,
                                        @Value("${endpoint-admin.commands.claim-ttl-seconds:300}") long claimTtlSeconds) {
         this.commandRepository = commandRepository;
         this.resultRepository = resultRepository;
+        this.inventoryPayloadPolicy = inventoryPayloadPolicy;
+        this.softwareInventoryService = softwareInventoryService;
         this.clock = clock;
         this.claimTtl = Duration.ofSeconds(Math.max(30L, claimTtlSeconds));
     }
@@ -88,6 +96,22 @@ public class EndpointAgentCommandService {
         }
         validateResultSubmission(command, request);
 
+        // BE-020I (Codex 019e6ab2 iter-2 acceptance #5): fail-closed PII /
+        // sensitive-field check on the agent payload BEFORE the result row is
+        // persisted. Any forbidden key (licenseKey/productKey/uninstallString/
+        // userProfile/sid/bearer/jwt/token/password) or value (raw MSI GUID,
+        // C:\Users\... path, Windows SID literal) aborts the result submit
+        // with 400 and rolls back the transaction so neither
+        // endpoint_command_results nor the inventory tables persist anything.
+        if (request.details() != null) {
+            try {
+                inventoryPayloadPolicy.validate(request.details());
+            } catch (IllegalArgumentException ex) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        ex.getMessage());
+            }
+        }
+
         Instant now = Instant.now(clock);
         EndpointCommandResult result = new EndpointCommandResult();
         result.setTenantId(command.getTenantId());
@@ -113,6 +137,23 @@ public class EndpointAgentCommandService {
 
         commandRepository.saveAndFlush(command);
         resultRepository.saveAndFlush(result);
+
+        // BE-020I: only ingest software inventory on a SUCCEEDED
+        // COLLECT_INVENTORY result. Same transaction — an ingest failure
+        // (e.g. installSource enum miss, parse error) rolls back the
+        // command result + status flips above.
+        if (command.getCommandType() == CommandType.COLLECT_INVENTORY
+                && request.status() == CommandResultStatus.SUCCEEDED
+                && request.details() != null
+                && command.getDevice() != null) {
+            try {
+                softwareInventoryService.ingest(
+                        command.getDevice(), command, result, request.details());
+            } catch (IllegalArgumentException ex) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        ex.getMessage());
+            }
+        }
     }
 
     private void validateResultSubmission(EndpointCommand command, AgentCommandResultRequest request) {

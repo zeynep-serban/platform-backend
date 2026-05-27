@@ -34,7 +34,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("test")
-@Import({TimeConfig.class, EndpointAgentCommandService.class})
+@Import({
+        TimeConfig.class,
+        EndpointAgentCommandService.class,
+        EndpointAuditService.class,
+        com.example.endpointadmin.audit.NoOpAuditChainLock.class,
+        EndpointSoftwareInventoryService.class,
+        com.example.endpointadmin.security.SoftwareInventoryPayloadPolicy.class
+})
 class EndpointAgentCommandServiceTest {
 
     @Autowired

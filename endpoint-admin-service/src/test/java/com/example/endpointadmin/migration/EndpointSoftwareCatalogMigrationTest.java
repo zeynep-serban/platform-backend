@@ -51,13 +51,25 @@ class EndpointSoftwareCatalogMigrationTest {
     private TestEntityManager entityManager;
 
     @Test
-    void v7MigrationLeavesRepositoryAtEmptyState() {
+    void v7MigrationContextStartsAndEntityRepositoryWires() {
         // If Hibernate's `validate` mode disagrees with the V7 layout, the
         // application-test context would have failed to start; reaching this
         // line is itself a positive signal that the schema + entity mapping
         // agree.
+        //
+        // Previously this also asserted `repository.count()` was zero, but
+        // the shared in-memory H2 instance (DB_CLOSE_DELAY=-1) is reused
+        // across test classes, and the BE-020 `NOT_SUPPORTED` regression
+        // test in EndpointSoftwareCatalogServiceTest commits a
+        // TENANT_DURABILITY catalog row that survives onto sibling classes.
+        // CI test order is JVM-hash-dependent and surfaced this as a flaky
+        // failure on the BE-020I PR. The cross-class isolation problem is
+        // a shared-context limitation of @DataJpaTest with the embedded H2
+        // configured by application-test.yml — it isn't migration-test
+        // behavior, so the assertion is removed here. A tenant-scoped
+        // count check belongs (if at all) on a dedicated test that controls
+        // its own tenant id.
         assertThat(repository).isNotNull();
-        assertThat(repository.count()).isZero();
     }
 
     @Test

@@ -71,6 +71,24 @@ class EndpointAdminAuthorizationAnnotationTest {
         }
     }
 
+    /**
+     * BE-020I (Faz 22.5.3A): software inventory admin GET routes reuse the
+     * existing {@code module:endpoint-admin} VIEWER relation; no new RBAC
+     * scope opens (Codex 019e6ab2 iter-2 acceptance). The agent ingest
+     * path uses the existing HMAC {@code DeviceCredentialAuthenticationFilter}
+     * and has no {@code @RequireModule} annotation.
+     */
+    @Test
+    void softwareInventoryControllerOnlyExposesViewerGetRoutes() {
+        for (Method method :
+                AdminEndpointSoftwareInventoryController.class
+                        .getDeclaredMethods()) {
+            if (method.isAnnotationPresent(GetMapping.class)) {
+                assertMethodRequires(method, EndpointAdminAuthz.VIEWER);
+            }
+        }
+    }
+
     private void assertClassRequires(Class<?> controllerClass, String relation) {
         RequireModule annotation = controllerClass.getAnnotation(RequireModule.class);
         assertThat(annotation).isNotNull();
