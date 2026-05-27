@@ -247,14 +247,25 @@ public class EndpointSoftwareInventoryService {
             Map<String, Object> details) {
         Object inventoryNode = details.get("inventory");
         if (inventoryNode instanceof Map<?, ?> inventoryMap) {
-            // Codex 019e6ac8 P1 absorb: nested `inventory` node must also
-            // carry at least one recognized software-inventory key OR a
-            // `summary` sub-map with one. Older agent payloads ship
-            // hostname-only / identity-only blobs under `details.inventory.*`
-            // for unrelated COLLECT_INVENTORY uses; those must NOT be
-            // ingested as a software snapshot. iter-2 absorb additionally
-            // restores the preferred `details.inventory.summary.{...}`
-            // wrapper layout that the service-level contract documents.
+            // Codex 019e6aef iter-1 P1 absorb (BE-020I follow-up): the
+            // agent (AG-025/AG-025H) ships its software block under
+            // `details.inventory.software.{schemaVersion, apps, ...}`.
+            // Without this branch the wrapper layout was rejected and
+            // full software ingest never landed. The `software` sub-map
+            // takes priority — if it carries recognized keys we ingest it
+            // directly so `applySummary` + `parseItems` see the correct
+            // shape.
+            Object softwareNode = ((Map<String, Object>) inventoryMap).get("software");
+            if (softwareNode instanceof Map<?, ?> softwareMap
+                    && hasRecognizedSoftwareKey((Map<String, Object>) softwareMap)) {
+                return (Map<String, Object>) softwareMap;
+            }
+            // Codex 019e6ac8 P1 absorb (BE-020I PR): nested `inventory`
+            // node must carry at least one recognized software-inventory
+            // key OR a `summary` sub-map with one. Older agent payloads
+            // ship hostname-only / identity-only blobs under
+            // `details.inventory.*` for unrelated COLLECT_INVENTORY uses;
+            // those must NOT be ingested as a software snapshot.
             if (hasRecognizedSoftwareShape((Map<String, Object>) inventoryMap)) {
                 return (Map<String, Object>) inventoryMap;
             }

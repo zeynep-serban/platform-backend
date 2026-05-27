@@ -326,6 +326,75 @@ class EndpointSoftwareInventoryServiceTest {
     }
 
     @Test
+    void agentSoftwareWrapperShapeIngestsFullSnapshot() {
+        // BE-020I follow-up (Codex 019e6aef iter-1 P1 absorb): agent ships
+        // details.inventory.software.{schemaVersion, apps, appCount,
+        // wingetReady, ...}. The extractInventoryMap helper must recognize
+        // this wrapper layout and ingest the software sub-map as the
+        // canonical inventory node — without this branch the wrapper would
+        // SKIP and full software ingest would never land.
+        EndpointDevice device = persistDevice(TENANT_A, "PC-A");
+        EndpointCommand command = persistCommand(device);
+        EndpointCommandResult result = persistResult(command);
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        Map<String, Object> software = new LinkedHashMap<>();
+        software.put("schemaVersion", 1);
+        software.put("supported", true);
+        software.put("appCount", 1);
+        software.put("wingetReady", true);
+        software.put("apps", List.of(
+                appMap("7-Zip", "24.07", "Igor Pavlov", "HKLM")));
+        inventory.put("software", software);
+        details.put("inventory", inventory);
+
+        EndpointSoftwareInventoryService.IngestOutcome outcome =
+                service.ingest(device, command, result, details);
+
+        assertThat(outcome).isEqualTo(
+                EndpointSoftwareInventoryService.IngestOutcome.INGESTED);
+        flushAndClear();
+
+        EndpointSoftwareInventorySnapshot saved = snapshotRepository
+                .findByTenantIdAndDevice_Id(TENANT_A, device.getId())
+                .orElseThrow();
+        assertThat(saved.isAppsAvailable()).isTrue();
+        assertThat(saved.getItems()).hasSize(1);
+        assertThat(saved.getAppCount()).isEqualTo(1);
+        assertThat(saved.getWingetReady()).isTrue();
+    }
+
+    @Test
+    void agentSoftwareWrapperWithoutSoftwareKeysIsSkipped() {
+        // Defensive: agent could ship `details.inventory.software` as a
+        // map that does NOT carry recognized keys (e.g. only error /
+        // unsupported markers). hasRecognizedSoftwareKey requires at
+        // least one canonical field; without one the wrapper itself is
+        // skipped and the outer inventory node guard applies as before.
+        EndpointDevice device = persistDevice(TENANT_A, "PC-A");
+        EndpointCommand command = persistCommand(device);
+        EndpointCommandResult result = persistResult(command);
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        Map<String, Object> software = new LinkedHashMap<>();
+        software.put("error", "registry_blocked");
+        inventory.put("software", software);
+        // Outer inventory also without canonical keys → overall SKIPPED.
+        details.put("inventory", inventory);
+
+        EndpointSoftwareInventoryService.IngestOutcome outcome =
+                service.ingest(device, command, result, details);
+
+        assertThat(outcome).isEqualTo(
+                EndpointSoftwareInventoryService.IngestOutcome.SKIPPED);
+        assertThat(snapshotRepository
+                .findByTenantIdAndDevice_Id(TENANT_A, device.getId()))
+                .isEmpty();
+    }
+
+    @Test
     void ingestSkippedWhenNoInventoryShapePresent() {
         EndpointDevice device = persistDevice(TENANT_A, "PC-A");
         EndpointCommand command = persistCommand(device);
