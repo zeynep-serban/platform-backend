@@ -9,7 +9,9 @@ import com.example.endpointadmin.model.SoftwareInstallSource;
 import com.example.endpointadmin.repository.EndpointSoftwareInventorySnapshotRepository;
 import com.example.endpointadmin.security.AdminTenantContext;
 import com.example.endpointadmin.security.WinGetEgressPayloadPolicy;
+import com.example.endpointadmin.service.compliance.SoftwareInventorySnapshotPersistedEvent;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
@@ -71,17 +73,20 @@ public class EndpointSoftwareInventoryService {
     private final EndpointAuditService auditService;
     private final Clock clock;
     private final WinGetEgressPayloadPolicy winGetEgressPayloadPolicy;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Autowired
     public EndpointSoftwareInventoryService(
             EndpointSoftwareInventorySnapshotRepository snapshotRepository,
             EndpointAuditService auditService,
             Clock clock,
-            WinGetEgressPayloadPolicy winGetEgressPayloadPolicy) {
+            WinGetEgressPayloadPolicy winGetEgressPayloadPolicy,
+            ApplicationEventPublisher eventPublisher) {
         this.snapshotRepository = snapshotRepository;
         this.auditService = auditService;
         this.clock = clock;
         this.winGetEgressPayloadPolicy = winGetEgressPayloadPolicy;
+        this.eventPublisher = eventPublisher;
     }
 
     // ----------------------------------------------------------------
@@ -271,6 +276,17 @@ public class EndpointSoftwareInventoryService {
                 auditMetadata,
                 null,
                 null);
+
+        // BE-023 — emit AFTER_COMMIT-scoped event so the compliance
+        // evaluator runs a fresh evaluation once the snapshot row is
+        // durably visible. The listener uses REQUIRES_NEW so its
+        // transaction is independent of this one; if our ingest rolls
+        // back the event is dropped (Spring TransactionalEventListener
+        // semantics).
+        if (eventPublisher != null) {
+            eventPublisher.publishEvent(new SoftwareInventorySnapshotPersistedEvent(
+                    tenantId, device.getId(), snapshot.getId(), outcome.name()));
+        }
 
         return outcome;
     }

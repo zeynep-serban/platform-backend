@@ -89,6 +89,18 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
         </dependency>
+        <!-- BE-023 (Codex 019e6bbf iter-2): maven-artifact ComparableVersion
+             for EXACT / MINIMUM / RANGE version comparison in the compliance
+             evaluator. Windows / WinGet version strings are not reliably
+             semver, so a hand-rolled parser would only cover a subset; the
+             maven-artifact comparator is the established reference. Failure
+             paths (unparseable input) fall through to the
+             VERSION_COMPARE_UNSUPPORTED reason → UNKNOWN-driving. -->
+        <dependency>
+            <groupId>org.apache.maven</groupId>
+            <artifactId>maven-artifact</artifactId>
+            <version>3.9.9</version>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
