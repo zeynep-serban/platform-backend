@@ -89,6 +89,23 @@ spring:
         # route is read-only and does NOT rewrite (frontend hits
         # `/api/v1/endpoint-agents/...` directly). Service contract:
         # endpoint-admin-service listens on 8096 (HTTP) with mgmt 8081.
+        #
+        # Faz 22.3 (Codex 019e6dc9 P0-A absorb): the mTLS self-enroll
+        # endpoint listens on the FULL `/api/v1/endpoint-agent/endpoint-
+        # enrollments/auto` path on the backend — NOT under the legacy
+        # `/api/v1/agent/...` segment. We need an exact-match route OUTSIDE
+        # the H2 rewrite, ordered BEFORE the generic `endpoint-admin-
+        # agent-route` so the specific predicate wins (Spring Cloud
+        # Gateway evaluates routes in declaration order). This route does
+        # NOT rewrite the path and forwards the gateway/ingress-supplied
+        # `X-Client-Cert` and `X-Tenant-Id` headers verbatim. The k8s
+        # ingress in front of this gateway MUST strip any client-supplied
+        # `X-Client-Cert` / `X-Tenant-Id` before the request reaches the
+        # gateway — see ADR-0029 §"Backend layer".
+        - id: endpoint-admin-mtls-auto-enroll-route
+          uri: ${ENDPOINT_ADMIN_SERVICE_URL:http://endpoint-admin-service:8096}
+          predicates:
+            - Path=/api/v1/endpoint-agent/endpoint-enrollments/auto
         - id: endpoint-admin-agent-route
           uri: ${ENDPOINT_ADMIN_SERVICE_URL:http://endpoint-admin-service:8096}
           predicates:

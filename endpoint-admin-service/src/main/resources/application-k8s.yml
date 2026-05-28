@@ -50,6 +50,20 @@ erp:
     model-id: ${ERP_OPENFGA_MODEL_ID:}
     check-cache-ttl-seconds: ${ERP_OPENFGA_CHECK_CACHE_TTL_SECONDS:10}
 
+# Faz 22.3 (Codex 019e6dc9 P0-B absorb): forwarded-header mTLS mode.
+# Enabled in k8s deployments where the ingress / api-gateway terminates
+# mTLS, validates the AD CS chain, and forwards the client cert PEM via
+# `X-Client-Cert` (NGINX `ssl_client_escaped_cert` / Envoy
+# `forward_client_cert_details`). The ingress MUST also strip any
+# client-supplied `X-Client-Cert` and `X-Tenant-Id` from inbound requests
+# so an unauthenticated caller cannot inject these headers. Default-off
+# in any other profile (local/dev/test/integration) so a direct service
+# call cannot spoof an enrollment.
+endpoint-admin:
+  mtls:
+    forward-header:
+      enabled: ${ENDPOINT_ADMIN_MTLS_FORWARD_HEADER_ENABLED:true}
+
 server:
   port: ${SERVER_PORT:8096}
 

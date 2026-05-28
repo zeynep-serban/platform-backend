@@ -140,6 +140,24 @@
             <version>1.20.4</version>
             <scope>test</scope>
         </dependency>
+        <!-- Faz 22.3 (Codex 019e692b): BouncyCastle for programmatic X.509
+             test cert generation. Tests need realistic certs with SAN URI =
+             adcomputer:{objectGUID} + EKU clientAuth + arbitrary validity
+             windows; the JDK does not ship a public API to build certs.
+             Test scope only — production runtime uses the JDK X509Certificate
+             parser. -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+            <version>1.78.1</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+            <version>1.78.1</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <dependencyManagement>
