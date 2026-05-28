@@ -30,6 +30,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -91,7 +92,16 @@ class EndpointComplianceServiceTest {
                 deviceRepository, snapshotRepository, policyRepository,
                 evaluationRepository, stateRepository,
                 null, // no JdbcTemplate — advisory lock path is a no-op in unit tests
-                fixed);
+                singletonProvider(fixed));
+    }
+
+    private static ObjectProvider<Clock> singletonProvider(Clock clock) {
+        return new ObjectProvider<>() {
+            @Override public Clock getObject() { return clock; }
+            @Override public Clock getObject(Object... args) { return clock; }
+            @Override public Clock getIfAvailable() { return clock; }
+            @Override public Clock getIfUnique() { return clock; }
+        };
     }
 
     @Test
