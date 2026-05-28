@@ -19,15 +19,13 @@ import com.example.endpointadmin.repository.EndpointCommandApprovalRepository;
 import com.example.endpointadmin.repository.EndpointCommandRepository;
 import com.example.endpointadmin.repository.EndpointDeviceRepository;
 import com.example.endpointadmin.security.AdminTenantContext;
+import com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
-import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -46,9 +44,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * destructive type ({@code LOCK_USER_LOGIN}) so the gate can be exercised end
  * to end; the production default is {@code COLLECT_INVENTORY} only.
  */
-@DataJpaTest
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@ActiveProfiles("test")
+@IsolatedH2DataJpaTest
 @TestPropertySource(properties =
         "endpoint-admin.commands.admin-creatable-types=COLLECT_INVENTORY,LOCK_USER_LOGIN")
 @Import({TimeConfig.class, EndpointAdminCommandService.class, EndpointAuditService.class,

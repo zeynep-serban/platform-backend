@@ -4,13 +4,11 @@ import com.example.endpointadmin.config.TimeConfig;
 import com.example.endpointadmin.model.EndpointAuditEvent;
 import com.example.endpointadmin.repository.EndpointAuditEventRepository;
 import com.example.endpointadmin.service.EndpointAuditService;
+import com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.context.annotation.Import;
-import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.IllegalTransactionStateException;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -30,9 +28,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * This suite covers chain construction + verification + tamper detection,
  * which need no real Postgres.
  */
-@DataJpaTest
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@ActiveProfiles("test")
+@IsolatedH2DataJpaTest
 @Import({
         TimeConfig.class,
         EndpointAuditService.class,

@@ -17,15 +17,13 @@ import com.example.endpointadmin.model.CatalogVersionPolicyType;
 import com.example.endpointadmin.model.EndpointAuditEvent;
 import com.example.endpointadmin.repository.EndpointAuditEventRepository;
 import com.example.endpointadmin.security.AdminTenantContext;
+import com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 import org.springframework.context.annotation.Import;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
-import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -52,9 +50,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   <li>Audit hash-chain emits one row per successful operation</li>
  * </ul>
  */
-@DataJpaTest
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@ActiveProfiles("test")
+@IsolatedH2DataJpaTest
 @Import({
         TimeConfig.class,
         EndpointSoftwareCatalogService.class,

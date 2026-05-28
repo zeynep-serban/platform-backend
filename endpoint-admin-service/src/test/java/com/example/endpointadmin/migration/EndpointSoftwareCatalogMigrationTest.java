@@ -8,12 +8,10 @@ import com.example.endpointadmin.model.CatalogSourceType;
 import com.example.endpointadmin.model.CatalogVersionPolicyType;
 import com.example.endpointadmin.model.EndpointSoftwareCatalogItem;
 import com.example.endpointadmin.repository.EndpointSoftwareCatalogItemRepository;
+import com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
-import org.springframework.test.context.ActiveProfiles;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -36,9 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Asserting the catalog of {@code pg_catalog.pg_constraint} would couple this
  * test to PostgreSQL and break the H2-backed test slice contract.
  */
-@DataJpaTest
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@ActiveProfiles("test")
+@IsolatedH2DataJpaTest
 class EndpointSoftwareCatalogMigrationTest {
 
     private static final UUID TENANT_A =
@@ -57,19 +53,18 @@ class EndpointSoftwareCatalogMigrationTest {
         // line is itself a positive signal that the schema + entity mapping
         // agree.
         //
-        // Previously this also asserted `repository.count()` was zero, but
-        // the shared in-memory H2 instance (DB_CLOSE_DELAY=-1) is reused
-        // across test classes, and the BE-020 `NOT_SUPPORTED` regression
-        // test in EndpointSoftwareCatalogServiceTest commits a
-        // TENANT_DURABILITY catalog row that survives onto sibling classes.
-        // CI test order is JVM-hash-dependent and surfaced this as a flaky
-        // failure on the BE-020I PR. The cross-class isolation problem is
-        // a shared-context limitation of @DataJpaTest with the embedded H2
-        // configured by application-test.yml — it isn't migration-test
-        // behavior, so the assertion is removed here. A tenant-scoped
-        // count check belongs (if at all) on a dedicated test that controls
-        // its own tenant id.
+        // The fresh-table assertion below also doubles as behavioural evidence
+        // that the per-context H2 isolation introduced by
+        // @IsolatedH2DataJpaTest holds: a previous BE-020I regression saw
+        // EndpointSoftwareCatalogServiceTest's NOT_SUPPORTED rollback leak a
+        // TENANT_DURABILITY catalog row onto this class via the shared
+        // jdbc:h2:mem:endpointadmin instance, which made repository.count()
+        // non-zero in CI runs whose JVM-hashed test order placed that suite
+        // first. Each distinct Spring context boot under
+        // @IsolatedH2DataJpaTest now gets its own UUID-named H2 instance, so
+        // no sibling class can land rows here.
         assertThat(repository).isNotNull();
+        assertThat(repository.count()).isZero();
     }
 
     @Test

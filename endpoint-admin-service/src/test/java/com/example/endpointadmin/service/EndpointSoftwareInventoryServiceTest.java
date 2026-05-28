@@ -17,13 +17,11 @@ import com.example.endpointadmin.repository.EndpointCommandRepository;
 import com.example.endpointadmin.repository.EndpointCommandResultRepository;
 import com.example.endpointadmin.repository.EndpointDeviceRepository;
 import com.example.endpointadmin.repository.EndpointSoftwareInventorySnapshotRepository;
+import com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 import org.springframework.context.annotation.Import;
-import org.springframework.test.context.ActiveProfiles;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -49,9 +47,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>Tenant isolation (cross-tenant ingest returns separate snapshots)</li>
  * </ul>
  */
-@DataJpaTest
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@ActiveProfiles("test")
+@IsolatedH2DataJpaTest
 @Import({
         TimeConfig.class,
         EndpointSoftwareInventoryService.class,

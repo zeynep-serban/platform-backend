@@ -1,6 +1,13 @@
 spring:
   datasource:
-    url: jdbc:h2:mem:endpointadmin;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    # BE-021 PR #319 follow-up (Codex 019e6fbc iter-3) — per-context unique H2 URL.
+    # Defense in depth: tests annotated with @IsolatedH2DataJpaTest override this via
+    # ApplicationContextInitializer (see com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest).
+    # Tests that forget the meta-annotation still fall back to a UUID-suffixed URL via
+    # Spring's ${random.uuid}, resolved per Spring context boot — so a sibling class's
+    # ddl-auto=create-drop cannot drop the current context's schema regardless of
+    # execution order.
+    url: jdbc:h2:mem:endpointadmin-${random.uuid};MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
     username: sa
     password:
     driver-class-name: org.h2.Driver

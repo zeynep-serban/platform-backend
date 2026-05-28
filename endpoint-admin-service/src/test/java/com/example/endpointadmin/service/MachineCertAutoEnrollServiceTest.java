@@ -6,13 +6,11 @@ import com.example.endpointadmin.repository.EndpointAuditEventRepository;
 import com.example.endpointadmin.repository.EndpointDeviceRepository;
 import com.example.endpointadmin.repository.EndpointMachineCertRepository;
 import com.example.endpointadmin.security.TestX509Certs;
+import com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpStatus;
-import org.springframework.test.context.ActiveProfiles;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.security.cert.X509Certificate;
@@ -22,25 +20,26 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Faz 22.3 — H2-based @DataJpaTest slice for the auto-enroll service.
- * Covers idempotency + fingerprint dedupe + cross-tenant boundary without
- * needing a real Postgres (partial unique index behaviors are exercised in
- * the Postgres integration test).
- */
-/**
- * <p>Note on @Import set: this matches the @Import set of
+ * Faz 22.3 — H2 {@link IsolatedH2DataJpaTest} slice for the auto-enroll
+ * service. Covers idempotency + fingerprint dedupe + cross-tenant boundary
+ * without needing a real Postgres (partial unique index behaviors are
+ * exercised in the Postgres integration test).
+ *
+ * <p>Note on @Import set: matches the @Import set of
  * {@link com.example.endpointadmin.service.EndpointEnrollmentServiceTest}
  * (plus {@link MachineCertAutoEnrollService}). Spring's test-context cache
  * key includes the @Import set; aligning the sets lets the two suites
- * share a cached context rather than each creating a fresh one. Without
- * this alignment the test-context cache size budget can evict an active
- * context mid-suite, which triggers Hibernate's {@code create-drop} DROP
- * cycle and breaks downstream tests that expect the shared H2 schema
- * (observed as "Table endpoint_devices not found" CI fail on PR #316).
+ * share one cached context instead of booting two — a pure boot-time
+ * optimization. Cross-class schema isolation no longer depends on this
+ * alignment: each distinct Spring context boot under
+ * {@code @IsolatedH2DataJpaTest} gets its own UUID-named H2 instance, and
+ * classes whose merged context configurations are identical safely share
+ * that same URL (no teardown happens between cache-sharing classes). A
+ * sibling's {@code create-drop} cycle can therefore never drop this
+ * class's tables (see
+ * {@link com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest}).
  */
-@DataJpaTest
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@ActiveProfiles("test")
+@IsolatedH2DataJpaTest
 @Import({
         TimeConfig.class,
         EndpointEnrollmentService.class,

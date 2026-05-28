@@ -8,14 +8,10 @@ import com.example.endpointadmin.model.OsType;
 import com.example.endpointadmin.repository.EndpointDeviceCredentialRepository;
 import com.example.endpointadmin.repository.EndpointDeviceRepository;
 import com.example.endpointadmin.repository.EndpointRequestNonceRepository;
+import com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.context.annotation.Import;
-import org.springframework.test.context.ActiveProfiles;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -23,43 +19,21 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@DataJpaTest
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@ActiveProfiles("test")
+// BE-021 PR #319 narrow fix superseded by the module-wide
+// @IsolatedH2DataJpaTest meta-annotation (Codex 019e6fbc iter-3
+// follow-up). Background on the underlying H2 shared-schema bug is
+// preserved in IsolatedH2DataJpaTest's javadoc; the per-context unique
+// H2 URL is now routed by the meta-annotation's
+// ApplicationContextInitializer instead of an inline
+// @DynamicPropertySource here.
+@IsolatedH2DataJpaTest
 @Import({
         TimeConfig.class,
         HmacDeviceCredentialProvider.class,
         EndpointRequestNonceCleanupJob.class,
         AesGcmDeviceSecretProtector.class
 })
-// BE-021 PR #319 follow-up to the BE-021 PR #317 workaround:
-// application-test.yml uses jdbc:h2:mem:endpointadmin;DB_CLOSE_DELAY=-1,
-// a single in-memory H2 instance shared across every @DataJpaTest class
-// in the JVM. When any earlier test class tears down its @DataJpaTest
-// context, ddl-auto=create-drop DROPS every table from that shared
-// instance — and the next class that boots a context (even with
-// @DirtiesContext BEFORE_CLASS) inherits the now-empty database without
-// re-running schema generation, because Spring's cached EntityManager
-// factory's create-drop hook is run only once at context init, not at
-// first query. PR #317's BEFORE_CLASS workaround was insufficient
-// (CI red on main commits 79a5ae82 and 305561df).
-//
-// Permanent fix: pin this class's datasource to its own unique in-
-// memory H2 instance via DynamicPropertySource. No other test class
-// can drop its schema, regardless of execution order or Surefire
-// reuse policy.
 class HmacDeviceCredentialProviderTest {
-
-    @DynamicPropertySource
-    static void registerIsolatedH2(DynamicPropertyRegistry registry) {
-        String dbName = "hmac-device-creds-" + UUID.randomUUID();
-        registry.add("spring.datasource.url",
-                () -> "jdbc:h2:mem:" + dbName
-                        + ";MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;"
-                        + "DEFAULT_NULL_ORDERING=HIGH;"
-                        + "DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE");
-    }
-
 
     @Autowired
     private HmacDeviceCredentialProvider provider;
