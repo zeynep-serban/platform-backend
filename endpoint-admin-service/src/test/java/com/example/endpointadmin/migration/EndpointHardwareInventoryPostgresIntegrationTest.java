@@ -215,7 +215,15 @@ class EndpointHardwareInventoryPostgresIntegrationTest {
                         + " created_at) "
                         + "VALUES (?, ?, ?, ?, ?::jsonb, ?)",
                 UUID.randomUUID(), snapshotId, tenantId,
-                "INVALID-MAC-NOT-HEX",
+                // Wave-12 PR-5 drive-by: the previous fixture
+                // "INVALID-MAC-NOT-HEX" was 19 chars, which the
+                // mac_address VARCHAR(17) column rejects on length
+                // before the CHECK regex ever runs. Use a 17-char
+                // value that fits the column but still trips the
+                // lowercase-only CHECK ([0-9a-f]) — uppercase MAC
+                // matches the colon shape and exact width but is
+                // rejected by the format constraint.
+                "AA:BB:CC:DD:EE:FF",
                 "[]",
                 Timestamp.from(Instant.now())))
                 .isInstanceOf(DataIntegrityViolationException.class)
