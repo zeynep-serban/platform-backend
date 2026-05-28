@@ -20,8 +20,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.dao.DataAccessException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -119,14 +119,16 @@ public class EndpointComplianceService {
             EndpointComplianceEvaluationRepository evaluationRepository,
             EndpointDeviceComplianceStateRepository stateRepository,
             @Autowired(required = false) JdbcTemplate jdbcTemplate,
-            @Autowired(required = false) @Lazy Clock clock) {
+            ObjectProvider<Clock> clockProvider) {
         this.deviceRepository = deviceRepository;
         this.snapshotRepository = snapshotRepository;
         this.policyRepository = policyRepository;
         this.evaluationRepository = evaluationRepository;
         this.stateRepository = stateRepository;
         this.jdbcTemplate = jdbcTemplate;
-        this.clock = clock == null ? Clock.systemUTC() : clock;
+        // ObjectProvider avoids the @Lazy CGLIB enhancement of java.time.Clock
+        // that broke pod boot under Java 21 + Spring Boot LaunchedClassLoader.
+        this.clock = clockProvider.getIfAvailable(Clock::systemUTC);
         this.canonicalObjectMapper = new ObjectMapper()
                 .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
                 .configure(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS, false);
