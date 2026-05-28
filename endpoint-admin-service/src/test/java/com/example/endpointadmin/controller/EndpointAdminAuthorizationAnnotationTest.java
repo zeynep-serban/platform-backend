@@ -89,6 +89,25 @@ class EndpointAdminAuthorizationAnnotationTest {
         }
     }
 
+    /**
+     * BE-022Q (Faz 22.5.2 hardware query API): hardware inventory admin GET
+     * routes reuse the existing {@code module:endpoint-admin} VIEWER
+     * relation; no new RBAC scope opens (Codex 019e70c1 plan-time AGREE +
+     * post-impl must-fix #6 reflection coverage). The agent ingest path
+     * is unchanged (it lives in {@code EndpointAgentCommandService}, not
+     * a dedicated controller).
+     */
+    @Test
+    void hardwareInventoryControllerOnlyExposesViewerGetRoutes() {
+        for (Method method :
+                AdminEndpointHardwareInventoryController.class
+                        .getDeclaredMethods()) {
+            if (method.isAnnotationPresent(GetMapping.class)) {
+                assertMethodRequires(method, EndpointAdminAuthz.VIEWER);
+            }
+        }
+    }
+
     private void assertClassRequires(Class<?> controllerClass, String relation) {
         RequireModule annotation = controllerClass.getAnnotation(RequireModule.class);
         assertThat(annotation).isNotNull();
