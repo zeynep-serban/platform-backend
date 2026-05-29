@@ -20,15 +20,34 @@ import java.util.UUID;
 public interface EndpointSoftwareInventoryItemRepository
         extends JpaRepository<EndpointSoftwareInventoryItem, UUID> {
 
+    // BE-020I lower(bytea) fix (Codex thread 019e73cf PARTIAL absorb).
+    //
+    // Live testai bug 2026-05-29: PostgreSQL JDBC driver bound nullable
+    // String params (:q, :publisher) with bytea typing, so PG's overload
+    // resolver hit `lower(bytea)` (does not exist) and the query failed
+    // with SQLGrammarException. Hibernate 6 / PG JDBC do not infer
+    // varchar from a null String parameter when the binding context is
+    // wider than a single string-only function.
+    //
+    // Fix: explicit JPQL `cast(:param as string)` forces Hibernate to
+    // emit `CAST(? AS varchar)` so PG resolves `lower(varchar)`
+    // (= `lower(text)`) unambiguously. Cast applied at every reference
+    // (both the null guard and the lower(...) call) so the SQL is
+    // self-consistent and not relying on PG short-circuit evaluation
+    // for the null branch.
+    //
+    // Sister repository EndpointSoftwareInventorySnapshotRepository
+    // carries the same pattern (softwareName + publisher) and is fixed
+    // in the same PR (systemic vs single-point fix).
     @Query("""
             select i
             from EndpointSoftwareInventoryItem i
             where i.tenantId = :tenantId
               and i.deviceId = :deviceId
-              and (:q is null
-                   or lower(i.displayName) like lower(concat('%', :q, '%')))
-              and (:publisher is null
-                   or lower(i.publisher) = lower(:publisher))
+              and (cast(:q as string) is null
+                   or lower(i.displayName) like lower(concat('%', cast(:q as string), '%')))
+              and (cast(:publisher as string) is null
+                   or lower(i.publisher) = lower(cast(:publisher as string)))
               and (:installSource is null
                    or i.installSource = :installSource)
             order by lower(i.displayName)

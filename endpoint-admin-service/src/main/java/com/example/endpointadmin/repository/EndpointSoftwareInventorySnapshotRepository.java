@@ -31,21 +31,28 @@ public interface EndpointSoftwareInventorySnapshotRepository
      * exists-query; otherwise the snapshot row is only returned when at
      * least one of its items matches.
      */
+    // BE-020I lower(bytea) fix (Codex thread 019e73cf PARTIAL absorb).
+    //
+    // Same null-bound-String-into-lower() pattern as
+    // EndpointSoftwareInventoryItemRepository.pageByTenantDeviceWithFilters
+    // (see that JavaDoc for the root cause). Fixed in the same PR so a
+    // future fleet-wide call cannot resurrect the live bug from this
+    // repository.
     @Query("""
             select s
             from EndpointSoftwareInventorySnapshot s
             where s.tenantId = :tenantId
-              and (:publisher is null
+              and (cast(:publisher as string) is null
                    or exists (
                        select 1 from EndpointSoftwareInventoryItem i
                        where i.snapshot = s
-                         and lower(i.publisher) = lower(:publisher)
+                         and lower(i.publisher) = lower(cast(:publisher as string))
                    ))
-              and (:softwareName is null
+              and (cast(:softwareName as string) is null
                    or exists (
                        select 1 from EndpointSoftwareInventoryItem i
                        where i.snapshot = s
-                         and lower(i.displayName) like lower(concat('%', :softwareName, '%'))
+                         and lower(i.displayName) like lower(concat('%', cast(:softwareName as string), '%'))
                    ))
               and (:wingetReady is null or s.wingetReady = :wingetReady)
               and (:truncated is null or s.truncated = :truncated)
