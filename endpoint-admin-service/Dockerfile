@@ -34,29 +34,4 @@ EXPOSE 8096 8081
 
 USER 1000:1000
 
-# JPMS opens — operational unblock for Spring Boot 3.5.6 + Java 21
-# CGLIB lazy-proxy of JDK classes.
-#
-# BE-023 EndpointComplianceService currently triggers this:
-#   constructor takes `@Autowired(required = false) @Lazy Clock clock`
-#   (compliance/EndpointComplianceService.java:122), which forces Spring
-#   CGLIB to enhance java.time.Clock when building the lazy proxy.
-#   Java 21 + Spring Boot LaunchedClassLoader cannot defineClass into
-#   java.base without --add-opens, so the pod crashes on boot:
-#
-#   java.lang.IllegalAccessException: module java.base does not open
-#     java.time to unnamed module @...
-#   ClassLoader mismatch for [java.time.Clock]: JVM should be started
-#     with --add-opens=java.base/java.lang=ALL-UNNAMED for
-#     ClassLoader.defineClass to be accessible on
-#     org.springframework.boot.loader.launch.LaunchedClassLoader
-#
-# Same class of issue applies to future lazy-injected JDK classes; the
-# permanent source fix is to drop `@Lazy Clock` in favour of direct
-# injection or ObjectProvider<Clock> with a Clock.systemUTC() fallback.
-# That refactor is tracked as a follow-up — until it lands the JVM opens
-# below keep the image bootable.
-ENTRYPOINT ["java", \
-  "--add-opens=java.base/java.lang=ALL-UNNAMED", \
-  "--add-opens=java.base/java.time=ALL-UNNAMED", \
-  "-jar", "app.jar"]
+ENTRYPOINT ["java", "-jar", "app.jar"]
