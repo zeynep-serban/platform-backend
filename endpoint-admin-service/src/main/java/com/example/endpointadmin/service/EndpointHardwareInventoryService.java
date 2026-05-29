@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -115,7 +116,29 @@ public class EndpointHardwareInventoryService {
                     "ingest called without a hardware block — hook should check hasHardwareBlock() first");
         }
 
-        EndpointHardwareInventorySnapshot snapshot = buildSnapshot(device, commandResultId, hardware);
+        // BE-022Q payload-hash deep-equality dedupe probe (#327).
+        // Secondary idempotency layer behind the source_command_result_id
+        // probe above: when the agent re-collects byte-identical hardware
+        // under a DIFFERENT command-result (so the first probe missed),
+        // skip appending a duplicate row and return the existing latest
+        // snapshot carrying the same hash. The hash is computed once here
+        // and reused for the persisted entity so the probe and the stored
+        // value can never diverge.
+        String payloadHash = sha256Hex(hardware);
+        Optional<EndpointHardwareInventorySnapshot> identical =
+                repository
+                        .findByTenantDeviceAndPayloadHash(
+                                device.getTenantId(), device.getId(), payloadHash,
+                                PageRequest.of(0, 1))
+                        .stream()
+                        .findFirst();
+        if (identical.isPresent()) {
+            log.debug("Hardware ingest no-op for device_id={} (payload hash unchanged, snapshot_id={})",
+                    device.getId(), identical.get().getId());
+            return identical.get();
+        }
+
+        EndpointHardwareInventorySnapshot snapshot = buildSnapshot(device, commandResultId, hardware, payloadHash);
 
         try {
             // Codex 019e7007 post-impl iter-1 must-fix #1: use
@@ -172,7 +195,8 @@ public class EndpointHardwareInventoryService {
     }
 
     private EndpointHardwareInventorySnapshot buildSnapshot(
-            EndpointDevice device, UUID commandResultId, Map<String, Object> hardware) {
+            EndpointDevice device, UUID commandResultId, Map<String, Object> hardware,
+            String payloadHash) {
         EndpointHardwareInventorySnapshot snapshot = new EndpointHardwareInventorySnapshot();
         snapshot.setTenantId(device.getTenantId());
         snapshot.setDeviceId(device.getId());
@@ -205,7 +229,7 @@ public class EndpointHardwareInventoryService {
         }
 
         snapshot.setCollectedAt(parseInstant(hardware.get("collectedAt")));
-        snapshot.setPayloadHashSha256(sha256Hex(hardware));
+        snapshot.setPayloadHashSha256(payloadHash);
 
         // Probe errors (bounded {code, summary} objects). Build the
         // bounded list FIRST so the redacted_payload projection

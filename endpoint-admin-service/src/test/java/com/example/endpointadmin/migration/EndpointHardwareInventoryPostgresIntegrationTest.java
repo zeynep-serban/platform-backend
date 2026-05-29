@@ -1,5 +1,6 @@
 package com.example.endpointadmin.migration;
 
+import com.example.endpointadmin.model.EndpointHardwareInventorySnapshot;
 import com.example.endpointadmin.repository.EndpointHardwareInventorySnapshotRepository;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
@@ -7,6 +8,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -20,6 +22,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
@@ -405,6 +408,111 @@ class EndpointHardwareInventoryPostgresIntegrationTest {
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // BE-022Q payload-hash deep-equality dedupe probe (#327) — proves the
+    // query does NOT emit `lower(bytea)` under real PostgreSQL semantics.
+    // The H2 slice cannot catch this regression class (its overload
+    // resolver is permissive); same rationale as
+    // EndpointSoftwareInventoryQueryPostgresIntegrationTest.
+    // ──────────────────────────────────────────────────────────────────
+
+    @Test
+    void payloadHashProbe_nonMatchingHash_doesNotThrowLowerBytea() {
+        // The original BE-022Q deep-equality query used
+        // `lower(payload_hash_sha256) = lower(:hash)`, which raised
+        // `function lower(bytea) does not exist` on PG. The fixed query
+        // (direct `=` + `cast(:hash as string)`, no lower()) must execute
+        // cleanly and return empty when no snapshot matches.
+        UUID tenant = persistTenantAndDevice();
+        UUID device = singleDeviceId();
+        insertSnapshotWithHash(tenant, device, "a".repeat(64));
+
+        assertThatCode(() -> {
+            List<EndpointHardwareInventorySnapshot> found =
+                    snapshotRepository.findByTenantDeviceAndPayloadHash(
+                            tenant, device, "b".repeat(64),
+                            PageRequest.of(0, 1));
+            assertThat(found).isEmpty();
+        }).doesNotThrowAnyException();
+    }
+
+    @Test
+    void payloadHashProbe_matchingHash_returnsSnapshot() {
+        UUID tenant = persistTenantAndDevice();
+        UUID device = singleDeviceId();
+        String hash = "c".repeat(64);
+        UUID snapshotId = insertSnapshotWithHash(tenant, device, hash);
+
+        List<EndpointHardwareInventorySnapshot> found =
+                snapshotRepository.findByTenantDeviceAndPayloadHash(
+                        tenant, device, hash, PageRequest.of(0, 1));
+
+        assertThat(found).hasSize(1);
+        assertThat(found.get(0).getId()).isEqualTo(snapshotId);
+        assertThat(found.get(0).getPayloadHashSha256()).isEqualTo(hash);
+    }
+
+    @Test
+    void payloadHashProbe_isCaseSensitiveByDesign() {
+        // The hash column stores lowercase hex (CHECK ~ '^[a-f0-9]{64}$').
+        // The probe is a direct `=` (no lower()), so an uppercase query
+        // value cannot match — and crucially does not resolve to
+        // lower(bytea) either. This documents the no-lower() design: case
+        // folding is unnecessary (storage is always lowercase) and would
+        // only reintroduce the bytea overload-resolution risk.
+        UUID tenant = persistTenantAndDevice();
+        UUID device = singleDeviceId();
+        String lowerHash = "d".repeat(64);
+        insertSnapshotWithHash(tenant, device, lowerHash);
+
+        assertThatCode(() -> {
+            List<EndpointHardwareInventorySnapshot> found =
+                    snapshotRepository.findByTenantDeviceAndPayloadHash(
+                            tenant, device, "D".repeat(64),
+                            PageRequest.of(0, 1));
+            assertThat(found).isEmpty();
+        }).doesNotThrowAnyException();
+    }
+
+    @Test
+    void payloadHashProbe_multipleIdenticalHashes_returnsMostRecentFirst() {
+        // Append-only history can hold more than one snapshot with the
+        // same hash (byte-identical re-collection). The List return +
+        // PageRequest.of(0,1) cap takes the most-recent (collected_at
+        // DESC) without raising NonUniqueResultException.
+        UUID tenant = persistTenantAndDevice();
+        UUID device = singleDeviceId();
+        String hash = "e".repeat(64);
+
+        Instant older = Instant.now().minusSeconds(3600);
+        Instant newer = Instant.now().minusSeconds(60);
+        insertSnapshotWithHashAt(tenant, device, hash, older);
+        UUID newest = insertSnapshotWithHashAt(tenant, device, hash, newer);
+
+        List<EndpointHardwareInventorySnapshot> found =
+                snapshotRepository.findByTenantDeviceAndPayloadHash(
+                        tenant, device, hash, PageRequest.of(0, 1));
+
+        assertThat(found).hasSize(1);
+        assertThat(found.get(0).getId()).isEqualTo(newest);
+    }
+
+    @Test
+    void payloadHashProbe_isTenantAndDeviceScoped() {
+        UUID tenant = persistTenantAndDevice();
+        UUID device = singleDeviceId();
+        String hash = "f".repeat(64);
+        insertSnapshotWithHash(tenant, device, hash);
+
+        // Same hash, different tenant/device → no leak.
+        assertThat(snapshotRepository.findByTenantDeviceAndPayloadHash(
+                UUID.randomUUID(), device, hash, PageRequest.of(0, 1)))
+                .isEmpty();
+        assertThat(snapshotRepository.findByTenantDeviceAndPayloadHash(
+                tenant, UUID.randomUUID(), hash, PageRequest.of(0, 1)))
+                .isEmpty();
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // Fixtures
     // ──────────────────────────────────────────────────────────────────
 
@@ -483,6 +591,32 @@ class EndpointHardwareInventoryPostgresIntegrationTest {
                 VALID_HASH,
                 "{}", "[]",
                 Timestamp.from(Instant.now()),
+                Timestamp.from(Instant.now()),
+                Timestamp.from(Instant.now()),
+                0L);
+        return snapshotId;
+    }
+
+    /** Insert a snapshot with an explicit payload hash (collected now). */
+    private UUID insertSnapshotWithHash(UUID tenantId, UUID deviceId, String hash) {
+        return insertSnapshotWithHashAt(tenantId, deviceId, hash, Instant.now());
+    }
+
+    /** Insert a snapshot with an explicit payload hash + collected_at. */
+    private UUID insertSnapshotWithHashAt(
+            UUID tenantId, UUID deviceId, String hash, Instant collectedAt) {
+        UUID snapshotId = UUID.randomUUID();
+        jdbc.update(
+                "INSERT INTO endpoint_hardware_inventory_snapshots "
+                        + "(id, tenant_id, device_id, schema_version, supported, "
+                        + " payload_hash_sha256, redacted_payload, probe_errors, "
+                        + " collected_at, created_at, updated_at, version) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?)",
+                snapshotId, tenantId, deviceId,
+                1, true,
+                hash,
+                "{}", "[]",
+                Timestamp.from(collectedAt),
                 Timestamp.from(Instant.now()),
                 Timestamp.from(Instant.now()),
                 0L);

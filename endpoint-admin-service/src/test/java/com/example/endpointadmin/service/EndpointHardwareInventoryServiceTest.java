@@ -204,6 +204,67 @@ class EndpointHardwareInventoryServiceTest {
     }
 
     @Test
+    void reIngestIdenticalPayloadUnderDifferentCommandResultDeduplicates() {
+        // BE-022Q payload-hash deep-equality dedupe (#327): the agent
+        // re-collects BYTE-IDENTICAL hardware (same collectedAt → same
+        // payload hash) under a DIFFERENT command-result, so the
+        // source_command_result_id probe misses. The secondary
+        // payload-hash probe must return the existing snapshot rather
+        // than appending a duplicate row.
+        recordingEvents.clear();
+        EndpointDevice device = persistDevice(TENANT_A, "PC-A");
+
+        String sharedCollectedAt = collectedAtMinutesAgo(45);
+        Map<String, Object> details1 = effectiveDetailsWithHardware(
+                hardwareWithCollectedAt(sharedCollectedAt));
+        Map<String, Object> details2 = effectiveDetailsWithHardware(
+                hardwareWithCollectedAt(sharedCollectedAt));
+
+        EndpointCommand cmd1 = persistCommand(device);
+        EndpointCommandResult result1 = persistResult(cmd1);
+        EndpointHardwareInventorySnapshot first =
+                service.ingest(device, cmd1, result1, details1);
+        recordingEvents.clear();
+
+        EndpointCommand cmd2 = persistCommand(device);
+        EndpointCommandResult result2 = persistResult(cmd2);
+        EndpointHardwareInventorySnapshot second =
+                service.ingest(device, cmd2, result2, details2);
+
+        // Same row returned, no append, no second event.
+        assertThat(second.getId()).isEqualTo(first.getId());
+        assertThat(snapshotRepository.count()).isEqualTo(1);
+        assertThat(recordingEvents.captured()).isEmpty();
+    }
+
+    @Test
+    void changedPayloadUnderDifferentCommandResultStillAppends() {
+        // Dedupe must NOT swallow a genuine hardware change: a different
+        // payload (different collectedAt → different hash) under a new
+        // command-result appends a new snapshot (append-only history
+        // invariant preserved alongside the dedupe probe).
+        EndpointDevice device = persistDevice(TENANT_A, "PC-A");
+
+        Map<String, Object> details1 = effectiveDetailsWithHardware(
+                hardwareWithCollectedAt(collectedAtMinutesAgo(120)));
+        Map<String, Object> details2 = effectiveDetailsWithHardware(
+                hardwareWithCollectedAt(collectedAtMinutesAgo(30)));
+
+        EndpointCommand cmd1 = persistCommand(device);
+        EndpointCommandResult result1 = persistResult(cmd1);
+        EndpointHardwareInventorySnapshot first =
+                service.ingest(device, cmd1, result1, details1);
+
+        EndpointCommand cmd2 = persistCommand(device);
+        EndpointCommandResult result2 = persistResult(cmd2);
+        EndpointHardwareInventorySnapshot second =
+                service.ingest(device, cmd2, result2, details2);
+
+        assertThat(second.getId()).isNotEqualTo(first.getId());
+        assertThat(snapshotRepository.count()).isEqualTo(2);
+    }
+
+    @Test
     void distinctCommandResultsProduceAppendOnlyHistory() {
         // Append-only history: two different command-results on the
         // same device → two snapshots (no UNIQUE on (tenant, device)).
