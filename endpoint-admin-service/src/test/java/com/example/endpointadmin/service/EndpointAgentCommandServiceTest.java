@@ -48,7 +48,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         // COLLECT_INVENTORY pre-persist + ingest path
         // (Codex 019e7007 iter-4 absorb).
         com.example.endpointadmin.security.HardwareInventoryPayloadPolicy.class,
-        EndpointHardwareInventoryService.class
+        EndpointHardwareInventoryService.class,
+        // BE — device-health (AG-033) sanitizer + service wired into the
+        // same COLLECT_INVENTORY pre-persist + ingest path.
+        com.example.endpointadmin.security.DeviceHealthPayloadPolicy.class,
+        EndpointDeviceHealthService.class
 })
 class EndpointAgentCommandServiceTest {
 

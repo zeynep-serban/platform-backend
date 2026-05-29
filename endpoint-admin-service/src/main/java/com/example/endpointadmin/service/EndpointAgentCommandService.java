@@ -12,6 +12,7 @@ import com.example.endpointadmin.repository.EndpointCommandRepository;
 import com.example.endpointadmin.repository.EndpointCommandResultRepository;
 import com.example.endpointadmin.security.DeviceCredentialException;
 import com.example.endpointadmin.security.DeviceCredentialResult;
+import com.example.endpointadmin.security.DeviceHealthPayloadPolicy;
 import com.example.endpointadmin.security.HardwareInventoryPayloadPolicy;
 import com.example.endpointadmin.security.InstallEvidencePayloadPolicy;
 import com.example.endpointadmin.security.SoftwareInventoryPayloadPolicy;
@@ -38,8 +39,10 @@ public class EndpointAgentCommandService {
     private final SoftwareInventoryPayloadPolicy inventoryPayloadPolicy;
     private final InstallEvidencePayloadPolicy installEvidencePayloadPolicy;
     private final HardwareInventoryPayloadPolicy hardwareInventoryPayloadPolicy;
+    private final DeviceHealthPayloadPolicy deviceHealthPayloadPolicy;
     private final EndpointSoftwareInventoryService softwareInventoryService;
     private final EndpointHardwareInventoryService hardwareInventoryService;
+    private final EndpointDeviceHealthService deviceHealthService;
     private final EndpointInstallAuditService installAuditService;
     private final Clock clock;
     private final Duration claimTtl;
@@ -49,8 +52,10 @@ public class EndpointAgentCommandService {
                                        SoftwareInventoryPayloadPolicy inventoryPayloadPolicy,
                                        InstallEvidencePayloadPolicy installEvidencePayloadPolicy,
                                        HardwareInventoryPayloadPolicy hardwareInventoryPayloadPolicy,
+                                       DeviceHealthPayloadPolicy deviceHealthPayloadPolicy,
                                        EndpointSoftwareInventoryService softwareInventoryService,
                                        EndpointHardwareInventoryService hardwareInventoryService,
+                                       EndpointDeviceHealthService deviceHealthService,
                                        EndpointInstallAuditService installAuditService,
                                        Clock clock,
                                        @Value("${endpoint-admin.commands.claim-ttl-seconds:300}") long claimTtlSeconds) {
@@ -59,8 +64,10 @@ public class EndpointAgentCommandService {
         this.inventoryPayloadPolicy = inventoryPayloadPolicy;
         this.installEvidencePayloadPolicy = installEvidencePayloadPolicy;
         this.hardwareInventoryPayloadPolicy = hardwareInventoryPayloadPolicy;
+        this.deviceHealthPayloadPolicy = deviceHealthPayloadPolicy;
         this.softwareInventoryService = softwareInventoryService;
         this.hardwareInventoryService = hardwareInventoryService;
+        this.deviceHealthService = deviceHealthService;
         this.installAuditService = installAuditService;
         this.clock = clock;
         this.claimTtl = Duration.ofSeconds(Math.max(30L, claimTtlSeconds));
@@ -134,7 +141,19 @@ public class EndpointAgentCommandService {
         if (command.getCommandType() == CommandType.COLLECT_INVENTORY
                 && request.details() != null) {
             try {
+                // 1. Hardware sanitizer (mutating) on the raw details.
                 effectiveDetails = hardwareInventoryPayloadPolicy.sanitize(request.details());
+                // 2. Device-health validator/sanitizer (AG-033). Runs on
+                //    the hardware-sanitized form and validates the
+                //    details.inventory.deviceHealth block against the
+                //    contract redaction boundary (driveLetter-only disks,
+                //    sourceUsed enum, schemaVersion=1, no secret values).
+                //    A fail-closed reject (out-of-shape disk key, forbidden
+                //    secret) aborts the result submit with 400 and rolls
+                //    back the transaction so neither endpoint_command_results
+                //    nor the device-health tables persist anything.
+                effectiveDetails = deviceHealthPayloadPolicy.sanitize(effectiveDetails);
+                // 3. Software validator (validate-only) on the sanitized form.
                 inventoryPayloadPolicy.validate(effectiveDetails);
             } catch (IllegalArgumentException ex) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -207,6 +226,19 @@ public class EndpointAgentCommandService {
             if (EndpointHardwareInventoryService.hasHardwareBlock(effectiveDetails)) {
                 try {
                     hardwareInventoryService.ingest(
+                            command.getDevice(), command, result, effectiveDetails);
+                } catch (IllegalArgumentException ex) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            ex.getMessage());
+                }
+            }
+            // AG-033 device-health ingest — same transaction, same
+            // sanitized effectiveDetails. Only runs when the sanitized
+            // payload actually carries a details.inventory.deviceHealth
+            // block (nullable; absent for lightweight heartbeat collects).
+            if (EndpointDeviceHealthService.hasDeviceHealthBlock(effectiveDetails)) {
+                try {
+                    deviceHealthService.ingest(
                             command.getDevice(), command, result, effectiveDetails);
                 } catch (IllegalArgumentException ex) {
                     throw new ResponseStatusException(HttpStatus.BAD_REQUEST,

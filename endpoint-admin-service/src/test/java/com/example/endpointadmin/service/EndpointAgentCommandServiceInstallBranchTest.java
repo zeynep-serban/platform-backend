@@ -87,6 +87,10 @@ class EndpointAgentCommandServiceInstallBranchTest {
     // 019e7007 iter-4 absorb).
     @Mock private com.example.endpointadmin.security.HardwareInventoryPayloadPolicy hardwareInventoryPayloadPolicy;
     @Mock private EndpointHardwareInventoryService hardwareInventoryService;
+    // BE device-health dependencies (Faz 22.5, AG-033 ingest) added to
+    // the EndpointAgentCommandService constructor.
+    @Mock private com.example.endpointadmin.security.DeviceHealthPayloadPolicy deviceHealthPayloadPolicy;
+    @Mock private EndpointDeviceHealthService deviceHealthService;
 
     private EndpointAgentCommandService service;
 
@@ -102,8 +106,10 @@ class EndpointAgentCommandServiceInstallBranchTest {
                 inventoryPayloadPolicy,
                 installPolicy,
                 hardwareInventoryPayloadPolicy,
+                deviceHealthPayloadPolicy,
                 softwareInventoryService,
                 hardwareInventoryService,
+                deviceHealthService,
                 installAuditService,
                 fixed,
                 300L);

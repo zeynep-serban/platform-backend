@@ -108,6 +108,25 @@ class EndpointAdminAuthorizationAnnotationTest {
         }
     }
 
+    /**
+     * BE device-health (Faz 22.5, AG-033 query API): device-health admin
+     * GET routes ({@code /device-health/latest} + {@code /history}) reuse
+     * the existing {@code module:endpoint-admin} VIEWER relation; no new
+     * RBAC scope opens (mirrors the BE-022Q hardware-inventory contract).
+     * The agent ingest path is unchanged (it lives in
+     * {@code EndpointAgentCommandService}, not a dedicated controller).
+     */
+    @Test
+    void deviceHealthControllerOnlyExposesViewerGetRoutes() {
+        for (Method method :
+                AdminEndpointDeviceHealthController.class
+                        .getDeclaredMethods()) {
+            if (method.isAnnotationPresent(GetMapping.class)) {
+                assertMethodRequires(method, EndpointAdminAuthz.VIEWER);
+            }
+        }
+    }
+
     private void assertClassRequires(Class<?> controllerClass, String relation) {
         RequireModule annotation = controllerClass.getAnnotation(RequireModule.class);
         assertThat(annotation).isNotNull();
