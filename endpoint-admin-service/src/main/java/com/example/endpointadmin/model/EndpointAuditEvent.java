@@ -12,6 +12,7 @@ import jakarta.persistence.PostPersist;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
 import jakarta.persistence.Transient;
+import org.hibernate.annotations.Immutable;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 import org.springframework.data.domain.Persistable;
@@ -23,6 +24,21 @@ import java.util.Objects;
 import java.util.UUID;
 
 @Entity
+// BE-021 (issue #331): the endpoint_audit_events table is append-only —
+// enforced at the DB layer by the BE-016 trigger trg_endpoint_audit_events_
+// append_only (migration V4), which RAISEs on any UPDATE/DELETE. @Immutable
+// aligns the JPA mapping with that invariant: Hibernate INSERTs an audit row
+// once and never dirty-checks or UPDATEs it again. Without this, Hibernate
+// re-evaluates the mutable JSON `Map` columns (metadata / before_state /
+// after_state) as dirty on a LATER auto-flush in the same transaction (e.g.
+// the INSTALL_SOFTWARE dispatch path runs preflight reads + a command
+// saveAndFlush + a toDto repository read after record()), and schedules a
+// spurious UPDATE on the just-inserted audit row — which the trigger rejects
+// with a DataIntegrityViolationException → HTTP 500. The hash-chain is
+// computed before INSERT and the row never legitimately changes, so making
+// the entity immutable is the correct, durable mapping (it fixes every audit
+// caller, not just install).
+@Immutable
 @Table(name = "endpoint_audit_events",
         indexes = {
                 @Index(name = "idx_endpoint_audit_events_tenant_occurred",
