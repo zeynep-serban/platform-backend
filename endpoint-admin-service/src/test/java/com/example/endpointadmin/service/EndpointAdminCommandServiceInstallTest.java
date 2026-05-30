@@ -13,6 +13,7 @@ import com.example.endpointadmin.model.CatalogSourceType;
 import com.example.endpointadmin.model.CommandType;
 import com.example.endpointadmin.model.EndpointCommand;
 import com.example.endpointadmin.model.EndpointDevice;
+import com.example.endpointadmin.model.CatalogSilentArgsPolicy;
 import com.example.endpointadmin.model.EndpointSoftwareCatalogItem;
 import com.example.endpointadmin.repository.EndpointCommandApprovalRepository;
 import com.example.endpointadmin.repository.EndpointCommandRepository;
@@ -222,13 +223,113 @@ class EndpointAdminCommandServiceInstallTest {
                 .containsEntry("catalogItemUuid", CATALOG_UUID.toString())
                 .containsEntry("catalogPackageId", catalog.getPackageId())
                 .containsEntry("preflightDecision", "PASS")
-                .containsEntry("reason", "scheduled install");
+                .containsEntry("reason", "scheduled install")
+                // AG-027 COMMAND-CONTRACT §7 — agent-consumed fields the agent
+                // fail-closes on. These were absent before the fix, so the
+                // agent rejected the install at "missing detectionRule.type"
+                // before winget ever ran (the install-pilot blocker).
+                .containsEntry("provider", "WINGET")
+                .containsEntry("packageId", "7zip.7zip")
+                .containsEntry("argsPolicyPreset", "DEFAULT")
+                .containsEntry("catalogItemKey", CATALOG_SLUG)
+                .containsKey("detectionRule")
+                .containsKey("versionPredicate");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> detectionRule = (Map<String, Object>) dto.payload().get("detectionRule");
+        assertThat(detectionRule)
+                .as("detectionRule.type/packageId drive AG-027 pre/post detection")
+                .containsEntry("type", "WINGET_PACKAGE")
+                .containsEntry("packageId", "7zip.7zip");
+        // Agent enforces packageId == detectionRule.packageId (case-insensitive).
+        assertThat(dto.payload().get("packageId")).isEqualTo(detectionRule.get("packageId"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> versionPredicate = (Map<String, Object>) dto.payload().get("versionPredicate");
+        assertThat(versionPredicate).containsEntry("type", "LATEST");
         verify(commandRepository, times(1)).saveAndFlush(any(EndpointCommand.class));
         verify(auditService, times(1)).record(
                 any(), any(), any(),
                 org.mockito.ArgumentMatchers.eq("ENDPOINT_INSTALL_COMMAND_CREATED"),
                 org.mockito.ArgumentMatchers.eq("CREATE_INSTALL_COMMAND"),
                 anyString(), anyString(), any(), any(), any());
+    }
+
+    @Test
+    void createInstallMapsVendorRecommendedArgsPolicyPreset() {
+        EndpointDevice device = testDevice(DEVICE_ID);
+        EndpointSoftwareCatalogItem catalog = testCatalog();
+        catalog.setSilentArgsPolicy(CatalogSilentArgsPolicy.VENDOR_RECOMMENDED);
+        when(deviceRepository.findByTenantIdAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(catalogRepository.findByTenantIdAndCatalogItemId(TENANT_ID, CATALOG_SLUG))
+                .thenReturn(Optional.of(catalog));
+        when(commandRepository.findByTenantIdAndIdempotencyKey(TENANT_ID,
+                "admin-install:" + DEVICE_ID + ":" + CATALOG_UUID + ":" + CALLER_KEY))
+                .thenReturn(Optional.empty());
+        when(preflightService.evaluate(TENANT, DEVICE_ID, CATALOG_SLUG))
+                .thenReturn(preflightOf(InstallPreflightDecision.PASS));
+        when(commandRepository.saveAndFlush(any(EndpointCommand.class)))
+                .thenAnswer(inv -> {
+                    EndpointCommand cmd = inv.getArgument(0);
+                    setField(cmd, "id", UUID.randomUUID());
+                    return cmd;
+                });
+
+        EndpointCommandDto dto = service.createInstall(
+                TENANT, DEVICE_ID, new CreateInstallRequest(CATALOG_SLUG, CALLER_KEY, null));
+
+        // VENDOR_RECOMMENDED catalog policy maps to the agent's distinct preset
+        // slot (install_winget.go::argsPresets); v1 ships the same arg slice but
+        // the name preserves operator intent in the audit trail.
+        assertThat(dto.payload()).containsEntry("argsPolicyPreset", "VENDOR_RECOMMENDED_WINGET_NO_UPGRADE");
+    }
+
+    @Test
+    void createInstallFailsClosedOnUnsupportedDetectionRuleType() {
+        EndpointDevice device = testDevice(DEVICE_ID);
+        EndpointSoftwareCatalogItem catalog = testCatalog();
+        Map<String, Object> rule = new LinkedHashMap<>();
+        rule.put("type", "REGISTRY_UNINSTALL"); // not yet agent-supported
+        rule.put("registryKey", "HKLM\\SOFTWARE\\7-Zip");
+        catalog.setDetectionRule(rule);
+        when(deviceRepository.findByTenantIdAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(catalogRepository.findByTenantIdAndCatalogItemId(TENANT_ID, CATALOG_SLUG))
+                .thenReturn(Optional.of(catalog));
+        when(commandRepository.findByTenantIdAndIdempotencyKey(TENANT_ID,
+                "admin-install:" + DEVICE_ID + ":" + CATALOG_UUID + ":" + CALLER_KEY))
+                .thenReturn(Optional.empty());
+        when(preflightService.evaluate(TENANT, DEVICE_ID, CATALOG_SLUG))
+                .thenReturn(preflightOf(InstallPreflightDecision.PASS));
+
+        // Fail-closed: a not-yet-agent-supported rule must NOT be silently
+        // converted into a fabricated WINGET_PACKAGE rule and queued.
+        assertThatThrownBy(() -> service.createInstall(
+                TENANT, DEVICE_ID, new CreateInstallRequest(CATALOG_SLUG, CALLER_KEY, null)))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        verify(commandRepository, org.mockito.Mockito.never()).saveAndFlush(any(EndpointCommand.class));
+    }
+
+    @Test
+    void createInstallFailsClosedOnDetectionRulePackageIdDrift() {
+        EndpointDevice device = testDevice(DEVICE_ID);
+        EndpointSoftwareCatalogItem catalog = testCatalog();
+        Map<String, Object> rule = new LinkedHashMap<>();
+        rule.put("type", "WINGET_PACKAGE");
+        rule.put("wingetPackageId", "Some.Other.Package"); // drifted from packageId 7zip.7zip
+        catalog.setDetectionRule(rule);
+        when(deviceRepository.findByTenantIdAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(catalogRepository.findByTenantIdAndCatalogItemId(TENANT_ID, CATALOG_SLUG))
+                .thenReturn(Optional.of(catalog));
+        when(commandRepository.findByTenantIdAndIdempotencyKey(TENANT_ID,
+                "admin-install:" + DEVICE_ID + ":" + CATALOG_UUID + ":" + CALLER_KEY))
+                .thenReturn(Optional.empty());
+        when(preflightService.evaluate(TENANT, DEVICE_ID, CATALOG_SLUG))
+                .thenReturn(preflightOf(InstallPreflightDecision.PASS));
+
+        // Fail-closed: detectionRule.wingetPackageId drift from packageId would
+        // let the agent install package A while verifying package B.
+        assertThatThrownBy(() -> service.createInstall(
+                TENANT, DEVICE_ID, new CreateInstallRequest(CATALOG_SLUG, CALLER_KEY, null)))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        verify(commandRepository, org.mockito.Mockito.never()).saveAndFlush(any(EndpointCommand.class));
     }
 
     // ─── helpers ─────────────────────────────────────────────────────
@@ -251,6 +352,10 @@ class EndpointAdminCommandServiceInstallTest {
         catalog.setDisplayName("7-Zip");
         catalog.setInstallerType(CatalogInstallerType.WINGET_SILENT);
         catalog.setEnabled(true);
+        Map<String, Object> rule = new LinkedHashMap<>();
+        rule.put("type", "WINGET_PACKAGE");
+        rule.put("wingetPackageId", "7zip.7zip");
+        catalog.setDetectionRule(rule);
         setField(catalog, "id", CATALOG_UUID);
         setField(catalog, "version", 3L);
         return catalog;

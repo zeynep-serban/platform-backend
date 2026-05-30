@@ -16,6 +16,7 @@ import com.example.endpointadmin.model.EndpointCommand;
 import com.example.endpointadmin.model.EndpointCommandApproval;
 import com.example.endpointadmin.model.EndpointCommandResult;
 import com.example.endpointadmin.model.EndpointDevice;
+import com.example.endpointadmin.model.CatalogSilentArgsPolicy;
 import com.example.endpointadmin.model.EndpointSoftwareCatalogItem;
 import com.example.endpointadmin.repository.EndpointCommandApprovalRepository;
 import com.example.endpointadmin.repository.EndpointCommandRepository;
@@ -478,6 +479,39 @@ public class EndpointAdminCommandService {
                 ? null : catalogItem.getSourceType().name());
         payload.put("installerType", catalogItem.getInstallerType() == null
                 ? null : catalogItem.getInstallerType().name());
+
+        // AG-027 COMMAND-CONTRACT §7 — agent-consumed install fields. The agent
+        // (executor.go unmarshalInstallRequest + RunInstall) FAIL-CLOSES the
+        // command unless provider / packageId / argsPolicyPreset and
+        // detectionRule.{type,packageId} are present and mutually consistent
+        // (provider=WINGET, packageId==detectionRule.packageId). The
+        // catalog-shaped keys above (catalogPackageId / packageProvider) are
+        // NOT what AG-027 reads, so without this block the agent rejected the
+        // payload at "missing detectionRule.type" BEFORE winget ever ran — the
+        // true reason the 7-Zip install pilot never completed end-to-end.
+        String agentPackageId = catalogItem.getPackageId();
+        payload.put("provider", catalogItem.getProvider() == null
+                ? null : catalogItem.getProvider().name());
+        payload.put("packageId", agentPackageId);
+        payload.put("argsPolicyPreset", mapArgsPolicyPreset(catalogItem.getSilentArgsPolicy()));
+        Map<String, Object> versionPredicate = new LinkedHashMap<>();
+        versionPredicate.put("type", catalogItem.getVersionPolicyType() == null
+                ? "LATEST" : catalogItem.getVersionPolicyType().name());
+        // LATEST → null spec; EXACT/MINIMUM/RANGE carry the catalog authoring
+        // string. The agent does NOT resolve LATEST → a concrete version, so
+        // resolvedVersion stays null for LATEST (COMMAND-CONTRACT §7).
+        versionPredicate.put("spec", catalogItem.getVersionPolicyValue());
+        payload.put("versionPredicate", versionPredicate);
+        payload.put("resolvedVersion", null);
+        // Derive detectionRule from the catalog's AUTHORED rule (validated at
+        // catalog-create by DetectionRuleValidator) and FAIL-CLOSE on drift /
+        // a not-yet-agent-supported type — never synthesize a WINGET_PACKAGE
+        // rule from packageId, which would let a drifted/REGISTRY_UNINSTALL
+        // catalog install while the agent verifies the wrong target
+        // (Codex 019e77bd).
+        payload.put("detectionRule", buildAgentDetectionRule(catalogItem, agentPackageId));
+        payload.put("catalogItemKey", catalogItem.getCatalogItemId());
+
         payload.put("preflightDecision", preflight.decision().name());
         payload.put("preflightDecisionAt", preflight.evaluatedAt() == null
                 ? null : preflight.evaluatedAt().toString());
@@ -496,6 +530,61 @@ public class EndpointAdminCommandService {
             payload.put("reason", reason);
         }
         return payload;
+    }
+
+    /**
+     * Map the catalog's {@link CatalogSilentArgsPolicy} onto the AG-027
+     * {@code argsPolicyPreset} enum slot the agent recognises
+     * (install_winget.go::argsPresets). Both presets ship the same arg slice
+     * in v1; the distinct name preserves operator intent in the audit trail.
+     */
+    private static String mapArgsPolicyPreset(CatalogSilentArgsPolicy policy) {
+        if (policy == null) {
+            return "DEFAULT";
+        }
+        return switch (policy) {
+            case VENDOR_RECOMMENDED -> "VENDOR_RECOMMENDED_WINGET_NO_UPGRADE";
+            case DEFAULT -> "DEFAULT";
+        };
+    }
+
+    /**
+     * Derive the AG-027 wire {@code detectionRule} ({@code {type, packageId}})
+     * from the catalog item's AUTHORED detection rule, translating the backend
+     * authoring field {@code wingetPackageId} to the agent wire field
+     * {@code packageId}. Fail-closed (Codex 019e77bd):
+     * <ul>
+     *   <li>type must be {@code WINGET_PACKAGE} — a not-yet-agent-supported
+     *       type (REGISTRY_UNINSTALL, FILE_EXISTS, …) must NOT be silently
+     *       converted; the install is rejected here rather than dispatched with
+     *       a fabricated rule the agent would mis-verify;</li>
+     *   <li>{@code wingetPackageId} must be present and case-insensitively
+     *       equal to {@code packageId} — drift fails closed so the agent never
+     *       installs package A while verifying package B.</li>
+     * </ul>
+     */
+    private static Map<String, Object> buildAgentDetectionRule(EndpointSoftwareCatalogItem catalogItem,
+                                                               String agentPackageId) {
+        Map<String, Object> catalogRule = catalogItem.getDetectionRule();
+        Object type = catalogRule == null ? null : catalogRule.get("type");
+        if (!"WINGET_PACKAGE".equals(type)) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    "Catalog detection rule type '" + type
+                            + "' is not agent-installable (AG-027 v1 supports WINGET_PACKAGE only).");
+        }
+        Object wingetPackageId = catalogRule.get("wingetPackageId");
+        String detectionPackageId = wingetPackageId == null ? null : wingetPackageId.toString().trim();
+        if (detectionPackageId == null || detectionPackageId.isEmpty()
+                || agentPackageId == null
+                || !detectionPackageId.equalsIgnoreCase(agentPackageId.trim())) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    "Catalog detection rule wingetPackageId must equal the catalog packageId "
+                            + "(drift fails closed before dispatch).");
+        }
+        Map<String, Object> detectionRule = new LinkedHashMap<>();
+        detectionRule.put("type", "WINGET_PACKAGE");
+        detectionRule.put("packageId", detectionPackageId);
+        return detectionRule;
     }
 
     /**

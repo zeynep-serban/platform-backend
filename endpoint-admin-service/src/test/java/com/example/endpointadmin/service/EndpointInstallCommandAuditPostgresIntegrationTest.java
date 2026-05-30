@@ -237,7 +237,7 @@ class EndpointInstallCommandAuditPostgresIntegrationTest {
                         + "VALUES (?, ?, ?, 'APPROVED', 'WINGET', 'WINGET', 'winget',"
                         + " 'WINGET_COMMUNITY_REVIEWED', ?, ?, 'Igor Pavlov', 'LATEST', NULL,"
                         + " 'WINGET_SILENT', 'DEFAULT', NULL, NULL,"
-                        + " '{\"type\":\"WINGET_PACKAGE\"}'::jsonb, 'LOW', true,"
+                        + " '{\"type\":\"WINGET_PACKAGE\",\"wingetPackageId\":\"7zip.7zip\"}'::jsonb, 'LOW', true,"
                         + " 'creator', ?, 'creator', ?, 0)",
                 id, TENANT, CATALOG_SLUG, PILOT_PACKAGE, "7-Zip", now, now);
     }
