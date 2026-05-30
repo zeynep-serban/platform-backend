@@ -5,6 +5,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -19,4 +20,15 @@ public interface EndpointComplianceEvaluationRepository
 
     Page<EndpointComplianceEvaluation> findByTenantIdAndDeviceIdOrderByEvaluatedAtDesc(
             UUID tenantId, UUID deviceId, Pageable pageable);
+
+    /**
+     * BE-025 — latest evaluation row for a device within the tenant. Used
+     * by the prohibited-software read surface to read the persisted
+     * {@code matchedItems.prohibitedInstalled} evidence (NOT a live
+     * recompute). Tenant-scoped, so a cross-tenant / unknown device returns
+     * empty — indistinguishable from "no evaluation yet" (no existence
+     * leak).
+     */
+    Optional<EndpointComplianceEvaluation> findFirstByTenantIdAndDeviceIdOrderByEvaluatedAtDesc(
+            UUID tenantId, UUID deviceId);
 }

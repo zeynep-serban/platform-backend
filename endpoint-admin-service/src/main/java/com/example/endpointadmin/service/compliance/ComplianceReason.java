@@ -22,6 +22,14 @@ public enum ComplianceReason {
 
     // ─── BLOCK → UNAUTHORIZED ─────────────────────────────────────
     FORBIDDEN_APP_INSTALLED("forbidden_app_installed", Severity.UNAUTHORIZED),
+    // BE-025 (Faz 22.5): a tenant-scoped prohibited-software denylist rule
+    // (NOT catalog-bound) matched the device's installed inventory by name
+    // and/or publisher. Same UNAUTHORIZED severity bucket as
+    // FORBIDDEN_APP_INSTALLED — the device decision collapses to
+    // UNAUTHORIZED — but a distinct code so evidence / UI can tell a
+    // catalog-FORBIDDEN hit from a denylist hit. Detection only; no
+    // auto-uninstall.
+    PROHIBITED_APP_INSTALLED("prohibited_app_installed", Severity.UNAUTHORIZED),
 
     // ─── UNKNOWN-driving ──────────────────────────────────────────
     INVENTORY_MISSING("inventory_missing", Severity.UNKNOWN),
