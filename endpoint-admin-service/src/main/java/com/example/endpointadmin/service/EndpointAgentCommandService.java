@@ -15,6 +15,7 @@ import com.example.endpointadmin.security.DeviceCredentialResult;
 import com.example.endpointadmin.security.DeviceHealthPayloadPolicy;
 import com.example.endpointadmin.security.HardwareInventoryPayloadPolicy;
 import com.example.endpointadmin.security.InstallEvidencePayloadPolicy;
+import com.example.endpointadmin.security.OutdatedSoftwarePayloadPolicy;
 import com.example.endpointadmin.security.SoftwareInventoryPayloadPolicy;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
@@ -40,9 +41,11 @@ public class EndpointAgentCommandService {
     private final InstallEvidencePayloadPolicy installEvidencePayloadPolicy;
     private final HardwareInventoryPayloadPolicy hardwareInventoryPayloadPolicy;
     private final DeviceHealthPayloadPolicy deviceHealthPayloadPolicy;
+    private final OutdatedSoftwarePayloadPolicy outdatedSoftwarePayloadPolicy;
     private final EndpointSoftwareInventoryService softwareInventoryService;
     private final EndpointHardwareInventoryService hardwareInventoryService;
     private final EndpointDeviceHealthService deviceHealthService;
+    private final EndpointOutdatedSoftwareService outdatedSoftwareService;
     private final EndpointInstallAuditService installAuditService;
     private final Clock clock;
     private final Duration claimTtl;
@@ -53,9 +56,11 @@ public class EndpointAgentCommandService {
                                        InstallEvidencePayloadPolicy installEvidencePayloadPolicy,
                                        HardwareInventoryPayloadPolicy hardwareInventoryPayloadPolicy,
                                        DeviceHealthPayloadPolicy deviceHealthPayloadPolicy,
+                                       OutdatedSoftwarePayloadPolicy outdatedSoftwarePayloadPolicy,
                                        EndpointSoftwareInventoryService softwareInventoryService,
                                        EndpointHardwareInventoryService hardwareInventoryService,
                                        EndpointDeviceHealthService deviceHealthService,
+                                       EndpointOutdatedSoftwareService outdatedSoftwareService,
                                        EndpointInstallAuditService installAuditService,
                                        Clock clock,
                                        @Value("${endpoint-admin.commands.claim-ttl-seconds:300}") long claimTtlSeconds) {
@@ -65,9 +70,11 @@ public class EndpointAgentCommandService {
         this.installEvidencePayloadPolicy = installEvidencePayloadPolicy;
         this.hardwareInventoryPayloadPolicy = hardwareInventoryPayloadPolicy;
         this.deviceHealthPayloadPolicy = deviceHealthPayloadPolicy;
+        this.outdatedSoftwarePayloadPolicy = outdatedSoftwarePayloadPolicy;
         this.softwareInventoryService = softwareInventoryService;
         this.hardwareInventoryService = hardwareInventoryService;
         this.deviceHealthService = deviceHealthService;
+        this.outdatedSoftwareService = outdatedSoftwareService;
         this.installAuditService = installAuditService;
         this.clock = clock;
         this.claimTtl = Duration.ofSeconds(Math.max(30L, claimTtlSeconds));
@@ -153,7 +160,19 @@ public class EndpointAgentCommandService {
                 //    back the transaction so neither endpoint_command_results
                 //    nor the device-health tables persist anything.
                 effectiveDetails = deviceHealthPayloadPolicy.sanitize(effectiveDetails);
-                // 3. Software validator (validate-only) on the sanitized form.
+                // 3. Outdated-software validator/sanitizer (AG-036). Runs on
+                //    the device-health-sanitized form and validates the
+                //    details.inventory.outdatedSoftware block against the
+                //    contract redaction boundary (per-package keys EXACTLY
+                //    {packageId, installedVersion, availableVersion},
+                //    sourceUsed enum {winget,none}, maxUpgrade=512,
+                //    schemaVersion=1, no secret values). A fail-closed reject
+                //    (off-contract package key, forbidden secret) aborts the
+                //    result submit with 400 and rolls back the transaction so
+                //    neither endpoint_command_results nor the outdated-software
+                //    tables persist anything.
+                effectiveDetails = outdatedSoftwarePayloadPolicy.sanitize(effectiveDetails);
+                // 4. Software validator (validate-only) on the sanitized form.
                 inventoryPayloadPolicy.validate(effectiveDetails);
             } catch (IllegalArgumentException ex) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -239,6 +258,19 @@ public class EndpointAgentCommandService {
             if (EndpointDeviceHealthService.hasDeviceHealthBlock(effectiveDetails)) {
                 try {
                     deviceHealthService.ingest(
+                            command.getDevice(), command, result, effectiveDetails);
+                } catch (IllegalArgumentException ex) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            ex.getMessage());
+                }
+            }
+            // AG-036 outdated-software ingest — same transaction, same
+            // sanitized effectiveDetails. Only runs when the sanitized payload
+            // actually carries a details.inventory.outdatedSoftware block
+            // (nullable; absent for heartbeat / lightweight collects).
+            if (EndpointOutdatedSoftwareService.hasOutdatedSoftwareBlock(effectiveDetails)) {
+                try {
+                    outdatedSoftwareService.ingest(
                             command.getDevice(), command, result, effectiveDetails);
                 } catch (IllegalArgumentException ex) {
                     throw new ResponseStatusException(HttpStatus.BAD_REQUEST,

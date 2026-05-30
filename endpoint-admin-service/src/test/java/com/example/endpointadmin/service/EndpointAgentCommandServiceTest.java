@@ -52,7 +52,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         // BE — device-health (AG-033) sanitizer + service wired into the
         // same COLLECT_INVENTORY pre-persist + ingest path.
         com.example.endpointadmin.security.DeviceHealthPayloadPolicy.class,
-        EndpointDeviceHealthService.class
+        EndpointDeviceHealthService.class,
+        // AG-036 — outdated-software sanitizer + service wired into the same
+        // COLLECT_INVENTORY pre-persist + ingest path.
+        com.example.endpointadmin.security.OutdatedSoftwarePayloadPolicy.class,
+        EndpointOutdatedSoftwareService.class
 })
 class EndpointAgentCommandServiceTest {
 
@@ -329,6 +333,211 @@ class EndpointAgentCommandServiceTest {
         java.util.Map<String, Object> details = new java.util.LinkedHashMap<>();
         java.util.Map<String, Object> inventory = new java.util.LinkedHashMap<>();
         inventory.put("hardware", hardware);
+        details.put("inventory", inventory);
+        return new AgentCommandResultRequest(
+                claimId,
+                attemptNumber,
+                status,
+                "done",
+                details,
+                null, null, 0,
+                Instant.now().minusSeconds(5),
+                Instant.now());
+    }
+
+    // ------------------------------------------------------------------
+    // AG-036 outdated-software type-confusion security regression lock
+    // (Codex 019e7693 RED P0). A present-but-non-Map outdatedSoftware
+    // block (List / String) MUST fail-closed the submit so the raw,
+    // unredacted block never reaches result_payload.details and no
+    // outdated-software snapshot is appended. P1: a case-variant extra
+    // package key violates additionalProperties:false and is rejected.
+    // ------------------------------------------------------------------
+
+    @Autowired
+    private com.example.endpointadmin.repository.EndpointOutdatedSoftwareSnapshotRepository outdatedSnapshotRepository;
+
+    @Test
+    void submitResultRejectsOutdatedSoftwareAsListAndPersistsNothing() {
+        // The leak repro: outdatedSoftware is a LIST of raw package objects
+        // carrying publisher / downloadUrl PII. Before the fix the policy's
+        // `instanceof Map` dispatch had no else-throw, so the list passed
+        // through unsanitized into result_payload.details and the
+        // hasOutdatedSoftwareBlock(Map-only) gate skipped ingest — the raw
+        // PII-bearing payload persisted. Now it is a fail-closed 400.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-OSW-LIST"));
+        EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-osw-list", 10));
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        java.util.Map<String, Object> rawPkg = new java.util.LinkedHashMap<>();
+        rawPkg.put("packageId", "Acme.Tool");
+        rawPkg.put("installedVersion", "1.0.0");
+        rawPkg.put("availableVersion", "2.0.0");
+        rawPkg.put("publisher", "Acme Corp");
+        rawPkg.put("downloadUrl", "http://acme.example/installer.exe");
+
+        long beforeOutdated = outdatedSnapshotRepository.count();
+
+        assertThatThrownBy(() ->
+                commandService.submitResult(
+                        principal(device),
+                        command.getId(),
+                        resultRequestWithOutdatedSoftware(
+                                claimed.claimId(), claimed.attemptNumber(),
+                                CommandResultStatus.SUCCEEDED,
+                                java.util.List.of(rawPkg))))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("$.inventory.outdatedSoftware");
+
+        // Transaction rolled back: no command-result row, no outdated
+        // snapshot. The raw publisher / downloadUrl never reach any sink.
+        assertThat(resultRepository.findByCommand_Id(command.getId())).isEmpty();
+        assertThat(outdatedSnapshotRepository.count()).isEqualTo(beforeOutdated);
+    }
+
+    @Test
+    void submitResultRejectsOutdatedSoftwareAsStringAndPersistsNothing() {
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-OSW-STR"));
+        EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-osw-str", 10));
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        long beforeOutdated = outdatedSnapshotRepository.count();
+
+        assertThatThrownBy(() ->
+                commandService.submitResult(
+                        principal(device),
+                        command.getId(),
+                        resultRequestWithOutdatedSoftware(
+                                claimed.claimId(), claimed.attemptNumber(),
+                                CommandResultStatus.SUCCEEDED,
+                                "publisher=Acme; downloadUrl=http://acme.example")))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("$.inventory.outdatedSoftware");
+
+        assertThat(resultRepository.findByCommand_Id(command.getId())).isEmpty();
+        assertThat(outdatedSnapshotRepository.count()).isEqualTo(beforeOutdated);
+    }
+
+    @Test
+    void submitResultRejectsTopLevelOutdatedSoftwareAsListAndPersistsNothing() {
+        // The top-level alias (details.outdatedSoftware, no inventory wrapper)
+        // some agent versions emit must fail-closed on the same non-Map type
+        // confusion as the inventory-nested path.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-OSW-TOP"));
+        EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-osw-top", 10));
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        long beforeOutdated = outdatedSnapshotRepository.count();
+
+        java.util.Map<String, Object> details = new java.util.LinkedHashMap<>();
+        details.put("outdatedSoftware", java.util.List.of(
+                java.util.Map.of("packageId", "Acme.Tool",
+                        "publisher", "Acme Corp")));
+
+        assertThatThrownBy(() ->
+                commandService.submitResult(
+                        principal(device),
+                        command.getId(),
+                        new AgentCommandResultRequest(
+                                claimed.claimId(), claimed.attemptNumber(),
+                                CommandResultStatus.SUCCEEDED, "done", details,
+                                null, null, 0,
+                                Instant.now().minusSeconds(5), Instant.now())))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("$.outdatedSoftware");
+
+        assertThat(resultRepository.findByCommand_Id(command.getId())).isEmpty();
+        assertThat(outdatedSnapshotRepository.count()).isEqualTo(beforeOutdated);
+    }
+
+    @Test
+    void submitResultRejectsCaseVariantPackageKeyAndPersistsNothing() {
+        // P1: additionalProperties:false is exact + case-sensitive. A package
+        // object carrying both the valid packageId and a case-variant extra
+        // (PackageId — a redaction-gated field smuggled past a lowercase
+        // allowlist) is rejected, not silently dropped.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-OSW-CASE"));
+        EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-osw-case", 10));
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        java.util.Map<String, Object> pkg = new java.util.LinkedHashMap<>();
+        pkg.put("packageId", "Acme.Tool");
+        pkg.put("installedVersion", "1.0.0");
+        pkg.put("availableVersion", "2.0.0");
+        // Case-variant extras that a case-insensitive allowlist would drop.
+        pkg.put("PackageId", "Acme.Tool.Display Name");
+        pkg.put("Publisher", "Acme Corp");
+
+        java.util.Map<String, Object> osBlock = validOutdatedSoftwareBlock();
+        osBlock.put("upgradeCount", 1);
+        osBlock.put("upgrade", java.util.List.of(pkg));
+
+        long beforeOutdated = outdatedSnapshotRepository.count();
+
+        assertThatThrownBy(() ->
+                commandService.submitResult(
+                        principal(device),
+                        command.getId(),
+                        resultRequestWithOutdatedSoftware(
+                                claimed.claimId(), claimed.attemptNumber(),
+                                CommandResultStatus.SUCCEEDED, osBlock)))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("case-variant");
+
+        assertThat(resultRepository.findByCommand_Id(command.getId())).isEmpty();
+        assertThat(outdatedSnapshotRepository.count()).isEqualTo(beforeOutdated);
+    }
+
+    @Test
+    void submitResultIngestsValidOutdatedSoftwareBlock() {
+        // Positive control: a well-formed outdatedSoftware Map block still
+        // sanitizes, persists, and ingests exactly one snapshot — proving the
+        // fail-closed reject above did not break the happy path.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-OSW-OK"));
+        EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-osw-ok", 10));
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        long beforeOutdated = outdatedSnapshotRepository.count();
+
+        commandService.submitResult(
+                principal(device),
+                command.getId(),
+                resultRequestWithOutdatedSoftware(
+                        claimed.claimId(), claimed.attemptNumber(),
+                        CommandResultStatus.SUCCEEDED, validOutdatedSoftwareBlock()));
+
+        EndpointCommandResult result = resultRepository.findByCommand_Id(command.getId()).orElseThrow();
+        assertThat(result.getResultStatus()).isEqualTo(CommandResultStatus.SUCCEEDED);
+        assertThat(outdatedSnapshotRepository.count()).isEqualTo(beforeOutdated + 1);
+    }
+
+    /** A contract-valid outdated-software block (no upgrades). */
+    private java.util.Map<String, Object> validOutdatedSoftwareBlock() {
+        java.util.Map<String, Object> os = new java.util.LinkedHashMap<>();
+        os.put("schemaVersion", 1);
+        os.put("supported", true);
+        os.put("probeComplete", true);
+        os.put("upgradeCount", 0);
+        os.put("upgrade", java.util.List.of());
+        os.put("upgradeTruncated", false);
+        os.put("maxUpgrade", 512);
+        os.put("sourceUsed", "winget");
+        os.put("probeDurationMs", 1200);
+        return os;
+    }
+
+    /**
+     * Build an AgentCommandResultRequest carrying an arbitrary
+     * {@code outdatedSoftware} value under {@code details.inventory}. The
+     * value type is intentionally {@code Object} so a test can wire a List /
+     * String to exercise the non-Map type-confusion reject.
+     */
+    private AgentCommandResultRequest resultRequestWithOutdatedSoftware(
+            String claimId, int attemptNumber, CommandResultStatus status,
+            Object outdatedSoftware) {
+        java.util.Map<String, Object> inventory = new java.util.LinkedHashMap<>();
+        inventory.put("outdatedSoftware", outdatedSoftware);
+        java.util.Map<String, Object> details = new java.util.LinkedHashMap<>();
         details.put("inventory", inventory);
         return new AgentCommandResultRequest(
                 claimId,

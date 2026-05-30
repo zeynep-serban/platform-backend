@@ -127,6 +127,25 @@ class EndpointAdminAuthorizationAnnotationTest {
         }
     }
 
+    /**
+     * AG-036 outdated-software (Faz 22.5, query API): outdated-software admin
+     * GET routes ({@code /outdated-software/latest} + {@code /history}) reuse
+     * the existing {@code module:endpoint-admin} VIEWER relation; no new RBAC
+     * scope opens (mirrors the AG-033 device-health + BE-022Q hardware-
+     * inventory contract). The agent ingest path is unchanged (it lives in
+     * {@code EndpointAgentCommandService}, not a dedicated controller).
+     */
+    @Test
+    void outdatedSoftwareControllerOnlyExposesViewerGetRoutes() {
+        for (Method method :
+                AdminEndpointOutdatedSoftwareController.class
+                        .getDeclaredMethods()) {
+            if (method.isAnnotationPresent(GetMapping.class)) {
+                assertMethodRequires(method, EndpointAdminAuthz.VIEWER);
+            }
+        }
+    }
+
     private void assertClassRequires(Class<?> controllerClass, String relation) {
         RequireModule annotation = controllerClass.getAnnotation(RequireModule.class);
         assertThat(annotation).isNotNull();

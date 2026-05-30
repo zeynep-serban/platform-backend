@@ -91,6 +91,10 @@ class EndpointAgentCommandServiceInstallBranchTest {
     // the EndpointAgentCommandService constructor.
     @Mock private com.example.endpointadmin.security.DeviceHealthPayloadPolicy deviceHealthPayloadPolicy;
     @Mock private EndpointDeviceHealthService deviceHealthService;
+    // AG-036 outdated-software dependencies (Faz 22.5) added to the
+    // EndpointAgentCommandService constructor.
+    @Mock private com.example.endpointadmin.security.OutdatedSoftwarePayloadPolicy outdatedSoftwarePayloadPolicy;
+    @Mock private EndpointOutdatedSoftwareService outdatedSoftwareService;
 
     private EndpointAgentCommandService service;
 
@@ -107,9 +111,11 @@ class EndpointAgentCommandServiceInstallBranchTest {
                 installPolicy,
                 hardwareInventoryPayloadPolicy,
                 deviceHealthPayloadPolicy,
+                outdatedSoftwarePayloadPolicy,
                 softwareInventoryService,
                 hardwareInventoryService,
                 deviceHealthService,
+                outdatedSoftwareService,
                 installAuditService,
                 fixed,
                 300L);
