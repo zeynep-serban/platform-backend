@@ -98,6 +98,81 @@ class DeviceHealthPayloadPolicyTest {
     }
 
     // ------------------------------------------------------------------
+    // Redaction-boundary type-confusion bypass — a present-but-non-Map
+    // deviceHealth (List / String / scalar) used to skip the Map-gated
+    // per-field sanitize entirely. Now fail-closed (mirrors
+    // WinGetEgressPayloadPolicy.validate). Absent / null stays the opt-out.
+    // ------------------------------------------------------------------
+
+    @Test
+    void rejectsInventoryDeviceHealthAsListCarryingForbiddenPii() {
+        // serial / volumeLabel / mountPath / guid = the device-health
+        // "NEVER on the wire" fields; a list of them must not bypass.
+        Map<String, Object> leak = new LinkedHashMap<>();
+        leak.put("serial", "WD-WX12A34567B9");
+        leak.put("volumeLabel", "OS");
+        leak.put("mountPath", "C:\\Mounts\\disk0");
+        leak.put("guid", "{12345678-1234-1234-1234-1234567890ab}");
+        Map<String, Object> details = new LinkedHashMap<>();
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        inventory.put("deviceHealth", List.of(leak));
+        details.put("inventory", inventory);
+
+        assertThatThrownBy(() -> policy.sanitize(details))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("$.inventory.deviceHealth")
+                .hasMessageContaining("must be an object");
+    }
+
+    @Test
+    void rejectsInventoryDeviceHealthAsString() {
+        Map<String, Object> details = new LinkedHashMap<>();
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        inventory.put("deviceHealth", "serial=WD-WX12A34567B9");
+        details.put("inventory", inventory);
+
+        assertThatThrownBy(() -> policy.sanitize(details))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("$.inventory.deviceHealth")
+                .hasMessageContaining("must be an object");
+    }
+
+    @Test
+    void rejectsTopLevelDeviceHealthAliasAsList() {
+        Map<String, Object> leak = new LinkedHashMap<>();
+        leak.put("serial", "WD-WX12A34567B9");
+        leak.put("mountPath", "C:\\Mounts\\disk0");
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("deviceHealth", List.of(leak));
+
+        assertThatThrownBy(() -> policy.sanitize(details))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("$.deviceHealth")
+                .hasMessageContaining("must be an object");
+    }
+
+    @Test
+    void absentDeviceHealthStaysValidOptOut() {
+        // No deviceHealth anywhere — sanitize must NOT throw (opt-out).
+        Map<String, Object> details = new LinkedHashMap<>();
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        inventory.put("software", Map.of("schemaVersion", 1));
+        details.put("inventory", inventory);
+        assertThatCode(() -> policy.sanitize(details)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void explicitNullDeviceHealthStaysValidOptOut() {
+        // Explicit-null deviceHealth is the valid opt-out, not a bypass.
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        inventory.put("deviceHealth", null);
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("inventory", inventory);
+        details.put("deviceHealth", null);
+        assertThatCode(() -> policy.sanitize(details)).doesNotThrowAnyException();
+    }
+
+    // ------------------------------------------------------------------
     // Disk-facet allowlist (the tighter-than-hardware boundary)
     // ------------------------------------------------------------------
 

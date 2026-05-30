@@ -277,24 +277,68 @@ public class DeviceHealthPayloadPolicy {
         if (inventoryNode instanceof Map<?, ?> inventoryMap) {
             @SuppressWarnings("unchecked")
             Map<String, Object> typed = (Map<String, Object>) inventoryMap;
-            Object deviceHealthNode = typed.get("deviceHealth");
-            if (deviceHealthNode instanceof Map<?, ?> dhMap) {
+            // Fail-closed reject a present-but-non-Map deviceHealth (a
+            // List / String / scalar) BEFORE the Map-gated sanitize. A
+            // non-Map value would otherwise skip the redaction boundary
+            // entirely AND the Map-only ingest gate, so its serial /
+            // volumeLabel / mountPath / guid fields ("NEVER on the wire")
+            // would leak unsanitized into
+            // endpoint_command_results.result_payload.details with no 400.
+            // Absent / explicit-null stays the valid opt-out (the block is
+            // nullable — lightweight heartbeat collects omit it). Mirrors
+            // WinGetEgressPayloadPolicy.validate's present-but-non-Map reject.
+            Object deviceHealthNode = requireMapOrAbsent(
+                    typed.get("deviceHealth"), "$.inventory.deviceHealth");
+            if (deviceHealthNode != null) {
                 @SuppressWarnings("unchecked")
-                Map<String, Object> dhTyped = (Map<String, Object>) dhMap;
+                Map<String, Object> dhTyped = (Map<String, Object>) deviceHealthNode;
                 typed.put("deviceHealth",
                         sanitizeDeviceHealth(dhTyped, "$.inventory.deviceHealth"));
             }
         }
         // Some agent versions may also place the block at the top level —
-        // sanitize that too if present (parity with hardware policy).
-        Object topNode = sanitized.get("deviceHealth");
-        if (topNode instanceof Map<?, ?> topMap) {
+        // sanitize that too if present (parity with hardware policy). Same
+        // fail-closed reject: a present-but-non-Map top-level deviceHealth
+        // alias must not bypass the redaction boundary.
+        Object topNode = requireMapOrAbsent(
+                sanitized.get("deviceHealth"), "$.deviceHealth");
+        if (topNode != null) {
             @SuppressWarnings("unchecked")
-            Map<String, Object> dhTyped = (Map<String, Object>) topMap;
+            Map<String, Object> dhTyped = (Map<String, Object>) topNode;
             sanitized.put("deviceHealth",
                     sanitizeDeviceHealth(dhTyped, "$.deviceHealth"));
         }
         return sanitized;
+    }
+
+    /**
+     * Fail-closed map-shape gate for the device-health block at a
+     * redaction-boundary entry point. Returns {@code null} for an absent /
+     * explicit-null value (the valid opt-out — the block is nullable), the
+     * value itself when it is a {@link Map}, and throws
+     * {@link IllegalArgumentException} (→ 400) for any present-but-non-Map
+     * value (a {@link java.util.List}, {@link String}, or scalar).
+     *
+     * <p>This closes a type-confusion redaction bypass: the per-field
+     * sanitize ({@link #sanitizeDeviceHealth}) only runs for a Map, and the
+     * Map-only ingest gate ({@code EndpointDeviceHealthService.hasDeviceHealthBlock})
+     * also skips a non-Map — so a {@code deviceHealth: [{serial, volumeLabel,
+     * mountPath, guid}]} list (the device-health "NEVER on the wire" fields)
+     * would otherwise reach the command-results sink unsanitized with no
+     * 400. Mirrors {@code WinGetEgressPayloadPolicy.validate} (~line 173).
+     */
+    private static Object requireMapOrAbsent(Object value, String path) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Map<?, ?>) {
+            return value;
+        }
+        throw new IllegalArgumentException(
+                "device-health block at " + path + " must be an object, got "
+                        + value.getClass().getSimpleName()
+                        + " — a present-but-non-Map value would bypass the"
+                        + " redaction boundary (absent / null is the valid opt-out).");
     }
 
     /**

@@ -96,6 +96,74 @@ class HardwareInventoryPayloadPolicyTest {
     }
 
     // ------------------------------------------------------------------
+    // Redaction-boundary type-confusion bypass — a present-but-non-Map
+    // hardware block (List / String / scalar) used to skip the Map-gated
+    // serial-STRIP / MAC-normalization entirely. Now fail-closed (mirrors
+    // WinGetEgressPayloadPolicy.validate). Absent / null stays the opt-out.
+    // ------------------------------------------------------------------
+
+    @Test
+    void rejectsInventoryHardwareAsListCarryingRawSerialAndMac() {
+        Map<String, Object> leak = new LinkedHashMap<>();
+        leak.put("biosSerial", "BIOS-SN-0099887766");
+        leak.put("macAddress", "AA-BB-CC-DD-EE-FF");
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        inventory.put("hardware", List.of(leak));
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("inventory", inventory);
+
+        assertThatThrownBy(() -> policy.sanitize(details))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("$.inventory.hardware")
+                .hasMessageContaining("must be an object");
+    }
+
+    @Test
+    void rejectsInventoryHardwareAsString() {
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        inventory.put("hardware", "biosSerial=BIOS-SN-0099887766");
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("inventory", inventory);
+
+        assertThatThrownBy(() -> policy.sanitize(details))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("$.inventory.hardware")
+                .hasMessageContaining("must be an object");
+    }
+
+    @Test
+    void rejectsTopLevelHardwareAliasAsList() {
+        Map<String, Object> leak = new LinkedHashMap<>();
+        leak.put("biosSerial", "BIOS-SN-0099887766");
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("hardware", List.of(leak));
+
+        assertThatThrownBy(() -> policy.sanitize(details))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("$.hardware")
+                .hasMessageContaining("must be an object");
+    }
+
+    @Test
+    void absentHardwareStaysValidOptOut() {
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        inventory.put("software", Map.of("schemaVersion", 1));
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("inventory", inventory);
+        assertThatCode(() -> policy.sanitize(details)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void explicitNullHardwareStaysValidOptOut() {
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        inventory.put("hardware", null);
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("inventory", inventory);
+        details.put("hardware", null);
+        assertThatCode(() -> policy.sanitize(details)).doesNotThrowAnyException();
+    }
+
+    // ------------------------------------------------------------------
     // STRIP behavior — sensitive hardware identifiers
     // ------------------------------------------------------------------
 

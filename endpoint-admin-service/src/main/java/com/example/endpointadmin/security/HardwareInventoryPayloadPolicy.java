@@ -156,23 +156,65 @@ public class HardwareInventoryPayloadPolicy {
         if (inventoryNode instanceof Map<?, ?> inventoryMap) {
             @SuppressWarnings("unchecked")
             Map<String, Object> typed = (Map<String, Object>) inventoryMap;
-            Object hardwareNode = typed.get("hardware");
-            if (hardwareNode instanceof Map<?, ?> hardwareMap) {
+            // Fail-closed reject a present-but-non-Map hardware block (a
+            // List / String / scalar) BEFORE the Map-gated sanitize. A
+            // non-Map value would otherwise skip the serial-STRIP /
+            // MAC-normalization redaction AND the Map-only ingest gate, so
+            // a raw serial / unnormalized MAC carried in a hardware list
+            // would leak into endpoint_command_results.result_payload.details
+            // with no 400. Absent / explicit-null stays the valid opt-out.
+            // Mirrors WinGetEgressPayloadPolicy.validate's non-Map reject.
+            Object hardwareNode = requireMapOrAbsent(
+                    typed.get("hardware"), "$.inventory.hardware");
+            if (hardwareNode != null) {
                 @SuppressWarnings("unchecked")
-                Map<String, Object> hwTyped = (Map<String, Object>) hardwareMap;
+                Map<String, Object> hwTyped = (Map<String, Object>) hardwareNode;
                 Map<String, Object> sanitizedHw = sanitizeHardware(hwTyped, "$.inventory.hardware");
                 typed.put("hardware", sanitizedHw);
             }
         }
         // Some agent versions also place hardware at the top level —
-        // sanitize that too if present.
-        Object topHardware = sanitized.get("hardware");
-        if (topHardware instanceof Map<?, ?> topHwMap) {
+        // sanitize that too if present. Same fail-closed reject: a
+        // present-but-non-Map top-level hardware alias must not bypass
+        // the redaction boundary.
+        Object topHardware = requireMapOrAbsent(
+                sanitized.get("hardware"), "$.hardware");
+        if (topHardware != null) {
             @SuppressWarnings("unchecked")
-            Map<String, Object> hwTyped = (Map<String, Object>) topHwMap;
+            Map<String, Object> hwTyped = (Map<String, Object>) topHardware;
             sanitized.put("hardware", sanitizeHardware(hwTyped, "$.hardware"));
         }
         return sanitized;
+    }
+
+    /**
+     * Fail-closed map-shape gate for the hardware block at a
+     * redaction-boundary entry point. Returns {@code null} for an absent /
+     * explicit-null value (the valid opt-out), the value itself when it is
+     * a {@link Map}, and throws {@link IllegalArgumentException} (→ 400) for
+     * any present-but-non-Map value (a {@link List}, {@link String}, or
+     * scalar).
+     *
+     * <p>This closes a type-confusion redaction bypass: the per-field
+     * sanitize ({@link #sanitizeHardware}) only runs for a Map, and the
+     * Map-only ingest gate ({@code EndpointHardwareInventoryService.hasHardwareBlock})
+     * also skips a non-Map — so a hardware list carrying a raw serial /
+     * unnormalized MAC would otherwise reach the command-results sink
+     * unsanitized with no 400. Mirrors {@code WinGetEgressPayloadPolicy.validate}
+     * (~line 173).
+     */
+    private static Object requireMapOrAbsent(Object value, String path) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Map<?, ?>) {
+            return value;
+        }
+        throw new IllegalArgumentException(
+                "hardware block at " + path + " must be an object, got "
+                        + value.getClass().getSimpleName()
+                        + " — a present-but-non-Map value would bypass the"
+                        + " redaction boundary (absent / null is the valid opt-out).");
     }
 
     /**

@@ -146,6 +146,9 @@ class EndpointAgentCommandServiceTest {
     @Autowired
     private com.example.endpointadmin.repository.EndpointSoftwareInventorySnapshotRepository softwareSnapshotRepository;
 
+    @Autowired
+    private com.example.endpointadmin.repository.EndpointDeviceHealthSnapshotRepository deviceHealthSnapshotRepository;
+
     @Test
     void submitResultIngestsBothSoftwareAndHardwareForCollectInventoryWithBothBlocks() {
         // Codex 019e7007 iter-3 must-fix: prove DUAL software + hardware
@@ -321,6 +324,279 @@ class EndpointAgentCommandServiceTest {
         // (redaction round-trip evidence).
         Object resultPayload = result.getResultPayload();
         assertThat(resultPayload.toString()).doesNotContain("alice");
+    }
+
+    // ------------------------------------------------------------------
+    // Security regression — redaction-boundary type-confusion bypass.
+    // A present-but-non-Map deviceHealth / hardware block (a List / String
+    // / scalar) used to skip BOTH the Map-gated per-field sanitize AND the
+    // Map-only ingest gate, leaking "NEVER on the wire" PII into
+    // endpoint_command_results.result_payload.details with no 400. The
+    // fail-closed fix (mirroring WinGetEgressPayloadPolicy.validate) now
+    // rejects it with 400 + full transaction rollback. Asserted here via
+    // the REAL sink (submitResult), not just the policy unit.
+    // ------------------------------------------------------------------
+
+    @Test
+    void submitResultRejectsDeviceHealthAsListCarryingForbiddenPii() {
+        // The live-leak repro (device-health LIVE since BE #332): a
+        // `deviceHealth` LIST carrying the device-health "NEVER on the
+        // wire" identifiers (serial / volumeLabel / mountPath / guid).
+        // Pre-fix this bypassed the redaction boundary entirely and
+        // persisted to result_payload.details with no 400.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-DH-LIST"));
+        EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-dh-list", 10));
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        java.util.Map<String, Object> leak = new java.util.LinkedHashMap<>();
+        leak.put("serial", "WD-WX12A34567B9");
+        leak.put("volumeLabel", "OS");
+        leak.put("mountPath", "C:\\Mounts\\disk0");
+        leak.put("guid", "{12345678-1234-1234-1234-1234567890ab}");
+        Object deviceHealthAsList = java.util.List.of(leak);
+
+        assertThatThrownBy(() ->
+                commandService.submitResult(
+                        principal(device),
+                        command.getId(),
+                        resultRequestWithInventoryDeviceHealth(
+                                claimed.claimId(), claimed.attemptNumber(),
+                                CommandResultStatus.SUCCEEDED, deviceHealthAsList)))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("$.inventory.deviceHealth")
+                .hasMessageContaining("must be an object");
+
+        // Transaction rolled back: no command result row, no device-health
+        // snapshot. The forbidden identifiers never touched any sink.
+        assertThat(resultRepository.findByCommand_Id(command.getId())).isEmpty();
+        assertThat(deviceHealthSnapshotRepository.count()).isEqualTo(0);
+    }
+
+    @Test
+    void submitResultRejectsDeviceHealthAsString() {
+        // A `deviceHealth` STRING scalar must also fail-closed (not just a
+        // List) — any present-but-non-Map shape bypasses the Map gate.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-DH-STR"));
+        EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-dh-str", 10));
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        assertThatThrownBy(() ->
+                commandService.submitResult(
+                        principal(device),
+                        command.getId(),
+                        resultRequestWithInventoryDeviceHealth(
+                                claimed.claimId(), claimed.attemptNumber(),
+                                CommandResultStatus.SUCCEEDED,
+                                "serial=WD-WX12A34567B9 volumeLabel=OS")))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("$.inventory.deviceHealth")
+                .hasMessageContaining("must be an object");
+
+        assertThat(resultRepository.findByCommand_Id(command.getId())).isEmpty();
+        assertThat(deviceHealthSnapshotRepository.count()).isEqualTo(0);
+    }
+
+    @Test
+    void submitResultRejectsTopLevelDeviceHealthAliasAsList() {
+        // The top-level `$.deviceHealth` alias (accepted by some agent
+        // versions) must enforce the same non-Map reject as the nested
+        // `$.inventory.deviceHealth` path.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-DH-TOP"));
+        EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-dh-top", 10));
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        java.util.Map<String, Object> leak = new java.util.LinkedHashMap<>();
+        leak.put("serial", "WD-WX12A34567B9");
+        leak.put("mountPath", "C:\\Mounts\\disk0");
+        java.util.Map<String, Object> details = new java.util.LinkedHashMap<>();
+        details.put("deviceHealth", java.util.List.of(leak));
+
+        assertThatThrownBy(() ->
+                commandService.submitResult(
+                        principal(device),
+                        command.getId(),
+                        new AgentCommandResultRequest(
+                                claimed.claimId(), claimed.attemptNumber(),
+                                CommandResultStatus.SUCCEEDED, "done", details,
+                                null, null, 0,
+                                Instant.now().minusSeconds(5), Instant.now())))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("$.deviceHealth")
+                .hasMessageContaining("must be an object");
+
+        assertThat(resultRepository.findByCommand_Id(command.getId())).isEmpty();
+        assertThat(deviceHealthSnapshotRepository.count()).isEqualTo(0);
+    }
+
+    @Test
+    void submitResultRejectsHardwareAsListCarryingRawSerialAndMac() {
+        // Hardware sibling: a `hardware` LIST carrying a raw serial and an
+        // unnormalized MAC bypassed the serial-STRIP / MAC-normalization
+        // redaction pre-fix. Now fail-closed.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-HW-LIST"));
+        EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-hw-list", 10));
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        java.util.Map<String, Object> leak = new java.util.LinkedHashMap<>();
+        leak.put("biosSerial", "BIOS-SN-0099887766");
+        leak.put("macAddress", "AA-BB-CC-DD-EE-FF");
+        Object hardwareAsList = java.util.List.of(leak);
+
+        assertThatThrownBy(() ->
+                commandService.submitResult(
+                        principal(device),
+                        command.getId(),
+                        resultRequestWithInventoryHardware(
+                                claimed.claimId(), claimed.attemptNumber(),
+                                CommandResultStatus.SUCCEEDED, hardwareAsList)))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("$.inventory.hardware")
+                .hasMessageContaining("must be an object");
+
+        // Transaction rolled back: no command result row, no hardware
+        // snapshot. The raw serial / MAC never touched any sink.
+        assertThat(resultRepository.findByCommand_Id(command.getId())).isEmpty();
+        assertThat(hardwareSnapshotRepository.count()).isEqualTo(0);
+    }
+
+    @Test
+    void submitResultStillPersistsAndSanitizesValidDeviceHealthMap() {
+        // Positive control / no-regression: a valid deviceHealth MAP still
+        // persists the command result + the device-health snapshot.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-DH-OK"));
+        EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-dh-ok", 10));
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        commandService.submitResult(
+                principal(device),
+                command.getId(),
+                resultRequestWithInventoryDeviceHealth(
+                        claimed.claimId(), claimed.attemptNumber(),
+                        CommandResultStatus.SUCCEEDED, goldenHealthyDeviceHealth()));
+
+        EndpointCommandResult result =
+                resultRepository.findByCommand_Id(command.getId()).orElseThrow();
+        assertThat(result.getResultStatus()).isEqualTo(CommandResultStatus.SUCCEEDED);
+        // Device-health snapshot persisted (sanitize + ingest ran on the Map).
+        assertThat(deviceHealthSnapshotRepository.count())
+                .as("device-health snapshot row count")
+                .isEqualTo(1);
+        assertThat(deviceHealthSnapshotRepository.findBySourceCommandResultId(result.getId()))
+                .isPresent();
+    }
+
+    @Test
+    void submitResultStillPersistsAndSanitizesValidHardwareMap() {
+        // Positive control / no-regression: a valid hardware MAP still
+        // persists the command result + the hardware snapshot, with the
+        // BIOS serial stripped to <redacted> (sanitize round-trip).
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-HW-OK"));
+        EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-hw-ok", 10));
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        java.util.Map<String, Object> hardware = new java.util.LinkedHashMap<>();
+        hardware.put("schemaVersion", 1);
+        hardware.put("supported", true);
+        hardware.put("biosSerial", "BIOS-SN-0099887766");
+        hardware.put("collectedAt", java.time.Instant.now().minusSeconds(60).toString());
+        hardware.put("disks", java.util.List.of());
+        hardware.put("networkInterfaces", java.util.List.of());
+
+        commandService.submitResult(
+                principal(device),
+                command.getId(),
+                resultRequestWithInventoryHardware(
+                        claimed.claimId(), claimed.attemptNumber(),
+                        CommandResultStatus.SUCCEEDED, hardware));
+
+        EndpointCommandResult result =
+                resultRepository.findByCommand_Id(command.getId()).orElseThrow();
+        assertThat(result.getResultStatus()).isEqualTo(CommandResultStatus.SUCCEEDED);
+        assertThat(hardwareSnapshotRepository.count())
+                .as("hardware snapshot row count")
+                .isEqualTo(1);
+        // BIOS serial stripped pre-persist — redaction round-trip evidence.
+        assertThat(result.getResultPayload().toString())
+                .doesNotContain("BIOS-SN-0099887766")
+                .contains("<redacted>");
+    }
+
+    /**
+     * Build an AgentCommandResultRequest whose {@code details.inventory.deviceHealth}
+     * carries an arbitrary value (Map for the positive control; List /
+     * String for the bypass repros).
+     */
+    private AgentCommandResultRequest resultRequestWithInventoryDeviceHealth(
+            String claimId, int attemptNumber, CommandResultStatus status,
+            Object deviceHealth) {
+        java.util.Map<String, Object> inventory = new java.util.LinkedHashMap<>();
+        inventory.put("deviceHealth", deviceHealth);
+        java.util.Map<String, Object> details = new java.util.LinkedHashMap<>();
+        details.put("inventory", inventory);
+        return new AgentCommandResultRequest(
+                claimId, attemptNumber, status, "done", details,
+                null, null, 0,
+                Instant.now().minusSeconds(5), Instant.now());
+    }
+
+    /**
+     * Build an AgentCommandResultRequest whose {@code details.inventory.hardware}
+     * carries an arbitrary value (Map for the positive control; List /
+     * String for the bypass repros).
+     */
+    private AgentCommandResultRequest resultRequestWithInventoryHardware(
+            String claimId, int attemptNumber, CommandResultStatus status,
+            Object hardware) {
+        java.util.Map<String, Object> inventory = new java.util.LinkedHashMap<>();
+        inventory.put("hardware", hardware);
+        java.util.Map<String, Object> details = new java.util.LinkedHashMap<>();
+        details.put("inventory", inventory);
+        return new AgentCommandResultRequest(
+                claimId, attemptNumber, status, "done", details,
+                null, null, 0,
+                Instant.now().minusSeconds(5), Instant.now());
+    }
+
+    /**
+     * A contract-valid healthy device-health Map (mirrors the golden
+     * fixture in EndpointDeviceHealthServiceTest) for the positive control.
+     */
+    private static java.util.Map<String, Object> goldenHealthyDeviceHealth() {
+        java.util.Map<String, Object> disk = new java.util.LinkedHashMap<>();
+        disk.put("driveLetter", "C:");
+        disk.put("totalBytes", 536870912000L);
+        disk.put("freeBytes", 268435456000L);
+        disk.put("freePercent", 50);
+        disk.put("lowDiskWarning", false);
+
+        java.util.Map<String, Object> memory = new java.util.LinkedHashMap<>();
+        memory.put("totalPhysicalBytes", 17179869184L);
+        memory.put("availableBytes", 9663676416L);
+        memory.put("usedPercent", 42);
+        memory.put("highPressureWarning", false);
+        memory.put("commitLimitBytes", 25769803776L);
+        memory.put("commitUsedBytes", 10307921920L);
+
+        java.util.Map<String, Object> uptime = new java.util.LinkedHashMap<>();
+        uptime.put("lastBootEpochSec", 1748275200L);
+        uptime.put("uptimeSeconds", 259200L);
+        uptime.put("uptimeDays", 3);
+        uptime.put("longUptimeWarning", false);
+
+        java.util.Map<String, Object> dh = new java.util.LinkedHashMap<>();
+        dh.put("schemaVersion", 1);
+        dh.put("supported", true);
+        dh.put("probeComplete", true);
+        dh.put("fixedDisks", java.util.List.of(disk));
+        dh.put("fixedDiskCount", 1);
+        dh.put("fixedDisksTruncated", false);
+        dh.put("maxFixedDisks", 64);
+        dh.put("memory", memory);
+        dh.put("uptime", uptime);
+        dh.put("anyLowDisk", false);
+        dh.put("sourceUsed", "win32");
+        dh.put("probeDurationMs", 12);
+        return dh;
     }
 
     /**
