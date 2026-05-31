@@ -81,8 +81,12 @@ public class ReportController {
         // Static reports from JSON registry
         List<ReportListItemDto> staticReports = registry.getAll().stream()
                 .filter(def -> accessEvaluator.evaluate(def, authz) == ReportAccessEvaluator.AccessResult.ALLOWED)
+                // PR-D1a wire-through: pass routeSegment + sharedReportId through to the
+                // catalog DTO so the frontend dynamic factory can resolve identity +
+                // route without rebuilding them client-side.
                 .map(def -> new ReportListItemDto(def.key(), def.title(), def.description(), def.category(),
-                        def.access() != null ? def.access().reportGroup() : null))
+                        def.access() != null ? def.access().reportGroup() : null,
+                        def.routeSegment(), def.sharedReportId()))
                 .toList();
 
         // Custom reports from PostgreSQL — filtered by access_config reportGroup (CNS-006 R17)
@@ -241,10 +245,13 @@ public class ReportController {
                 pivotable,
                 supportsGrandTotal);
 
+        // PR-D1a wire-through: pass filterDefinitions through to the metadata DTO so
+        // the frontend dynamic factory can render the report's sidebar widgets from
+        // backend JSON (no per-module frontend code).
         return ResponseEntity.ok(new ReportMetadataDto(
                 def.key(), def.title(), def.description(), def.category(),
                 visibleCols, def.defaultSort(), def.defaultSortDirection(),
-                capabilities));
+                capabilities, def.filterDefinitions()));
     }
 
     @GetMapping("/{key}/data")

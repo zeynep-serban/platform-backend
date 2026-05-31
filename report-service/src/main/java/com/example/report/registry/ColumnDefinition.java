@@ -1,5 +1,6 @@
 package com.example.report.registry;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.util.List;
 import java.util.Map;
 
@@ -11,41 +12,28 @@ import java.util.Map;
  * {@code defaultAggFunc}. Each is opt-in per column so reports can light
  * up SSRM grouping incrementally without forcing it across the catalog.
  *
- * @param field          SQL column name; must match the source query.
- * @param headerName     User-facing header.
- * @param type           Display type (text, number, date).
- * @param width          Default column width in pixels.
- * @param sensitive      When true, column is masked unless the user holds
- *                       the report's sensitive-column grant.
- * @param groupable      PR-0.2: when true, AG Grid SSRM may use this
- *                       column as a row-group dimension. Reports that
- *                       have at least one {@code groupable=true} column
- *                       advertise {@code capabilities.serverSideGrouping=true}
- *                       in the metadata response.
- * @param aggregatable   PR-0.2: when true, the column is offered as a
- *                       {@code valueCols} candidate (frontend value-column
- *                       picker).
- * @param defaultAggFunc      PR-0.2: default aggregation function applied
- *                            when the column appears in {@code valueCols}
- *                            without an explicit {@code aggFunc}. One of
- *                            {@code sum / avg / min / max / count / stddev /
- *                            stddevp / distinctcount / median /
- *                            percentilecont} (PR-0.4z + PR #6a + PR #6b
- *                            extended); null → defaults to {@code sum} for
- *                            numeric columns and {@code count} for
- *                            everything else. {@code weightedAvg} (PR-0.4
- *                            with value+weight pair semantics) remains on
- *                            the roadmap.
- * @param defaultAggParams    PR #6b: parametric aggregation defaults. For
- *                            {@code percentilecont} the map must carry a
- *                            {@code percentile} entry whose value is a
- *                            {@link Number} in {@code [0, 1]}. The
- *                            controller layer ({@code sanitizeAggParams})
- *                            only consults this map when the resolved
- *                            aggregation func actually matches the
- *                            registry's default func, so a stray
- *                            percentile default cannot leak into an
- *                            explicit {@code sum} override.
+ * <p>PR-D1a (Codex thread {@code 019e800b}, 2026-05-31) widens the column
+ * variant vocabulary so {@code GET /api/v1/reports/{key}/metadata}
+ * can return rich rendering hints the 7 static {@code mfe-reporting}
+ * modules currently hardcode in TS. The new variants are
+ * {@code badge}, {@code status}, {@code currency}, {@code boolean},
+ * {@code bold-text}. The new per-variant config fields are
+ * {@code variantMap}, {@code labelMap}, {@code statusMap},
+ * {@code currencyCode}, {@code decimals}, {@code suffix}, {@code format},
+ * {@code defaultVariant}, {@code filterValues}. All new fields are
+ * optional and annotated with {@link JsonInclude.Include#NON_NULL} at
+ * the field level (NOT the class level) so legacy {@code text/number/date}
+ * columns continue to emit identical wire output for the pre-D1a
+ * nullable fields ({@code defaultAggFunc}, {@code defaultAggParams},
+ * {@code pivotValues}). See {@code docs/architecture/dynamic-report-
+ * migration-d0.md §1 / §10} in the platform-web repo for the contract
+ * layer mapping.
+ *
+ * <p>The {@code type} field is now fail-closed: blank/null falls back to
+ * {@code "text"} for backward-compatibility with pre-PR-D1a JSON registry
+ * entries, but any non-blank unknown value rejects at construction time
+ * (and at schema validation time). Whitelist as of PR-D1a:
+ * {@code text, number, date, badge, status, currency, boolean, bold-text}.
  */
 public record ColumnDefinition(
         String field,
@@ -58,31 +46,62 @@ public record ColumnDefinition(
         String defaultAggFunc,
         Map<String, Object> defaultAggParams,
         boolean pivotable,
-        List<PivotValue> pivotValues
+        List<PivotValue> pivotValues,
+        // PR-D1a (Codex 019e800b): NON_NULL applied at field-level
+        // (not class-level) so pre-existing nullable wire fields above
+        // continue to emit `null` for legacy reports. Only the 9 new
+        // D1a fields below are absent from the wire when null.
+        @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, String> variantMap,
+        @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, String> labelMap,
+        @JsonInclude(JsonInclude.Include.NON_NULL) Map<String, StatusMapEntry> statusMap,
+        @JsonInclude(JsonInclude.Include.NON_NULL) String currencyCode,
+        @JsonInclude(JsonInclude.Include.NON_NULL) Integer decimals,
+        @JsonInclude(JsonInclude.Include.NON_NULL) String suffix,
+        @JsonInclude(JsonInclude.Include.NON_NULL) String format,
+        @JsonInclude(JsonInclude.Include.NON_NULL) String defaultVariant,
+        @JsonInclude(JsonInclude.Include.NON_NULL) List<String> filterValues
 ) {
     /**
      * PR-0.4b (Codex thread {@code 019e2695}): pivot value cardinality cap.
-     * Eight concrete buckets is the registry-side fail-closed gate; combined
-     * with the {@code pivotValues * valueCols <= 32} controller-side cap it
-     * keeps the {@code CASE WHEN} aggregate column count bounded so a
-     * single report cannot blow past AG Grid's usable column budget.
+     * Eight concrete buckets is the registry-side fail-closed gate.
      */
     public static final int MAX_PIVOT_VALUES = 8;
+
+    /**
+     * PR-D1a: whitelisted {@code type} vocabulary. Blank/null defaults to
+     * {@code "text"} for legacy JSON files; any non-blank value outside this
+     * set rejects at construction time. {@code link} and {@code actions}
+     * variants are intentionally OUT of D-chain scope.
+     */
+    private static final java.util.Set<String> TYPE_WHITELIST = java.util.Set.of(
+            "text", "number", "date", "badge", "status", "currency", "boolean", "bold-text");
+
+    /**
+     * PR-D1a: whitelisted {@code format} vocabulary for date columns.
+     */
+    private static final java.util.Set<String> FORMAT_WHITELIST = java.util.Set.of(
+            "short", "long", "datetime", "relative");
 
     public ColumnDefinition {
         if (field == null || field.isBlank()) {
             throw new IllegalArgumentException("Column field must not be blank");
         }
+        // PR-D1a fail-closed type validation.
         if (type == null || type.isBlank()) {
             type = "text";
+        } else {
+            String normalized = type.trim().toLowerCase(java.util.Locale.ROOT);
+            if (!TYPE_WHITELIST.contains(normalized)) {
+                throw new IllegalArgumentException(
+                        "Unknown ColumnDefinition.type: " + type
+                                + " (whitelist: text/number/date/badge/status/currency/boolean/bold-text)");
+            }
+            type = normalized;
         }
         if (width == null || width <= 0) {
             width = 150;
         }
         if (defaultAggParams != null) {
-            // Defensive: take an immutable copy so the registry-loaded
-            // map cannot be mutated underneath us after canonical
-            // construction. Empty maps collapse to null for clarity.
             defaultAggParams = defaultAggParams.isEmpty()
                     ? null
                     : Map.copyOf(defaultAggParams);
@@ -97,10 +116,6 @@ public record ColumnDefinition(
                                     + " exceeds the per-column cap of "
                                     + MAX_PIVOT_VALUES);
                 }
-                // Reject duplicate SQL values so the alias contract stays
-                // injective; two registry entries that collapse to the
-                // same `[field] = :value` predicate would produce
-                // duplicate response columns AG Grid cannot disambiguate.
                 java.util.Set<String> seen = new java.util.HashSet<>();
                 for (PivotValue pv : pivotValues) {
                     if (pv == null) {
@@ -116,21 +131,7 @@ public record ColumnDefinition(
                 pivotValues = List.copyOf(pivotValues);
             }
         }
-        // PR-0.4b registry-time note: `pivotable=true` without
-        // `pivotValues` is preserved as-is at the record layer so PR-0.4a
-        // JSON entries that pre-date the {@code pivotValues} field keep
-        // deserialising. The controller-side pivot dispatcher
-        // ({@code multiLevelPivotRequest} + {@code sanitizePivotRequest})
-        // is the authoritative gate: a request that targets a pivotable
-        // column without an enumerated {@code pivotValues} list fails
-        // closed with {@code PIVOT_NOT_CONFIGURED} rather than letting
-        // dynamic {@code SELECT DISTINCT} discovery sneak in.
         if (defaultAggFunc != null) {
-            // Locale.ROOT keeps the Turkish dotless-ı pitfall out of the
-            // canonical comparison — "MEDIAN".toLowerCase() under tr_TR
-            // would otherwise return "medıan" and miss the whitelist
-            // entry. Same defensive normalisation pattern as
-            // GroupedAggregation on the SqlBuilder side.
             String normalized = defaultAggFunc.trim().toLowerCase(java.util.Locale.ROOT);
             if (!normalized.isEmpty()
                     && !normalized.equals("sum")
@@ -151,39 +152,56 @@ public record ColumnDefinition(
             }
             defaultAggFunc = normalized.isEmpty() ? null : normalized;
         }
+        // PR-D1a: defensive immutable copies + empty → null collapse for new fields.
+        if (variantMap != null) {
+            variantMap = variantMap.isEmpty() ? null : Map.copyOf(variantMap);
+        }
+        if (labelMap != null) {
+            labelMap = labelMap.isEmpty() ? null : Map.copyOf(labelMap);
+        }
+        if (statusMap != null) {
+            statusMap = statusMap.isEmpty() ? null : Map.copyOf(statusMap);
+        }
+        if (filterValues != null) {
+            filterValues = filterValues.isEmpty() ? null : List.copyOf(filterValues);
+        }
+        if (format != null) {
+            String normalizedFormat = format.trim().toLowerCase(java.util.Locale.ROOT);
+            if (!normalizedFormat.isEmpty() && !FORMAT_WHITELIST.contains(normalizedFormat)) {
+                throw new IllegalArgumentException(
+                        "ColumnDefinition.format must be one of short/long/datetime/relative, got: "
+                                + format);
+            }
+            format = normalizedFormat.isEmpty() ? null : normalizedFormat;
+        }
+        // currencyCode is deliberately NOT defaulted; frontend applies "TRY" when
+        // null and type == "currency".
     }
 
     /**
-     * Backward-compatible 5-arg constructor for call sites that predate
-     * PR-0.2. Defaults the new grouping/aggregation flags to {@code false}
-     * and {@code null} so existing tests / JSON registry entries continue
-     * to deserialize without modification.
+     * Backward-compatible 5-arg constructor for call sites that predate PR-0.2.
      */
     public ColumnDefinition(String field, String headerName, String type,
                             Integer width, boolean sensitive) {
         this(field, headerName, type, width, sensitive,
-                false, false, null, null, false, null);
+                false, false, null, null, false, null,
+                null, null, null, null, null, null, null, null, null);
     }
 
     /**
-     * Backward-compatible 8-arg constructor for PR-0.2 / PR #6a call
-     * sites that predate PR #6b's {@code defaultAggParams} field.
-     * Defaults the new map to {@code null} so existing tests and
-     * registry entries continue to deserialize without modification.
+     * Backward-compatible 8-arg constructor for PR-0.2 / PR #6a call sites.
      */
     public ColumnDefinition(String field, String headerName, String type,
                             Integer width, boolean sensitive,
                             boolean groupable, boolean aggregatable,
                             String defaultAggFunc) {
         this(field, headerName, type, width, sensitive,
-                groupable, aggregatable, defaultAggFunc, null, false, null);
+                groupable, aggregatable, defaultAggFunc, null, false, null,
+                null, null, null, null, null, null, null, null, null);
     }
 
     /**
-     * Backward-compatible 9-arg constructor for PR #6b call sites that
-     * predate PR-0.4a's {@code pivotable} flag. Defaults the new flag
-     * to {@code false} so existing tests / registry entries continue
-     * to deserialize without modification.
+     * Backward-compatible 9-arg constructor for PR #6b call sites.
      */
     public ColumnDefinition(String field, String headerName, String type,
                             Integer width, boolean sensitive,
@@ -191,19 +209,12 @@ public record ColumnDefinition(
                             String defaultAggFunc,
                             Map<String, Object> defaultAggParams) {
         this(field, headerName, type, width, sensitive,
-                groupable, aggregatable, defaultAggFunc, defaultAggParams, false, null);
+                groupable, aggregatable, defaultAggFunc, defaultAggParams, false, null,
+                null, null, null, null, null, null, null, null, null);
     }
 
     /**
-     * Backward-compatible 10-arg constructor for PR-0.4a call sites
-     * that predate PR-0.4b's {@code pivotValues} field. Defaults the
-     * new list to {@code null} so existing tests and registry entries
-     * continue to deserialize without modification. Note that this
-     * shortcut path bypasses the {@code pivotable=true → pivotValues
-     * required} invariant: callers that hand-build a pivotable column
-     * via the 10-arg path must follow up with the 11-arg canonical
-     * once they have real values, otherwise the controller will
-     * reject pivot requests at runtime.
+     * Backward-compatible 10-arg constructor for PR-0.4a call sites.
      */
     public ColumnDefinition(String field, String headerName, String type,
                             Integer width, boolean sensitive,
@@ -213,6 +224,23 @@ public record ColumnDefinition(
                             boolean pivotable) {
         this(field, headerName, type, width, sensitive,
                 groupable, aggregatable, defaultAggFunc, defaultAggParams,
-                pivotable, null);
+                pivotable, null,
+                null, null, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Backward-compatible 11-arg constructor for PR-0.4b call sites
+     * that predate PR-D1a's 9 new column-variant config fields.
+     */
+    public ColumnDefinition(String field, String headerName, String type,
+                            Integer width, boolean sensitive,
+                            boolean groupable, boolean aggregatable,
+                            String defaultAggFunc,
+                            Map<String, Object> defaultAggParams,
+                            boolean pivotable, List<PivotValue> pivotValues) {
+        this(field, headerName, type, width, sensitive,
+                groupable, aggregatable, defaultAggFunc, defaultAggParams,
+                pivotable, pivotValues,
+                null, null, null, null, null, null, null, null, null);
     }
 }

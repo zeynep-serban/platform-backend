@@ -46,7 +46,7 @@ class WorkcubeQueryAdapterTest {
         return new ReportDefinition(
                 key, "1.0", "Title", "Description", "category",
                 "INVOICE", "dbo", "static", null, null,
-                List.of(new ColumnDefinition("col", "col", "STRING", null, false, false, false, null)),
+                List.of(new ColumnDefinition("col", "col", "text", null, false, false, false, null)),
                 null, "ASC", null
         );
     }

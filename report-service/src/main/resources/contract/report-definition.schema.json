@@ -99,7 +99,26 @@
       "enum": ["ASC", "DESC"]
     },
     "access": {"$ref": "#/$defs/AccessConfig"},
-    "tenantBoundary": {"$ref": "#/$defs/TenantBoundary"}
+    "tenantBoundary": {"$ref": "#/$defs/TenantBoundary"},
+    "routeSegment": {
+      "description": "PR-D1a (Codex 019e800b): optional alias for the web route segment when it differs from the report key (e.g. key 'hr-compensation-detay' aliased to route 'hr-compensation'). Frontend dynamic factory falls back to `key` when absent.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+      "minLength": 2,
+      "maxLength": 80
+    },
+    "sharedReportId": {
+      "description": "PR-D1a (Codex 019e800b): optional legacy SharedReportId carry. Preserves favorites + saved-filter scope + sidebar default + export mode when a static module is retired in favor of this dynamic catalog entry. Frontend favorites sanitizer (report-preferences.ts:48,56) keys off SharedReportId, not route.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+      "minLength": 2,
+      "maxLength": 80
+    },
+    "filterDefinitions": {
+      "description": "PR-D1a (Codex 019e800b): metadata-driven sidebar filter widget contract. When present, the dynamic-report factory renders these widgets in place of the legacy CompanyPicker + search pair. See docs/architecture/dynamic-report-migration-d0.md §4 for the per-module proposed entries.",
+      "type": "array",
+      "items": {"$ref": "#/$defs/FilterDefinition"}
+    }
   },
   "$defs": {
     "ColumnDefinition": {
@@ -120,9 +139,9 @@
           "maxLength": 200
         },
         "type": {
-          "description": "Display type. Repo-wide inventory: text/number/date.",
+          "description": "Display type. PR-D1a (Codex 019e800b) widened from text/number/date to also accept badge/status/currency/boolean/bold-text. link and actions are intentionally OUT of D-chain scope.",
           "type": "string",
-          "enum": ["text", "number", "date"]
+          "enum": ["text", "number", "date", "badge", "status", "currency", "boolean", "bold-text"]
         },
         "width": {
           "description": "Default column width in pixels.",
@@ -200,6 +219,68 @@
                 }
               }
             ]
+          }
+        },
+        "variantMap": {
+          "description": "PR-D1a (Codex 019e800b): badge/enum raw value → variant color tag (e.g. ADMIN → danger).",
+          "type": ["object", "null"],
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        },
+        "labelMap": {
+          "description": "PR-D1a: badge/enum raw value → i18n label key (e.g. ADMIN → shared.role.admin).",
+          "type": ["object", "null"],
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "statusMap": {
+          "description": "PR-D1a: status raw value → typed { variant, labelKey } entry. Frontend status renderer reads both from a single map.",
+          "type": ["object", "null"],
+          "additionalProperties": {"$ref": "#/$defs/StatusMapEntry"}
+        },
+        "currencyCode": {
+          "description": "PR-D1a: ISO 4217 code (e.g. TRY). Applies when type=currency. Backend does NOT default this; absent → frontend renderer applies 'TRY' fallback.",
+          "type": ["string", "null"],
+          "minLength": 3,
+          "maxLength": 3,
+          "pattern": "^[A-Z]{3}$"
+        },
+        "decimals": {
+          "description": "PR-D1a: number/currency/percent decimal places.",
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 8
+        },
+        "suffix": {
+          "description": "PR-D1a: number column suffix (e.g. 'yıl', 'dk').",
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "format": {
+          "description": "PR-D1a: date format preset (short/long/datetime/relative).",
+          "type": ["string", "null"],
+          "enum": [null, "short", "long", "datetime", "relative"]
+        },
+        "defaultVariant": {
+          "description": "PR-D1a: badge/status fallback variant when raw value not in variantMap/statusMap.",
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "filterValues": {
+          "description": "PR-D1a: badge/status set filter override. Frontend uses this list as the AG Grid set filter values instead of discovering them from the dataset.",
+          "type": ["array", "null"],
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
           }
         }
       }
@@ -316,6 +397,142 @@
           "type": "string",
           "minLength": 10,
           "maxLength": 500
+        }
+      }
+    },
+    "StatusMapEntry": {
+      "description": "PR-D1a (Codex 019e800b): per-status entry inside a status column's statusMap. Frontend status renderer reads both fields from a single typed object.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variant", "labelKey"],
+      "properties": {
+        "variant": {
+          "description": "Badge variant tag (e.g. success, danger, warning, muted, info, primary).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "labelKey": {
+          "description": "i18n key resolved at frontend render time.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    },
+    "FilterOptionEntry": {
+      "description": "PR-D1a (Codex 019e800b): inline option entry for enum-select / badge-select filter widgets. Either labelKey (i18n) or label (raw display string) may be present.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value"],
+      "properties": {
+        "value": {
+          "description": "Backend filter value.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "labelKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    },
+    "FilterOptionsSource": {
+      "description": "PR-D1a (Codex 019e800b): dynamic option source for a filter widget. Used when the selectable values must be fetched at runtime.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "description": "Source kind. static → inline options array; endpoint → frontend GETs the URL; filter-values → delegate to the existing /v1/reports/{key}/filter-values endpoint.",
+          "type": "string",
+          "enum": ["static", "endpoint", "filter-values"]
+        },
+        "endpoint": {
+          "description": "Backend URL (required when type=endpoint).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "column": {
+          "description": "Backend column name (required when type=filter-values).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        }
+      }
+    },
+    "FilterDefinition": {
+      "description": "PR-D1a (Codex 019e800b): metadata-driven filter widget contract. See docs/architecture/dynamic-report-migration-d0.md §4 for per-module proposed entries.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "kind"],
+      "properties": {
+        "key": {
+          "description": "Unique key inside the report's filter state.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$"
+        },
+        "targetField": {
+          "description": "Optional backend field this filter targets (defaults to key).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "kind": {
+          "description": "Widget kind.",
+          "type": "string",
+          "enum": ["text-search", "enum-select", "date-range", "number-range", "company-picker", "month-picker"]
+        },
+        "operator": {
+          "description": "Comparison operator emitted into the advanced-filter model.",
+          "type": "string",
+          "enum": ["contains", "equals", "between", "gte", "lte"]
+        },
+        "defaultValue": {
+          "description": "Default value used at filter initialization (any JSON shape — depends on widget kind)."
+        },
+        "urlParam": {
+          "description": "URL search-param key preserving deep-link behaviour.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "i18nLabelKey": {
+          "description": "i18n key for the widget label.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "i18nPlaceholderKey": {
+          "description": "Optional i18n key for the widget placeholder.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "options": {
+          "description": "Inline option list for enum-select widgets.",
+          "type": "array",
+          "items": {"$ref": "#/$defs/FilterOptionEntry"}
+        },
+        "optionsSource": {
+          "description": "Dynamic options source (overrides inline options).",
+          "$ref": "#/$defs/FilterOptionsSource"
+        },
+        "advancedFilterTarget": {
+          "description": "Override for the advanced-filter model column key.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
         }
       }
     }

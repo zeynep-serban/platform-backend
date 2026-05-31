@@ -25,7 +25,7 @@ class RC011WorkcubeSourceAllowlistedTest {
         return new ReportDefinition(
                 key, "1.0", "Title", "Description", "category",
                 source, "dbo", "static", null, null,
-                List.of(new ColumnDefinition("col", "col", "STRING", null, false, false, false, null)),
+                List.of(new ColumnDefinition("col", "col", "text", null, false, false, false, null)),
                 null, "ASC", null
         );
     }
@@ -34,7 +34,7 @@ class RC011WorkcubeSourceAllowlistedTest {
         return new ReportDefinition(
                 key, "1.0", "Title", "Description", "category",
                 null, null, "yearly", "year", sourceQuery,
-                List.of(new ColumnDefinition("col", "col", "STRING", null, false, false, false, null)),
+                List.of(new ColumnDefinition("col", "col", "text", null, false, false, false, null)),
                 null, "ASC", null
         );
     }
@@ -96,7 +96,7 @@ class RC011WorkcubeSourceAllowlistedTest {
                 "mixed-rpt", "1.0", "Title", "Description", "category",
                 "INVOICE", "dbo", "static", null,
                 "SELECT * FROM [{schema}].[SECRET_ROGUE_TABLE]",
-                List.of(new ColumnDefinition("col", "col", "STRING", null, false, false, false, null)),
+                List.of(new ColumnDefinition("col", "col", "text", null, false, false, false, null)),
                 null, "ASC", null
         );
         List<ContractViolation> v = rule.validate(def);
