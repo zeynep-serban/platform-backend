@@ -378,6 +378,74 @@ class EndpointInstallPreflightServiceTest {
                 .contains(Reason.WINGET_PACKAGE_QUERY_NOT_FOUND.code());
     }
 
+    // BE-027 (Codex 019e7e3b): a package-query "not found" produced by ANY
+    // partial / error signal is INCONCLUSIVE → WARN, never the authoritative
+    // WINGET_PACKAGE_QUERY_NOT_FOUND BLOCK. Each variant exercises one signal.
+
+    @Test
+    void warnInconclusiveWhenNotFoundAndTopLevelTimeout() {
+        assertNotFoundInconclusive(e -> e.put("timeout", true));
+    }
+
+    @Test
+    void warnInconclusiveWhenNotFoundAndDnsCheckFailed() {
+        assertNotFoundInconclusive(e -> {
+            Map<String, Object> block = new LinkedHashMap<>(asMap(e.get("egress")));
+            block.put("dns", List.of(Map.of("target", "cdn.winget.microsoft.com",
+                    "ok", false, "durationMs", 1000, "errorReason", "lookup failed")));
+            e.put("egress", block);
+        });
+    }
+
+    @Test
+    void warnInconclusiveWhenNotFoundAndPackageQueryTimeout() {
+        assertNotFoundInconclusive(e -> {
+            Map<String, Object> pq = new LinkedHashMap<>(asMap(e.get("packageQuery")));
+            pq.put("timeout", true);
+            e.put("packageQuery", pq);
+        });
+    }
+
+    @Test
+    void warnInconclusiveWhenNotFoundAndPackageQueryErrorReason() {
+        assertNotFoundInconclusive(e -> {
+            Map<String, Object> pq = new LinkedHashMap<>(asMap(e.get("packageQuery")));
+            pq.put("errorReason", "winget search exited abnormally");
+            e.put("packageQuery", pq);
+        });
+    }
+
+    @Test
+    void warnInconclusiveWhenNotFoundAndPackageQueryNonZeroExit() {
+        assertNotFoundInconclusive(e -> {
+            Map<String, Object> pq = new LinkedHashMap<>(asMap(e.get("packageQuery")));
+            pq.put("exitCode", -1978335212);
+            e.put("packageQuery", pq);
+        });
+    }
+
+    @Test
+    void warnInconclusiveWhenNotFoundAndTopLevelProbeError() {
+        assertNotFoundInconclusive(e -> e.put("probeError", "winget egress probe failed"));
+    }
+
+    private void assertNotFoundInconclusive(
+            java.util.function.Consumer<Map<String, Object>> mutator) {
+        EndpointSoftwareInventorySnapshot snapshot = fullEvidenceSnapshot();
+        Map<String, Object> egress = new LinkedHashMap<>(packageNotFoundEgress());
+        mutator.accept(egress);
+        snapshot.setWingetEgress(egress);
+
+        InstallPreflightResponse response = service.compute(
+                onlineDevice(), approvedCatalogItem("7zip.7zip"), snapshot);
+
+        assertThat(response.warnings())
+                .as("partial/error probe → inconclusive, not authoritative not-found")
+                .contains(Reason.WINGET_PACKAGE_QUERY_INCONCLUSIVE.code());
+        assertThat(response.blockingReasons())
+                .doesNotContain(Reason.WINGET_PACKAGE_QUERY_NOT_FOUND.code());
+    }
+
     @Test
     void warnWhenEgressTimeoutPartial() {
         EndpointSoftwareInventorySnapshot snapshot = fullEvidenceSnapshot();

@@ -115,6 +115,11 @@ public class EndpointInstallPreflightService {
         INSTALLED_STATE_UNKNOWN("installed_state_unknown"),
         ALREADY_INSTALLED_DIFFERENT_VERSION("already_installed_different_version"),
         WINGET_EGRESS_PARTIAL("winget_egress_partial"),
+        // BE-027: a package-query "not found" produced by a PARTIAL (timed-out
+        // / network-degraded) winget probe is INCONCLUSIVE, not authoritative —
+        // it warns instead of blocking (mirrors BE-026: no authoritative-
+        // negative decision on Session-0-unreliable winget evidence).
+        WINGET_PACKAGE_QUERY_INCONCLUSIVE("winget_package_query_inconclusive"),
         WINGET_SOURCE_LIST_WARNING("winget_source_list_warning");
 
         private final String code;
@@ -368,27 +373,77 @@ public class EndpointInstallPreflightService {
             blocking.add(Reason.WINGET_FIXED_PROBE_PACKAGE_MISMATCH);
             return;
         }
+        // BE-027: an egress-INFRA partial (probe timeout or a DNS/TCP/HTTPS
+        // failure) makes the whole winget probe unreliable. This drives the
+        // WINGET_EGRESS_PARTIAL warning AND feeds the package-query
+        // reliability check below.
+        boolean egressInfraPartial = Boolean.TRUE.equals(asBool(egress.get("timeout")))
+                || hasFailedNetworkCheck(asList(asMap(egress.get("egress")), "dns"))
+                || hasFailedNetworkCheck(asList(asMap(egress.get("egress")), "tcp"))
+                || hasFailedNetworkCheck(asList(asMap(egress.get("egress")), "https"));
+
         Map<String, Object> packageQuery = asMap(egress.get("packageQuery"));
         boolean packageFound = packageQuery != null
                 && Boolean.TRUE.equals(packageQuery.get("found"));
         if (!packageFound) {
-            blocking.add(Reason.WINGET_PACKAGE_QUERY_NOT_FOUND);
+            if (wingetPackageQueryInconclusive(egress, packageQuery, egressInfraPartial)) {
+                // INCONCLUSIVE → WARN: the probe could not reliably enumerate
+                // the winget catalog (Session-0). The operator may still issue
+                // the command (carrying the warning); the agent re-verifies
+                // egress at install time and the terminal audit
+                // (SUCCEEDED / FAILED_EGRESS / FAILED_INSTALL) is the
+                // authoritative result (BE-026 philosophy: no authoritative-
+                // negative decision on unreliable winget evidence).
+                warnings.add(Reason.WINGET_PACKAGE_QUERY_INCONCLUSIVE);
+            } else {
+                // A COMPLETE, CLEAN probe that genuinely does not find the
+                // package authoritatively BLOCKs.
+                blocking.add(Reason.WINGET_PACKAGE_QUERY_NOT_FOUND);
+            }
         }
-        Boolean egressTimeout = asBool(egress.get("timeout"));
-        if (Boolean.TRUE.equals(egressTimeout)) {
+        if (egressInfraPartial) {
             warnings.add(Reason.WINGET_EGRESS_PARTIAL);
         }
         String sourceListError = asString(egress.get("sourceListError"));
         if (sourceListError != null && !sourceListError.isBlank()) {
             warnings.add(Reason.WINGET_SOURCE_LIST_WARNING);
         }
-        if (hasFailedNetworkCheck(asList(asMap(egress.get("egress")), "dns"))
-                || hasFailedNetworkCheck(asList(asMap(egress.get("egress")), "tcp"))
-                || hasFailedNetworkCheck(asList(asMap(egress.get("egress")), "https"))) {
-            if (!warnings.contains(Reason.WINGET_EGRESS_PARTIAL)) {
-                warnings.add(Reason.WINGET_EGRESS_PARTIAL);
-            }
+    }
+
+    /**
+     * BE-027: a winget package-query "not found" is AUTHORITATIVE only when the
+     * probe completed cleanly. Any partial / error signal — egress-infra
+     * partial (timeout / DNS-TCP-HTTPS failure), a top-level {@code probeError},
+     * a missing packageQuery, or a packageQuery that timed out / reported an
+     * {@code errorReason} / exited non-zero — means the query could not reliably
+     * enumerate the catalog, so "not found" is INCONCLUSIVE, not authoritative
+     * (Codex 019e7e3b). exitCode != 0 is treated as inconclusive: the agent
+     * models a non-zero query exit as "source could not satisfy the query",
+     * not "package definitively absent".
+     */
+    private static boolean wingetPackageQueryInconclusive(
+            Map<String, Object> egress,
+            Map<String, Object> packageQuery,
+            boolean egressInfraPartial) {
+        if (egressInfraPartial) {
+            return true;
         }
+        String probeError = asString(egress.get("probeError"));
+        if (probeError != null && !probeError.isBlank()) {
+            return true;
+        }
+        if (packageQuery == null) {
+            return true;
+        }
+        if (Boolean.TRUE.equals(asBool(packageQuery.get("timeout")))) {
+            return true;
+        }
+        String queryError = asString(packageQuery.get("errorReason"));
+        if (queryError != null && !queryError.isBlank()) {
+            return true;
+        }
+        Object exitCode = packageQuery.get("exitCode");
+        return exitCode instanceof Number n && n.intValue() != 0;
     }
 
     // ────────────────────────────────────────────────────────────────
