@@ -92,6 +92,109 @@ class EndpointAdminCommandServiceTest {
     }
 
     @Test
+    void manualCollectInventoryOptsInToDeviceHealthAndOutdatedSoftware() {
+        // Faz 22.5 keystone — the operator-initiated "Envanteri Şimdi Topla"
+        // full collect (this generic admin command surface) MUST opt the agent
+        // in to the AG-033 device-health and AG-036 outdated-software probes,
+        // or those drawer views can never be populated. The wire key names are
+        // the frozen agent contract (boolPayload(command.Payload, "...")) and
+        // must be EXACTLY includeDeviceHealth / includeOutdatedSoftware,
+        // camelCase, set to boolean true.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(TENANT_ID, "PC-OPTIN"));
+        CreateEndpointCommandRequest request = new CreateEndpointCommandRequest(
+                CommandType.COLLECT_INVENTORY,
+                "inventory-optin-001",
+                "full collect",
+                // Mirror the web client's WEB-018 payload (hardware/software/
+                // winget egress) — those must be preserved untouched while the
+                // backend adds the two missing health/outdated opt-ins.
+                Map.of("includeHardware", true,
+                        "includeSoftware", true,
+                        "includeWinGetEgress", true),
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+
+        EndpointCommandDto created = commandService.createCommand(adminContext(), device.getId(), request);
+
+        // Exact agent-contract key names, boolean true (not "true" / 1).
+        assertThat(created.payload())
+                .containsEntry("includeDeviceHealth", true)
+                .containsEntry("includeOutdatedSoftware", true)
+                // The web-client opt-ins are preserved exactly.
+                .containsEntry("includeHardware", true)
+                .containsEntry("includeSoftware", true)
+                .containsEntry("includeWinGetEgress", true);
+        assertThat(created.payload().get("includeDeviceHealth")).isInstanceOf(Boolean.class);
+        assertThat(created.payload().get("includeOutdatedSoftware")).isInstanceOf(Boolean.class);
+
+        // Persisted payload (what the agent claim path actually serves) carries
+        // the opt-ins too, not just the DTO projection.
+        EndpointCommand stored = commandRepository.findById(created.id()).orElseThrow();
+        assertThat(stored.getPayload())
+                .containsEntry("includeDeviceHealth", true)
+                .containsEntry("includeOutdatedSoftware", true);
+    }
+
+    @Test
+    void collectInventoryWithNoPayloadStillOptsInToHealthAndOutdated() {
+        // The legacy zero-payload COLLECT_INVENTORY (a caller that sends no
+        // opt-in map at all) must still get the two probes — the backend
+        // guarantees the documented collect-now data path independent of the
+        // client remembering the bits.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(TENANT_ID, "PC-NOPAYLOAD"));
+        CreateEndpointCommandRequest request = new CreateEndpointCommandRequest(
+                CommandType.COLLECT_INVENTORY,
+                "inventory-nopayload-001",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+
+        EndpointCommandDto created = commandService.createCommand(adminContext(), device.getId(), request);
+
+        assertThat(created.payload())
+                .containsEntry("includeDeviceHealth", true)
+                .containsEntry("includeOutdatedSoftware", true);
+    }
+
+    @Test
+    void collectInventoryRespectsExplicitDeviceHealthOptOut() {
+        // AG-025H opt-out boundary: an explicit caller-supplied false is NOT
+        // overwritten. Only an absent key is defaulted to true. This keeps a
+        // future lightweight caller's opt-out honoured.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(TENANT_ID, "PC-OPTOUT"));
+        java.util.Map<String, Object> payload = new java.util.HashMap<>();
+        payload.put("includeDeviceHealth", false);
+        CreateEndpointCommandRequest request = new CreateEndpointCommandRequest(
+                CommandType.COLLECT_INVENTORY,
+                "inventory-optout-001",
+                null,
+                payload,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+
+        EndpointCommandDto created = commandService.createCommand(adminContext(), device.getId(), request);
+
+        assertThat(created.payload())
+                // Explicit opt-out preserved.
+                .containsEntry("includeDeviceHealth", false)
+                // The unset key is still defaulted on.
+                .containsEntry("includeOutdatedSoftware", true);
+    }
+
+    @Test
     void createCommandRejectsInstallSoftwareOnGenericEndpoint() {
         // BE-021 (Codex 019e6dfb iter-3 P0-1): INSTALL_SOFTWARE cannot
         // be created via the generic /commands surface — that would

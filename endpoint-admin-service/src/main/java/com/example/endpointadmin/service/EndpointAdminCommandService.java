@@ -663,6 +663,9 @@ public class EndpointAdminCommandService {
         if (request.payload() != null) {
             payload.putAll(request.payload());
         }
+        if (request.type() == CommandType.COLLECT_INVENTORY) {
+            applyCollectInventoryOptIns(payload);
+        }
         String reason = trimToNull(request.reason());
         if (reason != null) {
             // BE-017: the dedicated `reason` field is authoritative — overwrite
@@ -672,6 +675,47 @@ public class EndpointAdminCommandService {
             payload.put("reason", reason);
         }
         return payload;
+    }
+
+    /**
+     * Faz 22.5 keystone — the operator-initiated "Envanteri Şimdi Topla"
+     * full collect (the only backend-constructed {@code COLLECT_INVENTORY}
+     * path; this generic admin command surface is what the İşlemler tab
+     * action targets) MUST carry the AG-033 device-health + AG-036
+     * outdated-software opt-ins, or the agent never runs those probes and the
+     * Cihaz Sağlığı / Güncel Olmayan Yazılım drawer views stay forever empty
+     * — even though both their empty states instruct the operator to populate
+     * them via exactly this action. The agent reads
+     * {@code boolPayload(command.Payload, "includeDeviceHealth")} /
+     * {@code "includeOutdatedSoftware"} → {@code CollectOptions.IncludeDeviceHealth}
+     * / {@code .IncludeOutdatedSoftware} → AG-033 / AG-036 probes → attaches
+     * {@code details.inventory.deviceHealth} / {@code .outdatedSoftware} which
+     * the DeviceHealthPayloadPolicy / OutdatedSoftwarePayloadPolicy ingest.
+     * The wire key names ({@code includeDeviceHealth} /
+     * {@code includeOutdatedSoftware}, camelCase) are the frozen agent
+     * contract and must match the agent's {@code boolPayload} lookups exactly.
+     *
+     * <p>Scope (deliberate — Codex review to validate the default): this is
+     * the operator-initiated full collect, so running the heavier health +
+     * outdated probes is appropriate and is what the views' empty-state
+     * promises. The lightweight heartbeat / auto-enroll path stays opt-out for
+     * cost (AG-025H) — and it does NOT flow through here: no backend code
+     * constructs a {@code COLLECT_INVENTORY} command other than this admin
+     * command-creation path, so opting in here cannot leak into the
+     * heartbeat default. Other collect opt-ins the web client already sends
+     * ({@code includeHardware} / {@code includeSoftware} /
+     * {@code includeWinGetEgress}) are left exactly as supplied.
+     *
+     * <p>An explicit caller-supplied value for either key is respected (not
+     * overwritten): a future lightweight caller that sends
+     * {@code includeDeviceHealth=false} keeps the AG-025H opt-out boundary.
+     * Only an absent key is defaulted to {@code true}, so the backend
+     * guarantees the documented data path for the manual collect-now without
+     * depending on every client to remember the bits.
+     */
+    private static void applyCollectInventoryOptIns(Map<String, Object> payload) {
+        payload.putIfAbsent("includeDeviceHealth", true);
+        payload.putIfAbsent("includeOutdatedSoftware", true);
     }
 
     private Map<String, Object> createAuditMetadata(EndpointCommand command,
