@@ -119,4 +119,45 @@ public interface EndpointOutdatedSoftwareSnapshotRepository
             @Param("deviceId") UUID deviceId,
             @Param("payloadHash") String payloadHash,
             Pageable pageable);
+
+    /**
+     * Fleet-wide LATEST snapshot per device for a tenant (Faz 22.5, #1146
+     * bulk CSV-export feed). Mirrors the AG-033
+     * {@code EndpointDeviceHealthSnapshotRepository#findLatestPerDeviceForTenant}
+     * against the outdated-software snapshots, reusing the
+     * {@code idx_endpoint_outdated_software_snapshots_tenant_device_time}
+     * composite index ordering with the SAME
+     * {@code collected_at DESC, created_at DESC, id DESC} tiebreaker as
+     * the per-device {@code findFirst...} derived query. The inner window
+     * (one row per device, {@code rn = 1}) is capped and used as an
+     * {@code IN}-subquery selecting whole snapshot rows; Hibernate maps
+     * them by column and the scalar-only mapper never walks the LAZY
+     * {@code packages} collection (no N+1). Returns at most {@code limit}
+     * entities; the caller fetches {@code cap + 1} and treats an over-cap
+     * result as truncated. Native (window function + LIMIT); supported by
+     * PostgreSQL and H2 2.x.
+     */
+    @Query(value = """
+            SELECT s.*
+            FROM endpoint_outdated_software_snapshots s
+            WHERE s.tenant_id = :tenantId
+              AND s.id IN (
+                SELECT ranked.id
+                FROM (
+                    SELECT os.id AS id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY os.device_id
+                               ORDER BY os.collected_at DESC, os.created_at DESC, os.id DESC
+                           ) AS rn
+                    FROM endpoint_outdated_software_snapshots os
+                    WHERE os.tenant_id = :tenantId
+                ) ranked
+                WHERE ranked.rn = 1
+                ORDER BY ranked.id
+                LIMIT :limit
+            )
+            """, nativeQuery = true)
+    List<EndpointOutdatedSoftwareSnapshot> findLatestPerDeviceForTenant(
+            @Param("tenantId") UUID tenantId,
+            @Param("limit") int limit);
 }

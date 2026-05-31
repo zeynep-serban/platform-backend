@@ -198,6 +198,31 @@ public class EndpointDeviceHealthService {
                 tenantId, deviceId, pageable);
     }
 
+    /**
+     * Fleet-wide latest device-health snapshot per device for a tenant
+     * (Faz 22.5, #1146 bulk CSV-export feed). ONE window query (latest per
+     * device, capped at {@code cap + 1}); an over-cap tenant short-circuits
+     * to {@link BulkLatestSnapshots#overCap()} (empty list — fail-closed so
+     * the export drops the group rather than reading a partial set as
+     * "absent ⇒ none").
+     *
+     * <p>Read-only tx; the controller maps scalar fields OUTSIDE this tx,
+     * so an accidental child-collection access would throw under
+     * {@code open-in-view=false} — a structural guard backing the
+     * scalar-only / no-N+1 invariant the integration test pins via
+     * Hibernate {@code collectionFetchCount == 0}.
+     */
+    @Transactional(readOnly = true)
+    public BulkLatestSnapshots<EndpointDeviceHealthSnapshot> findLatestPerDevice(
+            UUID tenantId, int cap) {
+        List<EndpointDeviceHealthSnapshot> snapshots =
+                repository.findLatestPerDeviceForTenant(tenantId, cap + 1);
+        if (snapshots.size() > cap) {
+            return BulkLatestSnapshots.overCap();
+        }
+        return BulkLatestSnapshots.of(snapshots);
+    }
+
     // ------------------------------------------------------------------
     // Internals — buildSnapshot composes the entity from the sanitized
     // device-health sub-tree. Missing optional scalars persist as NULL.

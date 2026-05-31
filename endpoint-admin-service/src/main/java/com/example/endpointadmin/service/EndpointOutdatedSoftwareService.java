@@ -204,6 +204,28 @@ public class EndpointOutdatedSoftwareService {
                 tenantId, deviceId, pageable);
     }
 
+    /**
+     * Fleet-wide latest outdated-software snapshot per device for a
+     * tenant (Faz 22.5, #1146 bulk CSV-export feed). Mirrors the AG-033
+     * {@code EndpointDeviceHealthService#findLatestPerDevice}: ONE window
+     * query (latest per device, capped at {@code cap + 1}); an over-cap
+     * tenant short-circuits to {@link BulkLatestSnapshots#overCap()} (empty
+     * list — fail-closed). Read-only tx; the controller maps scalar fields
+     * OUTSIDE it so a child-collection access would throw under
+     * {@code open-in-view=false} — backing the no-N+1 invariant the
+     * integration test pins via Hibernate {@code collectionFetchCount == 0}.
+     */
+    @Transactional(readOnly = true)
+    public BulkLatestSnapshots<EndpointOutdatedSoftwareSnapshot> findLatestPerDevice(
+            UUID tenantId, int cap) {
+        List<EndpointOutdatedSoftwareSnapshot> snapshots =
+                repository.findLatestPerDeviceForTenant(tenantId, cap + 1);
+        if (snapshots.size() > cap) {
+            return BulkLatestSnapshots.overCap();
+        }
+        return BulkLatestSnapshots.of(snapshots);
+    }
+
     // ------------------------------------------------------------------
     // Internals — buildSnapshot composes the entity from the sanitized
     // outdated-software sub-tree.
