@@ -1,6 +1,5 @@
-package com.example.report.export;
+package com.example.commonexport;
 
-import com.example.report.query.SqlBuilder;
 import java.io.OutputStream;
 import java.util.List;
 import org.apache.poi.ss.usermodel.Cell;
@@ -9,18 +8,29 @@ import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.xssf.streaming.SXSSFWorkbook;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
+/**
+ * Streaming Excel (.xlsx) exporter backed by Apache POI's
+ * {@link SXSSFWorkbook} (sliding 100-row flush window — bounded heap for
+ * arbitrarily large result sets).
+ *
+ * <p>Extracted verbatim from report-service (Codex thread 019e2cd7) into
+ * {@code common-export} for reuse by endpoint-admin-service (board #1154,
+ * Codex thread 019e7e35). The ONLY change from the report-service
+ * original is the query type: {@code SqlBuilder.BuiltQuery} →
+ * {@link ExportQuery}, so the produced workbook is identical.
+ */
 public class ExcelStreamingExporter {
 
     private static final int FLUSH_WINDOW = 100;
 
     /**
-     * PR-0.5b backward-compat shim: legacy flat-export call sites
-     * still pass a {@code List<String>}. The canonical implementation
-     * is {@link #exportWithColumns(NamedParameterJdbcTemplate,
-     * SqlBuilder.BuiltQuery, List, String, OutputStream)}.
+     * Backward-compat shim: legacy flat-export call sites still pass a
+     * {@code List<String>}. The canonical implementation is
+     * {@link #exportWithColumns(NamedParameterJdbcTemplate, ExportQuery,
+     * List, String, OutputStream)}.
      */
     public static void export(NamedParameterJdbcTemplate jdbc,
-                               SqlBuilder.BuiltQuery query,
+                               ExportQuery query,
                                List<String> columns,
                                String sheetName,
                                OutputStream out) {
@@ -31,7 +41,7 @@ public class ExcelStreamingExporter {
     }
 
     public static void exportWithColumns(NamedParameterJdbcTemplate jdbc,
-                                          SqlBuilder.BuiltQuery query,
+                                          ExportQuery query,
                                           List<ExportColumn> columns,
                                           String sheetName,
                                           OutputStream out) {

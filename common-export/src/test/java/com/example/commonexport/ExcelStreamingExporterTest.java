@@ -1,6 +1,5 @@
-package com.example.report.export;
+package com.example.commonexport;
 
-import com.example.report.query.SqlBuilder;
 import org.apache.poi.ss.usermodel.CellType;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
@@ -13,6 +12,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.jdbc.core.namedparam.SqlParameterSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -22,12 +22,16 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 /**
  * Tests for {@link ExcelStreamingExporter}.
  * Verifies Excel generation via SXSSFWorkbook with mocked JDBC results.
+ *
+ * <p>Migrated from report-service {@code ExcelStreamingExporterTest}
+ * during the {@code common-export} extraction (board #1154); the query
+ * type changed from {@code SqlBuilder.BuiltQuery} to {@link ExportQuery},
+ * every behaviour assertion is unchanged.
  */
 @ExtendWith(MockitoExtension.class)
 class ExcelStreamingExporterTest {
@@ -37,8 +41,8 @@ class ExcelStreamingExporterTest {
 
     private final List<String> columns = List.of("id", "name", "amount");
 
-    private SqlBuilder.BuiltQuery buildQuery() {
-        return new SqlBuilder.BuiltQuery("SELECT id, name, amount FROM test", new MapSqlParameterSource());
+    private ExportQuery buildQuery() {
+        return new ExportQuery("SELECT id, name, amount FROM test", new MapSqlParameterSource());
     }
 
     @Test
@@ -52,7 +56,7 @@ class ExcelStreamingExporterTest {
             ResultSet rs2 = mockResultSet(2, "Bob", 200.75);
             handler.processRow(rs2);
             return null;
-        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        }).when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         ExcelStreamingExporter.export(jdbc, buildQuery(), columns, "TestSheet", out);
@@ -91,7 +95,7 @@ class ExcelStreamingExporterTest {
     @Test
     void export_emptyResultSet_producesHeaderOnly() throws Exception {
         // jdbc.query callback is never invoked — empty result set
-        doNothing().when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        doNothing().when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         ExcelStreamingExporter.export(jdbc, buildQuery(), columns, "Empty", out);
@@ -119,7 +123,7 @@ class ExcelStreamingExporterTest {
             when(rs.getObject("amount")).thenReturn(null);
             handler.processRow(rs);
             return null;
-        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        }).when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         ExcelStreamingExporter.export(jdbc, buildQuery(), columns, "NullTest", out);
@@ -136,7 +140,7 @@ class ExcelStreamingExporterTest {
 
     @Test
     void export_nullSheetName_defaultsToReport() throws Exception {
-        doNothing().when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        doNothing().when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         ExcelStreamingExporter.export(jdbc, buildQuery(), columns, null, out);
@@ -156,7 +160,7 @@ class ExcelStreamingExporterTest {
             when(rs.getObject("amount")).thenReturn(3.14f);
             handler.processRow(rs);
             return null;
-        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        }).when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         ExcelStreamingExporter.export(jdbc, buildQuery(), columns, "TypeTest", out);
@@ -176,7 +180,7 @@ class ExcelStreamingExporterTest {
     @Test
     void export_jdbcThrows_wrapsInRuntimeException() {
         doThrow(new RuntimeException("DB error"))
-                .when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+                .when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         RuntimeException ex = assertThrows(RuntimeException.class, () ->

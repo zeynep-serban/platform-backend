@@ -16,7 +16,7 @@ on:
 
 jobs:
   full-reactor-build:
-    name: Maven full reactor build (all 11 modules)
+    name: Maven full reactor build (all 12 modules)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -34,10 +34,10 @@ jobs:
       - name: Display Maven version
         run: ./mvnw --version
 
-      - name: Compile full reactor (11 modules)
+      - name: Compile full reactor (12 modules)
         run: ./mvnw -q -DskipTests test-compile
 
-      - name: Verify full reactor (11 modules, no tests)
+      - name: Verify full reactor (12 modules, no tests)
         run: ./mvnw -q -DskipTests verify
 
   schema-service-build:
@@ -190,8 +190,8 @@ jobs:
           java-version: '21'
           cache: 'maven'
 
-      - name: Pre-install common-auth (parent reactor dependency, not in Maven Central)
-        run: ./mvnw -q -pl common-auth install -DskipTests
+      - name: Pre-install reactor deps (common-auth + common-export — board #1154, not in Maven Central)
+        run: ./mvnw -q -pl common-auth,common-export install -DskipTests
 
       - name: Run report-service MSSQL Testcontainers integration tests
         run: ./mvnw -q -pl report-service test -Pintegration-tests -Dtest='SqlBuilderMssqlIntegrationTest,WorkcubeQueryAdapterIT'

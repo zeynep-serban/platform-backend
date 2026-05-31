@@ -5,10 +5,16 @@ WORKDIR /app
 
 COPY common-auth/pom.xml ./common-auth/pom.xml
 COPY common-auth/src ./common-auth/src
+COPY common-export/pom.xml ./common-export/pom.xml
+COPY common-export/src ./common-export/src
 COPY report-service/pom.xml ./report-service/pom.xml
 COPY report-service/src ./report-service/src
 
 RUN mvn -f common-auth/pom.xml clean install -DskipTests
+# board #1154: report-service depends on the shared common-export module
+# (com.example:common-export:1.0.0); install it before packaging so the
+# clean Docker build can resolve it (it is not in Maven Central).
+RUN mvn -f common-export/pom.xml clean install -DskipTests
 RUN mvn -f report-service/pom.xml clean package -Dmaven.test.skip=true
 
 ## Runtime Stage

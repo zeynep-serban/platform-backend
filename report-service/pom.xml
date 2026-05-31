@@ -31,6 +31,15 @@
             <version>1.1.0</version>
         </dependency>
 
+        <!-- Shared streaming CSV/Excel exporters (extracted from this
+             service into common-export, board #1154). Brings poi-ooxml
+             transitively, so no direct POI dependency is needed here. -->
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>common-export</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
         <!-- Web (Tomcat + virtual threads) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -118,13 +127,6 @@
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-database-postgresql</artifactId>
-        </dependency>
-
-        <!-- Excel streaming export -->
-        <dependency>
-            <groupId>org.apache.poi</groupId>
-            <artifactId>poi-ooxml</artifactId>
-            <version>5.2.5</version>
         </dependency>
 
         <!-- Jackson -->

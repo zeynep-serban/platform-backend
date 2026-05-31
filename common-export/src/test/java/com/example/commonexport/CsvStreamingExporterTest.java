@@ -1,6 +1,5 @@
-package com.example.report.export;
+package com.example.commonexport;
 
-import com.example.report.query.SqlBuilder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -8,6 +7,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.jdbc.core.namedparam.SqlParameterSource;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -22,6 +22,11 @@ import static org.mockito.Mockito.*;
 /**
  * Tests for {@link CsvStreamingExporter}.
  * Verifies CSV format: UTF-8 BOM, semicolon separator, quoting rules.
+ *
+ * <p>Migrated from report-service {@code CsvStreamingExporterTest} during
+ * the {@code common-export} extraction (board #1154); the query type
+ * changed from {@code SqlBuilder.BuiltQuery} to {@link ExportQuery}, every
+ * behaviour assertion is byte-for-byte identical.
  */
 @ExtendWith(MockitoExtension.class)
 class CsvStreamingExporterTest {
@@ -34,8 +39,8 @@ class CsvStreamingExporterTest {
 
     private final List<String> columns = List.of("id", "name", "city");
 
-    private SqlBuilder.BuiltQuery buildQuery() {
-        return new SqlBuilder.BuiltQuery("SELECT id, name, city FROM test", new MapSqlParameterSource());
+    private ExportQuery buildQuery() {
+        return new ExportQuery("SELECT id, name, city FROM test", new MapSqlParameterSource());
     }
 
     @Test
@@ -45,7 +50,7 @@ class CsvStreamingExporterTest {
             handler.processRow(mockResultSet(1, "Alice", "Istanbul"));
             handler.processRow(mockResultSet(2, "Bob", "Ankara"));
             return null;
-        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        }).when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         CsvStreamingExporter.export(jdbc, buildQuery(), columns, out);
@@ -69,7 +74,7 @@ class CsvStreamingExporterTest {
 
     @Test
     void export_emptyResultSet_producesHeaderOnly() {
-        doNothing().when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        doNothing().when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         CsvStreamingExporter.export(jdbc, buildQuery(), columns, out);
@@ -91,7 +96,7 @@ class CsvStreamingExporterTest {
             when(rs.getObject("city")).thenReturn(null);
             handler.processRow(rs);
             return null;
-        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        }).when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         CsvStreamingExporter.export(jdbc, buildQuery(), columns, out);
@@ -112,7 +117,7 @@ class CsvStreamingExporterTest {
             when(rs.getObject("city")).thenReturn("Normal");
             handler.processRow(rs);
             return null;
-        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        }).when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         CsvStreamingExporter.export(jdbc, buildQuery(), columns, out);
@@ -133,7 +138,7 @@ class CsvStreamingExporterTest {
             when(rs.getObject("city")).thenReturn("OK");
             handler.processRow(rs);
             return null;
-        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        }).when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         CsvStreamingExporter.export(jdbc, buildQuery(), columns, out);
@@ -155,7 +160,7 @@ class CsvStreamingExporterTest {
             when(rs.getObject("city")).thenReturn("Simple");
             handler.processRow(rs);
             return null;
-        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        }).when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         CsvStreamingExporter.export(jdbc, buildQuery(), columns, out);
@@ -171,7 +176,7 @@ class CsvStreamingExporterTest {
             RowCallbackHandler handler = invocation.getArgument(2);
             handler.processRow(mockResultSet(1, "A", "B"));
             return null;
-        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        }).when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         CsvStreamingExporter.export(jdbc, buildQuery(), columns, out);
@@ -187,7 +192,7 @@ class CsvStreamingExporterTest {
     @Test
     void export_jdbcThrows_wrapsInRuntimeException() {
         doThrow(new RuntimeException("DB error"))
-                .when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+                .when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         RuntimeException ex = assertThrows(RuntimeException.class, () ->
@@ -195,12 +200,12 @@ class CsvStreamingExporterTest {
         assertTrue(ex.getMessage().contains("CSV export failed") || ex.getMessage().contains("DB error"));
     }
 
-    // ── PR-0.5b: ExportColumn header/field split + CSV formula injection defence ──
+    // ── ExportColumn header/field split + CSV formula injection defence ──
 
     @Test
     void exportWithColumns_usesHeaderForRowOneAndFieldForResultSetKey() throws Exception {
-        // PR-0.5b: header is user-facing label (registered display
-        // name); field is the SQL alias used as ResultSet key.
+        // header is user-facing label (registered display name); field
+        // is the SQL alias used as ResultSet key.
         doAnswer(invocation -> {
             RowCallbackHandler handler = invocation.getArgument(2);
             ResultSet rs = mock(ResultSet.class);
@@ -208,7 +213,7 @@ class CsvStreamingExporterTest {
             when(rs.getObject("qty")).thenReturn(5);
             handler.processRow(rs);
             return null;
-        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        }).when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         CsvStreamingExporter.exportWithColumns(jdbc, buildQuery(),
@@ -227,10 +232,10 @@ class CsvStreamingExporterTest {
 
     @Test
     void exportWithColumns_leadingCRAndTabWrappedInQuotes() throws Exception {
-        // Codex 019e2cd7 post-impl Finding #5: CR/tab inside a value
-        // can break CSV record/cell boundaries even after the
-        // formula-injection prefix. The escape rule wraps them in
-        // double quotes too.
+        // Codex 019e2cd7 post-impl Finding #5: CR/tab inside a value can
+        // break CSV record/cell boundaries even after the
+        // formula-injection prefix. The escape rule wraps them in double
+        // quotes too.
         doAnswer(invocation -> {
             RowCallbackHandler handler = invocation.getArgument(2);
             ResultSet rs = mock(ResultSet.class);
@@ -239,7 +244,7 @@ class CsvStreamingExporterTest {
             when(rs.getObject("cr_mid")).thenReturn("a\rb");
             handler.processRow(rs);
             return null;
-        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        }).when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         CsvStreamingExporter.exportWithColumns(jdbc, buildQuery(),
@@ -263,8 +268,8 @@ class CsvStreamingExporterTest {
 
     @Test
     void exportWithColumns_csvFormulaInjectionPrefixedWithSingleQuote() throws Exception {
-        // PR-0.5b (Codex 019e2cd7 risk #5): leading =/+/-/@/tab/CR must
-        // be neutralised so Excel does not evaluate them as formulas.
+        // Codex 019e2cd7 risk #5: leading =/+/-/@/tab/CR must be
+        // neutralised so Excel does not evaluate them as formulas.
         doAnswer(invocation -> {
             RowCallbackHandler handler = invocation.getArgument(2);
             ResultSet rs = mock(ResultSet.class);
@@ -274,7 +279,7 @@ class CsvStreamingExporterTest {
             when(rs.getObject("normal")).thenReturn("Hello");
             handler.processRow(rs);
             return null;
-        }).when(jdbc).query(any(String.class), any(MapSqlParameterSource.class), any(RowCallbackHandler.class));
+        }).when(jdbc).query(any(String.class), any(SqlParameterSource.class), any(RowCallbackHandler.class));
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         CsvStreamingExporter.exportWithColumns(jdbc, buildQuery(),
@@ -287,10 +292,9 @@ class CsvStreamingExporterTest {
 
         String csv = extractCsvContent(out);
         String[] lines = csv.split("\\r?\\n");
-        // Each formula-vulnerable value is prefixed with a single
-        // quote so Excel treats it as text, not a formula. Values
-        // without separator/quote/newline don't need extra
-        // quote-wrapping.
+        // Each formula-vulnerable value is prefixed with a single quote
+        // so Excel treats it as text, not a formula. Values without
+        // separator/quote/newline don't need extra quote-wrapping.
         assertTrue(lines[1].startsWith("'=cmd"),
                 "leading '=' must be prefixed with single quote (line was: " + lines[1] + ")");
         assertTrue(lines[1].contains(";'+1+1"),

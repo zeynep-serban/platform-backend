@@ -1,5 +1,9 @@
 package com.example.report.controller;
 
+import com.example.commonexport.CsvStreamingExporter;
+import com.example.commonexport.ExcelStreamingExporter;
+import com.example.commonexport.ExportColumn;
+import com.example.commonexport.ExportQuery;
 import com.example.report.access.ReportAccessEvaluator;
 import com.example.report.audit.ReportAuditClient;
 import com.example.report.authz.AuthzMeResponse;
@@ -9,9 +13,6 @@ import com.example.report.dto.ColumnVO;
 import com.example.report.dto.ReportExportRequestDto;
 import com.example.report.dto.ReportQueryErrorDto;
 import com.example.report.dto.ReportQueryRequestDto;
-import com.example.report.export.CsvStreamingExporter;
-import com.example.report.export.ExcelStreamingExporter;
-import com.example.report.export.ExportColumn;
 import com.example.report.query.QueryEngine;
 import com.example.report.query.SqlBuilder;
 import com.example.report.registry.ColumnDefinition;
@@ -117,7 +118,7 @@ public class ReportExportController {
 
         if ("excel".equalsIgnoreCase(format) || "xlsx".equalsIgnoreCase(format)) {
             StreamingResponseBody body = out ->
-                    ExcelStreamingExporter.export(jdbc, exportQuery, visibleColumns, def.title(), out);
+                    ExcelStreamingExporter.export(jdbc, toExportQuery(exportQuery), visibleColumns, def.title(), out);
             return ResponseEntity.ok()
                     .headers(degradationHeaders)
                     .header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -126,7 +127,7 @@ public class ReportExportController {
         }
 
         StreamingResponseBody body = out ->
-                CsvStreamingExporter.export(jdbc, exportQuery, visibleColumns, out);
+                CsvStreamingExporter.export(jdbc, toExportQuery(exportQuery), visibleColumns, out);
         return ResponseEntity.ok()
                 .headers(degradationHeaders)
                 .header("Content-Type", "text/csv; charset=UTF-8")
@@ -304,7 +305,7 @@ public class ReportExportController {
 
         if ("excel".equalsIgnoreCase(format) || "xlsx".equalsIgnoreCase(format)) {
             StreamingResponseBody body = out ->
-                    ExcelStreamingExporter.exportWithColumns(jdbc, finalQuery, finalColumns, def.title(), out);
+                    ExcelStreamingExporter.exportWithColumns(jdbc, toExportQuery(finalQuery), finalColumns, def.title(), out);
             return ResponseEntity.ok()
                     .headers(degradationHeaders)
                     .header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -313,7 +314,7 @@ public class ReportExportController {
         }
 
         StreamingResponseBody body = out ->
-                CsvStreamingExporter.exportWithColumns(jdbc, finalQuery, finalColumns, out);
+                CsvStreamingExporter.exportWithColumns(jdbc, toExportQuery(finalQuery), finalColumns, out);
         return ResponseEntity.ok()
                 .headers(degradationHeaders)
                 .header("Content-Type", "text/csv; charset=UTF-8")
@@ -478,6 +479,18 @@ public class ReportExportController {
             out.add(new ExportColumn(prc.field(), header));
         }
         return out;
+    }
+
+    /**
+     * Adapt report-service's {@link SqlBuilder.BuiltQuery} to the
+     * service-agnostic {@link ExportQuery} consumed by the shared
+     * {@code common-export} exporters (board #1154). The degradation
+     * warnings on {@code BuiltQuery} are surfaced separately as
+     * {@code X-Report-Degraded} headers, so the exporter only needs the
+     * SQL + bound params.
+     */
+    private static ExportQuery toExportQuery(SqlBuilder.BuiltQuery query) {
+        return new ExportQuery(query.sql(), query.params());
     }
 
     private <T> T parseJson(String json, TypeReference<T> typeRef) {

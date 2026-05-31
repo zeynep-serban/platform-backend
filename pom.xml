@@ -15,6 +15,7 @@
 
     <modules>
         <module>common-auth</module>
+        <module>common-export</module>
         <module>discovery-server</module>
         <module>api-gateway</module>
         <module>auth-service</module>

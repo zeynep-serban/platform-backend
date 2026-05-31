@@ -1,6 +1,5 @@
-package com.example.report.export;
+package com.example.commonexport;
 
-import com.example.report.query.SqlBuilder;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
@@ -8,22 +7,34 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
+/**
+ * Streaming CSV exporter: writes a UTF-8 BOM, semicolon-separated rows
+ * straight from a JDBC {@link NamedParameterJdbcTemplate} cursor to an
+ * {@link OutputStream} without materialising the result set in memory.
+ *
+ * <p>Extracted verbatim from report-service (Codex thread 019e2cd7) into
+ * {@code common-export} for reuse by endpoint-admin-service (board #1154,
+ * Codex thread 019e7e35). The ONLY change from the report-service
+ * original is the query type: {@code SqlBuilder.BuiltQuery} →
+ * {@link ExportQuery} (same {@code sql()} + {@code params()} accessors),
+ * so the produced bytes are identical.
+ */
 public class CsvStreamingExporter {
 
     private static final String SEPARATOR = ";";
     private static final byte[] UTF8_BOM = new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF};
 
     /**
-     * PR-0.5b backward-compat shim: legacy flat-export call sites
-     * still pass a {@code List<String>} where field == header. The
-     * canonical implementation is
-     * {@link #exportWithColumns(NamedParameterJdbcTemplate,
-     * SqlBuilder.BuiltQuery, List, OutputStream)} which honours the
-     * {@link ExportColumn#field()} / {@link ExportColumn#header()}
-     * split needed by grouped + pivot export.
+     * Backward-compat shim: legacy flat-export call sites still pass a
+     * {@code List<String>} where field == header. The canonical
+     * implementation is
+     * {@link #exportWithColumns(NamedParameterJdbcTemplate, ExportQuery,
+     * List, OutputStream)} which honours the {@link ExportColumn#field()}
+     * / {@link ExportColumn#header()} split needed by grouped + pivot
+     * export.
      */
     public static void export(NamedParameterJdbcTemplate jdbc,
-                               SqlBuilder.BuiltQuery query,
+                               ExportQuery query,
                                List<String> columns,
                                OutputStream out) {
         List<ExportColumn> exportColumns = columns.stream()
@@ -33,7 +44,7 @@ public class CsvStreamingExporter {
     }
 
     public static void exportWithColumns(NamedParameterJdbcTemplate jdbc,
-                                          SqlBuilder.BuiltQuery query,
+                                          ExportQuery query,
                                           List<ExportColumn> columns,
                                           OutputStream out) {
         try {
@@ -72,11 +83,11 @@ public class CsvStreamingExporter {
     }
 
     /**
-     * PR-0.5b (Codex 019e2cd7 risk #5): minimum CSV formula injection
-     * defence. Excel/Calc evaluate any leading {@code =, +, -, @, \t,
-     * \r} character as a formula; we prefix vulnerable values with a
-     * single quote so they render as literal text. Combined with the
-     * existing separator/quote/newline quoting rules.
+     * Minimum CSV formula injection defence (Codex 019e2cd7 risk #5).
+     * Excel/Calc evaluate any leading {@code =, +, -, @, \t, \r}
+     * character as a formula; we prefix vulnerable values with a single
+     * quote so they render as literal text. Combined with the existing
+     * separator/quote/newline quoting rules.
      */
     private static String escapeCell(String raw) {
         if (raw == null) return "";
