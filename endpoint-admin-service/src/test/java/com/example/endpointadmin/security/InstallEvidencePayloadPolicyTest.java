@@ -90,6 +90,109 @@ class InstallEvidencePayloadPolicyTest {
     }
 
     @Test
+    void redactPreservesInstallWrapperEvidenceAndDropsUnknownInstallKeys() {
+        // BE-028: the agent ships the AG-027 InstallResult under
+        // `details.install` (COMMAND-CONTRACT §11.2). The redaction must keep
+        // the wrapper + its authoritative postVerification while dropping
+        // unknown / forbidden install sub-keys.
+        Map<String, Object> details = baseInstallDetails();
+        Map<String, Object> install = new java.util.LinkedHashMap<>();
+        install.put("finalStatus", "SUCCEEDED_NOOP");
+        Map<String, Object> pv = new java.util.LinkedHashMap<>();
+        pv.put("satisfied", Boolean.TRUE);
+        pv.put("matchedPackageId", "7zip.7zip");
+        pv.put("ruleType", "REGISTRY_UNINSTALL");
+        // BE-028 (Codex 019e7f93 #2): these are NOT in the canonical
+        // PostVerificationResult contract and must be projected OUT.
+        pv.put("authority", "AUTHORITATIVE");                  // not in contract
+        pv.put("operatorEmail", "ops@example.com");            // arbitrary injection
+        pv.put("debug", java.util.Map.of("rawOutput", "leak")); // nested blob
+        install.put("postVerification", pv);
+        install.put("processEnvironment", "SECRET=abc");   // forbidden key
+        install.put("rawSpelunk", "drop me");              // not on install allow-list
+        // BE-028 (Codex 019e7f93): raw installer output + the egress sub-tree
+        // are deliberately EXCLUDED from the install allow-list (weak backend
+        // redaction of raw tails / un-validated egress surface).
+        install.put("stdoutTail", "C:\\Users\\bob secret LICENSEKEY=xyz");
+        install.put("stderrTail", "err");
+        install.put("egress", new java.util.LinkedHashMap<>(java.util.Map.of(
+                "supported", Boolean.TRUE, "sources", "https://cdn.example")));
+        details.put("install", install);
+
+        Map<String, Object> redacted = policy.redact(details);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> redactedInstall =
+                (Map<String, Object>) redacted.get("install");
+        assertThat(redactedInstall).isNotNull();
+        assertThat(redactedInstall)
+                .containsKey("postVerification")
+                .containsEntry("finalStatus", "SUCCEEDED_NOOP")
+                .doesNotContainKeys("processEnvironment", "rawSpelunk",
+                        "stdoutTail", "stderrTail", "egress");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> redactedPv =
+                (Map<String, Object>) redactedInstall.get("postVerification");
+        assertThat(redactedPv)
+                .containsEntry("satisfied", Boolean.TRUE)
+                .containsEntry("matchedPackageId", "7zip.7zip")
+                .containsEntry("ruleType", "REGISTRY_UNINSTALL")
+                // contract-foreign + arbitrary nested keys projected OUT
+                .doesNotContainKeys("authority", "operatorEmail", "debug");
+    }
+
+    @Test
+    void redactBoundsSerializedSizeUnderCapDespiteLargeNestedAndErrorMessage()
+            throws Exception {
+        // BE-028 (Codex 019e7f93 #3): even a hostile payload with a 20 KiB nested
+        // postVerification blob AND a 20 KiB errorMessage must serialize to
+        // <= MAX_REDACTED_BYTES_DEFAULT. The nested blob is projected out; the
+        // errorMessage is summary-capped; the size fail-safe is the backstop.
+        String huge = "x".repeat(20 * 1024);
+        Map<String, Object> details = baseInstallDetails();
+        details.put("errorMessage", huge);
+        Map<String, Object> install = new java.util.LinkedHashMap<>();
+        install.put("finalStatus", "FAILED_VERIFICATION");
+        Map<String, Object> pv = new java.util.LinkedHashMap<>();
+        pv.put("satisfied", Boolean.FALSE);
+        pv.put("debug", huge);                 // arbitrary nested → projected out
+        pv.put("matchedPackageId", huge);      // allowed scalar → summary-capped
+        install.put("postVerification", pv);
+        details.put("install", install);
+
+        Map<String, Object> redacted = policy.redact(details);
+
+        byte[] serialized = new com.fasterxml.jackson.databind.ObjectMapper()
+                .writeValueAsBytes(redacted);
+        assertThat(serialized.length)
+                .isLessThanOrEqualTo(InstallEvidencePayloadPolicy.MAX_REDACTED_BYTES_DEFAULT);
+    }
+
+    @Test
+    void redactCollapsesToMarkerWhenAllowedTopLevelScalarExceedsCap()
+            throws Exception {
+        // BE-028 (Codex 019e7f93 #3): a large ALLOWED top-level scalar
+        // (catalogPackageId, stage, ...) is not field-capped — the absolute
+        // last-resort collapses the whole row to a tiny marker so the cap is a
+        // HARD guarantee, never best-effort.
+        Map<String, Object> details = baseInstallDetails();
+        details.put("catalogPackageId", "x".repeat(20 * 1024));
+        Map<String, Object> install = new java.util.LinkedHashMap<>();
+        install.put("finalStatus", "SUCCEEDED");
+        install.put("postVerification",
+                new java.util.LinkedHashMap<>(java.util.Map.of("satisfied", Boolean.TRUE)));
+        details.put("install", install);
+
+        Map<String, Object> redacted = policy.redact(details);
+
+        byte[] serialized = new com.fasterxml.jackson.databind.ObjectMapper()
+                .writeValueAsBytes(redacted);
+        assertThat(serialized.length)
+                .isLessThanOrEqualTo(InstallEvidencePayloadPolicy.MAX_REDACTED_BYTES_DEFAULT);
+        assertThat(redacted).containsEntry("trimmed", true);
+    }
+
+    @Test
     void redactMasksWindowsUsersPathInValues() {
         Map<String, Object> details = baseInstallDetails();
         details.put("stdoutSummary", "extracted to C:\\Users\\Bob\\AppData\\Local done");

@@ -177,17 +177,23 @@ public class EndpointInstallAuditService {
     }
 
     private static DetectionReadout extractDetection(Map<String, Object> redactedDetails) {
-        Map<String, Object> detection = asMap(redactedDetails.get("detection"));
-        Map<String, Object> postVerification = asMap(redactedDetails.get("postVerification"));
+        // BE-028: the agent ships the AG-027 InstallResult under
+        // `details.install` (COMMAND-CONTRACT §11.2). The post-verification —
+        // and the detected package/version (postVerification.matchedPackageId /
+        // matchedVersion; the contract carries no separate top-level
+        // `detection`) — live there. Reading the old flat `details.detection` /
+        // `details.postVerification` always missed and recorded UNKNOWN.
+        Map<String, Object> install = asMap(redactedDetails.get("install"));
+        Map<String, Object> postVerification = install == null
+                ? null : asMap(install.get("postVerification"));
         Map<String, Object> evidence = postVerification == null
                 ? new LinkedHashMap<>()
                 : new LinkedHashMap<>(postVerification);
-        InstallPostVerification verdict = parsePostVerification(
-                postVerification == null ? null : postVerification.get("status"));
-        String detectedPackageId = detection == null
-                ? null : asString(detection.get("packageId"));
-        String detectedVersion = detection == null
-                ? null : asString(detection.get("version"));
+        InstallPostVerification verdict = parseVerdict(install, postVerification);
+        String detectedPackageId = postVerification == null
+                ? null : asString(postVerification.get("matchedPackageId"));
+        String detectedVersion = postVerification == null
+                ? null : asString(postVerification.get("matchedVersion"));
         return new DetectionReadout(verdict, detectedPackageId, detectedVersion, evidence);
     }
 
@@ -285,26 +291,75 @@ public class EndpointInstallAuditService {
         return parsed;
     }
 
-    private static InstallPostVerification parsePostVerification(Object node) {
-        if (node == null) {
+    /**
+     * BE-028 (Codex 019e7f93 #1): derive the backend post-verification verdict
+     * from the install wrapper. The agent's {@code PostVerificationResult}
+     * (install_winget.go) ships ONLY a boolean {@code satisfied} that is NOT
+     * {@code omitempty}: on every early-failure path where post-verify never ran
+     * (FAILED_INSTALL / FAILED_EGRESS / FAILED_TIMEOUT / FAILED_UNSUPPORTED_* /
+     * FAILED_INTERNAL) the wire still carries {@code satisfied=false} (the zero
+     * value). Mapping that blindly to UNSATISFIED would fabricate an
+     * authoritative detection denial. The reliability decision is carried by
+     * {@code finalStatus}: an authoritative miss surfaces as
+     * {@code FAILED_VERIFICATION}.
+     *
+     * <ul>
+     *   <li>{@code status} present (forward-compat 3-way) → mapped directly</li>
+     *   <li>{@code satisfied=true} → SATISFIED</li>
+     *   <li>{@code satisfied=false} + {@code finalStatus=FAILED_VERIFICATION}
+     *       → UNSATISFIED (genuine post-verify negative — e.g. a reliable
+     *       REGISTRY_UNINSTALL miss)</li>
+     *   <li>{@code satisfied=false} otherwise (post-verify never ran /
+     *       confirm-only miss under a SUCCEEDED) → UNKNOWN</li>
+     *   <li>malformed / absent {@code satisfied} → UNKNOWN</li>
+     * </ul>
+     */
+    private static InstallPostVerification parseVerdict(
+            Map<String, Object> install, Map<String, Object> postVerification) {
+        if (postVerification == null) {
             return InstallPostVerification.UNKNOWN;
         }
-        // Map the agent's post-verify verdict vocabulary (install_winget.go
-        // PostVerifyStatus*) onto the backend verdict enum (Codex 019e7dce):
-        //   SATISFIED     -> SATISFIED
-        //   NOT_SATISFIED -> UNSATISFIED  (AUTHORITATIVE denial — e.g. a reliable
-        //                                  REGISTRY_UNINSTALL miss; must NOT be
-        //                                  flattened to UNKNOWN, which would hide
-        //                                  the authoritative signal in the audit)
-        //   INCONCLUSIVE  -> UNKNOWN      (CONFIRM_ONLY — e.g. winget list under
-        //                                  Session-0 cannot confirm/deny)
-        // The backend's own literals (SATISFIED/UNSATISFIED/UNKNOWN) still parse.
-        return switch (String.valueOf(node).trim().toUpperCase(Locale.ROOT)) {
-            case "SATISFIED" -> InstallPostVerification.SATISFIED;
-            case "UNSATISFIED", "NOT_SATISFIED" -> InstallPostVerification.UNSATISFIED;
-            case "INCONCLUSIVE", "UNKNOWN" -> InstallPostVerification.UNKNOWN;
-            default -> InstallPostVerification.UNKNOWN;
-        };
+        // Forward-compat: a future agent may emit a 3-way `status`. Prefer it.
+        // (The current agent contract does not ship `status`; the live verdict
+        // resolves through the `satisfied` branch below.)
+        Object statusNode = postVerification.get("status");
+        if (statusNode != null) {
+            return switch (String.valueOf(statusNode).trim().toUpperCase(Locale.ROOT)) {
+                case "SATISFIED" -> InstallPostVerification.SATISFIED;
+                case "UNSATISFIED", "NOT_SATISFIED" -> InstallPostVerification.UNSATISFIED;
+                case "INCONCLUSIVE", "UNKNOWN" -> InstallPostVerification.UNKNOWN;
+                default -> InstallPostVerification.UNKNOWN;
+            };
+        }
+        Boolean satisfied = asBoolean(postVerification.get("satisfied"));
+        if (satisfied == null) {
+            return InstallPostVerification.UNKNOWN;   // malformed / absent
+        }
+        if (satisfied) {
+            return InstallPostVerification.SATISFIED;
+        }
+        String finalStatus = install == null ? null : asString(install.get("finalStatus"));
+        if ("FAILED_VERIFICATION".equalsIgnoreCase(finalStatus)) {
+            return InstallPostVerification.UNSATISFIED;   // authoritative negative
+        }
+        return InstallPostVerification.UNKNOWN;           // post-verify never ran
+    }
+
+    /** Strict tri-state boolean parse: {@code null} on malformed/absent. */
+    private static Boolean asBoolean(Object node) {
+        if (node instanceof Boolean b) {
+            return b;
+        }
+        if (node instanceof String s) {
+            String t = s.trim();
+            if ("true".equalsIgnoreCase(t)) {
+                return Boolean.TRUE;
+            }
+            if ("false".equalsIgnoreCase(t)) {
+                return Boolean.FALSE;
+            }
+        }
+        return null;
     }
 
     private static List<String> asStringList(Object node) {
