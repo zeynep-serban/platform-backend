@@ -170,7 +170,60 @@ class EndpointInstallAuditServiceTest {
         assertThat(saved.getDetectedVersion()).isNull();
     }
 
+    @Test
+    void recordInstallResultMapsAuthoritativeNotSatisfiedToUnsatisfied() {
+        // The agent's AUTHORITATIVE denial vocabulary (NOT_SATISFIED — e.g. a
+        // reliable REGISTRY_UNINSTALL miss) must record as UNSATISFIED, not be
+        // flattened to UNKNOWN, which would hide the authoritative signal in the
+        // audit trail (Codex 019e7dce).
+        EndpointCommand command = installCommand("PASS", PREFLIGHT_AT.toString());
+        stubSaveAssigningId();
+
+        EndpointInstallAudit saved = service.recordInstallResult(
+                command, dummyResult(), submitRequest(),
+                redactedDetailsWithStatus("NOT_SATISFIED"), NOW);
+
+        assertThat(saved.getPostVerification().name()).isEqualTo("UNSATISFIED");
+    }
+
+    @Test
+    void recordInstallResultMapsInconclusiveToUnknown() {
+        // CONFIRM_ONLY INCONCLUSIVE (e.g. winget list under Session-0) maps to
+        // UNKNOWN — neither confirm nor deny.
+        EndpointCommand command = installCommand("PASS", PREFLIGHT_AT.toString());
+        stubSaveAssigningId();
+
+        EndpointInstallAudit saved = service.recordInstallResult(
+                command, dummyResult(), submitRequest(),
+                redactedDetailsWithStatus("INCONCLUSIVE"), NOW);
+
+        assertThat(saved.getPostVerification().name()).isEqualTo("UNKNOWN");
+    }
+
     // ─── helpers ─────────────────────────────────────────────────────
+
+    private void stubSaveAssigningId() {
+        when(installAuditRepository.save(any(EndpointInstallAudit.class)))
+                .thenAnswer(inv -> {
+                    EndpointInstallAudit row = inv.getArgument(0);
+                    try {
+                        var idField = EndpointInstallAudit.class.getDeclaredField("id");
+                        idField.setAccessible(true);
+                        idField.set(row, UUID.randomUUID());
+                    } catch (Exception ex) {
+                        throw new RuntimeException(ex);
+                    }
+                    return row;
+                });
+    }
+
+    private static Map<String, Object> redactedDetailsWithStatus(String status) {
+        Map<String, Object> redacted = new LinkedHashMap<>();
+        Map<String, Object> postVerification = new LinkedHashMap<>();
+        postVerification.put("status", status);
+        redacted.put("postVerification", postVerification);
+        return redacted;
+    }
 
     private EndpointCommand installCommand(String preflightDecision, String preflightDecisionAt) {
         EndpointCommand command = new EndpointCommand();

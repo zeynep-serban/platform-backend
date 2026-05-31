@@ -549,42 +549,110 @@ public class EndpointAdminCommandService {
     }
 
     /**
-     * Derive the AG-027 wire {@code detectionRule} ({@code {type, packageId}})
-     * from the catalog item's AUTHORED detection rule, translating the backend
-     * authoring field {@code wingetPackageId} to the agent wire field
-     * {@code packageId}. Fail-closed (Codex 019e77bd):
+     * Derive the AG-027 wire {@code detectionRule} from the catalog item's
+     * AUTHORED (validated + normalized) detection rule. The agent now supports
+     * two installable detector families (agent PR #43 / Codex 019e7d82):
      * <ul>
-     *   <li>type must be {@code WINGET_PACKAGE} — a not-yet-agent-supported
-     *       type (REGISTRY_UNINSTALL, FILE_EXISTS, …) must NOT be silently
-     *       converted; the install is rejected here rather than dispatched with
-     *       a fabricated rule the agent would mis-verify;</li>
-     *   <li>{@code wingetPackageId} must be present and case-insensitively
-     *       equal to {@code packageId} — drift fails closed so the agent never
-     *       installs package A while verifying package B.</li>
+     *   <li>{@code WINGET_PACKAGE} — forwarded as {@code {type, packageId}}.
+     *       The authoring field is {@code packageId} (legacy {@code
+     *       wingetPackageId} tolerated for un-migrated rows). The WINGET
+     *       identity invariant ({@code packageId} case-insensitively equal to
+     *       the catalog {@code packageId}) fails closed so the agent never
+     *       installs package A while verifying package B (Codex 019e77bd).</li>
+     *   <li>{@code REGISTRY_UNINSTALL} — the normalized registry selector is
+     *       forwarded verbatim (no fabrication). The registry selector IS the
+     *       rule's identity, so NO {@code packageId} and NO WINGET identity
+     *       invariant apply.</li>
+     * </ul>
+     * Fail-closed otherwise:
+     * <ul>
+     *   <li>{@code FILE_EXISTS} / {@code FILE_SHA256} — a valid catalog rule but
+     *       not yet agent-installable: rejected here ({@code
+     *       detection_rule_type_not_supported_by_agent}) rather than dispatched
+     *       with a fabricated rule the agent would mis-verify;</li>
+     *   <li>a missing / unknown / legacy-shape rule is rejected, never
+     *       silently coerced.</li>
      * </ul>
      */
     private static Map<String, Object> buildAgentDetectionRule(EndpointSoftwareCatalogItem catalogItem,
                                                                String agentPackageId) {
         Map<String, Object> catalogRule = catalogItem.getDetectionRule();
-        Object type = catalogRule == null ? null : catalogRule.get("type");
-        if (!"WINGET_PACKAGE".equals(type)) {
+        Object typeObj = catalogRule == null ? null : catalogRule.get("type");
+        String type = typeObj == null ? null : typeObj.toString();
+        if (type == null) {
             throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
-                    "Catalog detection rule type '" + type
-                            + "' is not agent-installable (AG-027 v1 supports WINGET_PACKAGE only).");
+                    "Catalog detection rule is missing 'type' (cannot dispatch install).");
         }
-        Object wingetPackageId = catalogRule.get("wingetPackageId");
-        String detectionPackageId = wingetPackageId == null ? null : wingetPackageId.toString().trim();
+        return switch (type) {
+            case "WINGET_PACKAGE" -> buildWingetWireRule(catalogRule, agentPackageId);
+            case "REGISTRY_UNINSTALL" -> buildRegistryWireRule(catalogRule);
+            case "FILE_EXISTS", "FILE_SHA256" -> throw new ResponseStatusException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "detection_rule_type_not_supported_by_agent: catalog detection rule type '"
+                            + type + "' is a valid catalog rule but not agent-installable yet "
+                            + "(agent supports WINGET_PACKAGE + REGISTRY_UNINSTALL).");
+            default -> throw new ResponseStatusException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "detection_rule_type_not_supported_by_agent: unknown catalog detection rule type '"
+                            + type + "'.");
+        };
+    }
+
+    private static Map<String, Object> buildWingetWireRule(Map<String, Object> catalogRule,
+                                                           String agentPackageId) {
+        Object pkg = catalogRule.get("packageId");
+        if (pkg == null) {
+            // Tolerate the legacy authoring field on rows that predate the V21
+            // wingetPackageId→packageId sweep; the normalized field is packageId.
+            pkg = catalogRule.get("wingetPackageId");
+        }
+        String detectionPackageId = pkg == null ? null : pkg.toString().trim();
         if (detectionPackageId == null || detectionPackageId.isEmpty()
                 || agentPackageId == null
                 || !detectionPackageId.equalsIgnoreCase(agentPackageId.trim())) {
             throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
-                    "Catalog detection rule wingetPackageId must equal the catalog packageId "
+                    "Catalog detection rule packageId must equal the catalog packageId "
                             + "(drift fails closed before dispatch).");
         }
-        Map<String, Object> detectionRule = new LinkedHashMap<>();
-        detectionRule.put("type", "WINGET_PACKAGE");
-        detectionRule.put("packageId", detectionPackageId);
-        return detectionRule;
+        Map<String, Object> wire = new LinkedHashMap<>();
+        wire.put("type", "WINGET_PACKAGE");
+        wire.put("packageId", detectionPackageId);
+        return wire;
+    }
+
+    /**
+     * Forward the normalized REGISTRY_UNINSTALL selector verbatim. The rule was
+     * validated + normalized at catalog authoring (DetectionRuleValidator) so it
+     * carries only agent-recognised keys; we copy them rather than pass the map
+     * through so no stray / legacy key (e.g. a surviving {@code hive}) reaches
+     * the wire. A legacy-shape row with neither {@code productCode} nor
+     * {@code displayName} fails closed here with a clear reauthor signal.
+     */
+    private static Map<String, Object> buildRegistryWireRule(Map<String, Object> catalogRule) {
+        boolean hasProductCode = catalogRule.get("productCode") != null;
+        boolean hasDisplayName = catalogRule.get("displayName") != null;
+        if (!hasProductCode && !hasDisplayName) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    "detection_rule_type_not_supported_by_agent: REGISTRY_UNINSTALL catalog rule "
+                            + "is legacy-shaped (no productCode or displayName); reauthor to the "
+                            + "agent schema before dispatch.");
+        }
+        Map<String, Object> wire = new LinkedHashMap<>();
+        wire.put("type", "REGISTRY_UNINSTALL");
+        copyIfPresent(catalogRule, wire, "productCode");
+        copyIfPresent(catalogRule, wire, "displayName");
+        copyIfPresent(catalogRule, wire, "displayNameMatch");
+        copyIfPresent(catalogRule, wire, "publisher");
+        copyIfPresent(catalogRule, wire, "publisherMatch");
+        copyIfPresent(catalogRule, wire, "allowPublisherMissing");
+        return wire;
+    }
+
+    private static void copyIfPresent(Map<String, Object> from, Map<String, Object> to, String key) {
+        Object value = from.get(key);
+        if (value != null) {
+            to.put(key, value);
+        }
     }
 
     /**

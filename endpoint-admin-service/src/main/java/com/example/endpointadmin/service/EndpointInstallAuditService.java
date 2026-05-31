@@ -289,12 +289,22 @@ public class EndpointInstallAuditService {
         if (node == null) {
             return InstallPostVerification.UNKNOWN;
         }
-        try {
-            return InstallPostVerification.valueOf(
-                    String.valueOf(node).trim().toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException ex) {
-            return InstallPostVerification.UNKNOWN;
-        }
+        // Map the agent's post-verify verdict vocabulary (install_winget.go
+        // PostVerifyStatus*) onto the backend verdict enum (Codex 019e7dce):
+        //   SATISFIED     -> SATISFIED
+        //   NOT_SATISFIED -> UNSATISFIED  (AUTHORITATIVE denial — e.g. a reliable
+        //                                  REGISTRY_UNINSTALL miss; must NOT be
+        //                                  flattened to UNKNOWN, which would hide
+        //                                  the authoritative signal in the audit)
+        //   INCONCLUSIVE  -> UNKNOWN      (CONFIRM_ONLY — e.g. winget list under
+        //                                  Session-0 cannot confirm/deny)
+        // The backend's own literals (SATISFIED/UNSATISFIED/UNKNOWN) still parse.
+        return switch (String.valueOf(node).trim().toUpperCase(Locale.ROOT)) {
+            case "SATISFIED" -> InstallPostVerification.SATISFIED;
+            case "UNSATISFIED", "NOT_SATISFIED" -> InstallPostVerification.UNSATISFIED;
+            case "INCONCLUSIVE", "UNKNOWN" -> InstallPostVerification.UNKNOWN;
+            default -> InstallPostVerification.UNKNOWN;
+        };
     }
 
     private static List<String> asStringList(Object node) {

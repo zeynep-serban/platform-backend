@@ -283,12 +283,13 @@ class EndpointAdminCommandServiceInstallTest {
     }
 
     @Test
-    void createInstallFailsClosedOnUnsupportedDetectionRuleType() {
+    void createInstallFailsClosedOnFileDetectionRuleNotYetAgentInstallable() {
         EndpointDevice device = testDevice(DEVICE_ID);
         EndpointSoftwareCatalogItem catalog = testCatalog();
         Map<String, Object> rule = new LinkedHashMap<>();
-        rule.put("type", "REGISTRY_UNINSTALL"); // not yet agent-supported
-        rule.put("registryKey", "HKLM\\SOFTWARE\\7-Zip");
+        // FILE_EXISTS is a valid catalog rule but not yet agent-installable.
+        rule.put("type", "FILE_EXISTS");
+        rule.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
         catalog.setDetectionRule(rule);
         when(deviceRepository.findByTenantIdAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
         when(catalogRepository.findByTenantIdAndCatalogItemId(TENANT_ID, CATALOG_SLUG))
@@ -299,12 +300,59 @@ class EndpointAdminCommandServiceInstallTest {
         when(preflightService.evaluate(TENANT, DEVICE_ID, CATALOG_SLUG))
                 .thenReturn(preflightOf(InstallPreflightDecision.PASS));
 
-        // Fail-closed: a not-yet-agent-supported rule must NOT be silently
+        // Fail-closed: a not-yet-agent-installable rule must NOT be silently
         // converted into a fabricated WINGET_PACKAGE rule and queued.
         assertThatThrownBy(() -> service.createInstall(
                 TENANT, DEVICE_ID, new CreateInstallRequest(CATALOG_SLUG, CALLER_KEY, null)))
-                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class)
+                .hasMessageContaining("detection_rule_type_not_supported_by_agent");
         verify(commandRepository, org.mockito.Mockito.never()).saveAndFlush(any(EndpointCommand.class));
+    }
+
+    @Test
+    void createInstallForwardsRegistryUninstallDetectionRule() {
+        EndpointDevice device = testDevice(DEVICE_ID);
+        EndpointSoftwareCatalogItem catalog = testCatalog();
+        Map<String, Object> rule = new LinkedHashMap<>();
+        rule.put("type", "REGISTRY_UNINSTALL");
+        rule.put("displayName", "7-Zip");
+        rule.put("displayNameMatch", "PREFIX");
+        rule.put("publisher", "Igor Pavlov");
+        rule.put("publisherMatch", "EXACT");
+        catalog.setDetectionRule(rule);
+        when(deviceRepository.findByTenantIdAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(catalogRepository.findByTenantIdAndCatalogItemId(TENANT_ID, CATALOG_SLUG))
+                .thenReturn(Optional.of(catalog));
+        when(commandRepository.findByTenantIdAndIdempotencyKey(TENANT_ID,
+                "admin-install:" + DEVICE_ID + ":" + CATALOG_UUID + ":" + CALLER_KEY))
+                .thenReturn(Optional.empty());
+        when(preflightService.evaluate(TENANT, DEVICE_ID, CATALOG_SLUG))
+                .thenReturn(preflightOf(InstallPreflightDecision.PASS));
+        when(commandRepository.saveAndFlush(any(EndpointCommand.class)))
+                .thenAnswer(inv -> {
+                    EndpointCommand cmd = inv.getArgument(0);
+                    setField(cmd, "id", UUID.randomUUID());
+                    return cmd;
+                });
+
+        EndpointCommandDto dto = service.createInstall(
+                TENANT, DEVICE_ID, new CreateInstallRequest(CATALOG_SLUG, CALLER_KEY, null));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> detectionRule = (Map<String, Object>) dto.payload().get("detectionRule");
+        // The normalized registry selector is forwarded verbatim (no fabrication).
+        assertThat(detectionRule)
+                .containsEntry("type", "REGISTRY_UNINSTALL")
+                .containsEntry("displayName", "7-Zip")
+                .containsEntry("displayNameMatch", "PREFIX")
+                .containsEntry("publisher", "Igor Pavlov")
+                .containsEntry("publisherMatch", "EXACT");
+        // Registry selector IS the rule identity — no packageId, no WINGET
+        // identity invariant. The install target packageId still comes from the
+        // catalog column.
+        assertThat(detectionRule).doesNotContainKey("packageId");
+        assertThat(dto.payload()).containsEntry("packageId", "7zip.7zip");
+        verify(commandRepository, times(1)).saveAndFlush(any(EndpointCommand.class));
     }
 
     @Test
@@ -354,7 +402,7 @@ class EndpointAdminCommandServiceInstallTest {
         catalog.setEnabled(true);
         Map<String, Object> rule = new LinkedHashMap<>();
         rule.put("type", "WINGET_PACKAGE");
-        rule.put("wingetPackageId", "7zip.7zip");
+        rule.put("packageId", "7zip.7zip");
         catalog.setDetectionRule(rule);
         setField(catalog, "id", CATALOG_UUID);
         setField(catalog, "version", 3L);
