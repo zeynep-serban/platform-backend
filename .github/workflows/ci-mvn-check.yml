@@ -127,8 +127,8 @@ jobs:
           java-version: '21'
           cache: 'maven'
 
-      - name: Pre-install common-auth (parent reactor dependency, not in Maven Central)
-        run: ./mvnw -q -pl common-auth install -DskipTests
+      - name: Pre-install reactor deps (common-auth + common-export — #1154 PR-2b, not in Maven Central)
+        run: ./mvnw -q -pl common-auth,common-export install -DskipTests
 
       - name: Run endpoint-admin-service tests
         run: ./mvnw -pl endpoint-admin-service test

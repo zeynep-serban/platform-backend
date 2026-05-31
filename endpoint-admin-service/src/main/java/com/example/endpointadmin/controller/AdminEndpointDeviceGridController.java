@@ -1,19 +1,25 @@
 package com.example.endpointadmin.controller;
 
 import com.example.commonauth.openfga.RequireModule;
-import com.example.endpointadmin.grid.DeviceGridQueryBuilder;
+import com.example.endpointadmin.grid.DeviceGridExportRequest;
+import com.example.endpointadmin.grid.DeviceGridExportService;
+import com.example.endpointadmin.grid.DeviceGridExportService.ExportPlan;
 import com.example.endpointadmin.grid.DeviceGridQueryRequest;
 import com.example.endpointadmin.grid.DeviceGridQueryService;
+import com.example.endpointadmin.grid.ExportRowLimitExceededException;
 import com.example.endpointadmin.grid.GridErrorResponse;
 import com.example.endpointadmin.grid.GridQueryValidationException;
 import com.example.endpointadmin.security.AdminTenantContext;
 import com.example.endpointadmin.security.EndpointAdminAuthz;
 import com.example.endpointadmin.security.TenantContextResolver;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 /**
  * BE — endpoint-device grid server-side data source (board #1154 PR-2a).
@@ -44,12 +50,18 @@ import org.springframework.web.bind.annotation.RestController;
 public class AdminEndpointDeviceGridController {
 
     private final DeviceGridQueryService gridQueryService;
+    private final DeviceGridExportService exportService;
     private final TenantContextResolver tenantContextResolver;
+    private final ObjectMapper objectMapper;
 
     public AdminEndpointDeviceGridController(DeviceGridQueryService gridQueryService,
-                                             TenantContextResolver tenantContextResolver) {
+                                             DeviceGridExportService exportService,
+                                             TenantContextResolver tenantContextResolver,
+                                             ObjectMapper objectMapper) {
         this.gridQueryService = gridQueryService;
+        this.exportService = exportService;
         this.tenantContextResolver = tenantContextResolver;
+        this.objectMapper = objectMapper;
     }
 
     @PostMapping("/endpoint-devices/query")
@@ -64,5 +76,53 @@ public class AdminEndpointDeviceGridController {
             return ResponseEntity.badRequest()
                     .body(new GridErrorResponse(e.getCode(), e.getMessage()));
         }
+    }
+
+    /**
+     * {@code POST /api/v1/admin/endpoint-devices/export} — report-style
+     * server export (İndir ▾: Ham veri/raw + Mevcut görünüm/view × Excel/CSV).
+     * Cap preflight + audit run before the stream (see
+     * {@link DeviceGridExportService}); an over-cap dataset is refused with
+     * {@code 422 EXPORT_ROW_LIMIT_EXCEEDED}, a bad format/mode/column with
+     * {@code 400}. NOT {@code @Transactional} — the body streams outside any
+     * session.
+     *
+     * <p>The method returns {@code ResponseEntity<StreamingResponseBody>} on
+     * both paths (error JSON is wrapped in a {@code StreamingResponseBody}):
+     * a single return type avoids the generic-erasure converter-resolution
+     * failure that a mixed {@code <Object>} body triggers for the binary
+     * happy-path content type.
+     */
+    @PostMapping("/endpoint-devices/export")
+    @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.VIEWER)
+    public ResponseEntity<StreamingResponseBody> export(
+            @RequestBody(required = false) DeviceGridExportRequest request) {
+        AdminTenantContext context = tenantContextResolver.resolveRequired();
+        DeviceGridExportRequest safe = request != null ? request
+                : new DeviceGridExportRequest(null, null, null, null, null, null);
+
+        ExportPlan plan;
+        try {
+            plan = exportService.prepareExport(context.tenantId(), context.subject(), safe);
+        } catch (ExportRowLimitExceededException e) {
+            return errorBody(HttpStatus.UNPROCESSABLE_ENTITY,
+                    new GridErrorResponse(ExportRowLimitExceededException.CODE, e.getMessage(), e.getLimit()));
+        } catch (GridQueryValidationException e) {
+            return errorBody(HttpStatus.BAD_REQUEST,
+                    new GridErrorResponse(e.getCode(), e.getMessage()));
+        }
+
+        StreamingResponseBody body = out -> exportService.writeTo(plan, out);
+        return ResponseEntity.ok()
+                .header("Content-Type", plan.contentType())
+                .header("Content-Disposition", "attachment; filename=\"" + plan.filename() + "\"")
+                .body(body);
+    }
+
+    private ResponseEntity<StreamingResponseBody> errorBody(HttpStatus status, GridErrorResponse err) {
+        StreamingResponseBody body = out -> out.write(objectMapper.writeValueAsBytes(err));
+        return ResponseEntity.status(status)
+                .header("Content-Type", "application/json; charset=UTF-8")
+                .body(body);
     }
 }

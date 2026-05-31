@@ -60,7 +60,8 @@ public class DeviceGridQueryBuilder {
     private final int maxPageSize;
     private final int maxSetSize;
     private final int maxQuickFilterLength;
-    private final String baseSelectFrom;
+    private final String selectAll;
+    private final String fromAndJoins;
 
     public DeviceGridQueryBuilder(
             @Value("${spring.jpa.properties.hibernate.default_schema:endpoint_admin_service}") String schema,
@@ -71,12 +72,19 @@ public class DeviceGridQueryBuilder {
         this.maxPageSize = maxPageSize;
         this.maxSetSize = maxSetSize;
         this.maxQuickFilterLength = maxQuickFilterLength;
-        this.baseSelectFrom = buildBaseSelectFrom(schema);
+        this.fromAndJoins = buildFromAndJoins(schema);
+        this.selectAll = selectClause(DeviceGridColumns.all());
     }
 
     /** SQL + bound params + paging metadata for one SSRM block. */
     public record BuiltGridQuery(String sql, MapSqlParameterSource params,
                                  int startRow, int pageSize) {}
+
+    /** SQL + bound params for a streaming export or a preflight count. */
+    public record GridSql(String sql, MapSqlParameterSource params) {}
+
+    /** raw = full tenant dataset, canonical columns; view = current grid view. */
+    public enum ExportMode { RAW, VIEW }
 
     /**
      * Build the page query for an SSRM block. Overfetches {@code pageSize+1}
@@ -101,12 +109,104 @@ public class DeviceGridQueryBuilder {
         params.addValue("__limit", pageSize + 1);
         params.addValue("__offset", startRow);
 
-        String sql = baseSelectFrom
+        String sql = selectAll + fromAndJoins
                 + " WHERE " + where
                 + " ORDER BY " + orderBy
                 + " LIMIT :__limit OFFSET :__offset";
 
         return new BuiltGridQuery(sql, params, startRow, pageSize);
+    }
+
+    /**
+     * Build the full (unpaged) export query for a streaming CSV/Excel export
+     * (#1154 PR-2b). RAW = whole tenant dataset + canonical columns, no
+     * filter/sort; VIEW = the caller's current filter/sort/quick-filter +
+     * its (server-allowlisted) visible columns. Bounded by a preflight count
+     * (see {@link #buildCountPreflight}); no {@code LIMIT} here so a passing
+     * preflight always streams the complete result (never a silent truncation).
+     */
+    public GridSql buildExportQuery(UUID tenantId, ExportMode mode,
+                                    DeviceGridExportRequest req,
+                                    List<GridColumn> columns) {
+        MapSqlParameterSource params = new MapSqlParameterSource();
+        params.addValue("tenantId", tenantId);
+        int[] seq = {0};
+
+        StringBuilder where = new StringBuilder("d.tenant_id = :tenantId");
+        String orderBy;
+        if (mode == ExportMode.VIEW) {
+            appendFilterModel(req.filterModel(), where, params, seq);
+            appendQuickFilter(req.quickFilterText(), where, params, seq);
+            orderBy = buildOrderBy(req.sortModel());
+        } else {
+            // RAW = canonical, deterministic; grid view state is ignored.
+            orderBy = "d.id ASC";
+        }
+
+        String sql = selectClause(columns) + fromAndJoins
+                + " WHERE " + where
+                + " ORDER BY " + orderBy;
+        return new GridSql(sql, params);
+    }
+
+    /**
+     * Bounded preflight: counts matching rows but stops at {@code cap+1} so an
+     * over-cap dataset is detected cheaply (Codex 019e7e65 — never silently
+     * truncate the export). The inner {@code LIMIT cap+1} caps the work; the
+     * outer {@code count(*)} returns {@code min(actual, cap+1)}.
+     */
+    public GridSql buildCountPreflight(UUID tenantId, ExportMode mode,
+                                       DeviceGridExportRequest req, int cap) {
+        MapSqlParameterSource params = new MapSqlParameterSource();
+        params.addValue("tenantId", tenantId);
+        int[] seq = {0};
+
+        StringBuilder where = new StringBuilder("d.tenant_id = :tenantId");
+        if (mode == ExportMode.VIEW) {
+            appendFilterModel(req.filterModel(), where, params, seq);
+            appendQuickFilter(req.quickFilterText(), where, params, seq);
+        }
+        params.addValue("__cap", cap + 1);
+
+        String sql = "SELECT count(*) FROM (SELECT 1" + fromAndJoins
+                + " WHERE " + where
+                + " LIMIT :__cap) preflight";
+        return new GridSql(sql, params);
+    }
+
+    /**
+     * Resolve the export column set. RAW ignores any requested columns and
+     * exports every canonical column in registry order. VIEW maps each
+     * requested colId through the allowlist (unknown → fail-closed 400);
+     * an empty/absent list falls back to all columns. Header labels come from
+     * the registry (server-side), never from the client.
+     */
+    public List<GridColumn> resolveExportColumns(ExportMode mode, List<String> requested) {
+        if (mode == ExportMode.RAW || requested == null || requested.isEmpty()) {
+            return DeviceGridColumns.all();
+        }
+        List<GridColumn> resolved = new java.util.ArrayList<>(requested.size());
+        for (String colId : requested) {
+            GridColumn col = DeviceGridColumns.byId(colId);
+            if (col == null) {
+                throw new GridQueryValidationException(CODE_INVALID_FILTER,
+                        "Unknown export column: " + safe(colId));
+            }
+            resolved.add(col);
+        }
+        return resolved;
+    }
+
+    private String selectClause(List<GridColumn> cols) {
+        StringBuilder select = new StringBuilder("SELECT ");
+        for (int i = 0; i < cols.size(); i++) {
+            if (i > 0) {
+                select.append(", ");
+            }
+            GridColumn c = cols.get(i);
+            select.append(c.sqlExpr()).append(" AS ").append(c.colId());
+        }
+        return select.toString();
     }
 
     // ───────────────────────── paging ─────────────────────────
@@ -543,20 +643,11 @@ public class DeviceGridQueryBuilder {
         return resolved + "." + tableName;
     }
 
-    private String buildBaseSelectFrom(String schemaName) {
-        // schemaName is validated by qualified(); build the constant
-        // projection from the trusted column registry.
-        StringBuilder select = new StringBuilder("SELECT ");
-        List<GridColumn> cols = DeviceGridColumns.all();
-        for (int i = 0; i < cols.size(); i++) {
-            if (i > 0) {
-                select.append(", ");
-            }
-            GridColumn c = cols.get(i);
-            select.append(c.sqlExpr()).append(" AS ").append(c.colId());
-        }
-        return select
-                + " FROM " + qualified("endpoint_devices") + " d"
+    private String buildFromAndJoins(String schemaName) {
+        // schemaName is validated by qualified(). The constant FROM + LATERAL
+        // body is shared by the page query, the export query, and the
+        // preflight count (single source of truth for the join shape).
+        return " FROM " + qualified("endpoint_devices") + " d"
                 + " LEFT JOIN LATERAL ("
                 + "   SELECT hs.supported, hs.probe_complete, hs.any_low_disk,"
                 + "          hs.memory_used_percent, hs.memory_high_pressure, hs.uptime_days,"

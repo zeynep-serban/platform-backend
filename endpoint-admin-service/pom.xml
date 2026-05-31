@@ -32,6 +32,13 @@
             <artifactId>common-auth</artifactId>
             <version>1.1.0</version>
         </dependency>
+        <!-- #1154 PR-2b: shared streaming CSV/Excel exporters (report-style
+             device-grid export). Brings poi-ooxml transitively. -->
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>common-export</artifactId>
+            <version>1.0.0</version>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>

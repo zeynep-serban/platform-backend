@@ -9,12 +9,18 @@ WORKDIR /app
 COPY common-auth/pom.xml ./common-auth/pom.xml
 COPY common-auth/src ./common-auth/src
 
+# #1154 PR-2b: common-export dependency (shared CSV/Excel exporters)
+COPY common-export/pom.xml ./common-export/pom.xml
+COPY common-export/src ./common-export/src
+
 # endpoint-admin-service pom + src
 COPY endpoint-admin-service/pom.xml ./endpoint-admin-service/pom.xml
 COPY endpoint-admin-service/src ./endpoint-admin-service/src
 
-# common-auth'u önce install et (Maven local repo cache)
+# common-auth + common-export'u önce install et (Maven local repo cache; bunlar
+# Maven Central'da yok — temiz Docker build için zorunlu)
 RUN mvn -f common-auth/pom.xml clean install -Dmaven.test.skip=true -q
+RUN mvn -f common-export/pom.xml clean install -Dmaven.test.skip=true -q
 
 # Sonra endpoint-admin-service'i package
 RUN mvn -f endpoint-admin-service/pom.xml clean package -Dmaven.test.skip=true -q
