@@ -219,7 +219,7 @@ public class EndpointOutdatedSoftwareService {
     public BulkLatestSnapshots<EndpointOutdatedSoftwareSnapshot> findLatestPerDevice(
             UUID tenantId, int cap) {
         List<EndpointOutdatedSoftwareSnapshot> snapshots =
-                repository.findLatestPerDeviceForTenant(tenantId, cap + 1);
+                repository.findLatestPerDeviceForTenant(tenantId, PageRequest.of(0, cap + 1));
         if (snapshots.size() > cap) {
             return BulkLatestSnapshots.overCap();
         }

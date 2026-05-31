@@ -114,48 +114,51 @@ public interface EndpointDeviceHealthSnapshotRepository
 
     /**
      * Fleet-wide LATEST snapshot per device for a tenant (Faz 22.5, #1146
-     * bulk CSV-export feed). Returns at most {@code limit} entities; the
-     * caller fetches {@code cap + 1} and treats an over-cap result as
-     * truncated (see {@code BulkLatestSnapshots}).
+     * bulk CSV-export feed). The caller passes {@code PageRequest.of(0,
+     * cap + 1)} and treats an over-cap result as truncated (see
+     * {@code BulkLatestSnapshots}).
      *
-     * <p>The inner {@code ROW_NUMBER() OVER (PARTITION BY device_id ORDER
-     * BY collected_at DESC, created_at DESC, id DESC)} reuses the
+     * <p><strong>JPQL, not native</strong> (live-bug fix): the live testai
+     * database keeps these tables in a non-{@code public} schema
+     * ({@code endpoint_admin_service}); a native query with an unqualified
+     * {@code FROM endpoint_device_health_snapshots} fails with
+     * {@code relation ... does not exist} because the connection
+     * search_path does not include that schema (a Testcontainers-PG test
+     * pinned to {@code public} could not catch it). HQL/JPQL is qualified
+     * by Hibernate from the entity's mapped schema for EVERY dialect — the
+     * same reason the per-device {@code findFirst...} queries already work
+     * on live — so entity queries are schema-safe by construction.
+     *
+     * <p>"Latest per device" is expressed as the greatest-per-group
+     * {@code NOT EXISTS} (no strictly-newer snapshot exists for the same
+     * (tenant, device)), with the SAME deterministic tiebreaker as the
+     * per-device derived query: lexicographic {@code (collected_at,
+     * created_at, id)} DESC (all three columns are {@code NOT NULL}, so no
+     * null-ordering ambiguity). The correlated probe rides the
      * {@code idx_endpoint_device_health_snapshots_tenant_device_time}
-     * composite-index column order and applies the SAME deterministic
-     * tiebreaker as the per-device
-     * {@code findFirstByTenantIdAndDeviceIdOrderBy...} derived query, so
-     * the bulk "latest" exactly matches the single-device "latest". The
-     * window result is filtered to {@code rn = 1} (one row per device),
-     * capped, and used as an {@code IN}-subquery to select the snapshot
-     * rows. Native because the window function is not expressible in JPQL;
-     * {@code ROW_NUMBER() OVER (...)} + {@code LIMIT} are supported by both
-     * PostgreSQL and H2 2.x. Selecting whole entity rows (not ids +
-     * {@code findAllById}) keeps it a single statement with NO
-     * application-level {@code IN}-list and lets Hibernate map by column —
-     * mapping scalar fields only never walks the LAZY {@code disks}
-     * collection, so the fleet fetch is one query with no N+1.
+     * composite index. {@code select s} loads whole entities; the
+     * scalar-only mapper never walks the LAZY {@code disks} collection
+     * (no N+1). {@code Pageable} applies the cap+1 {@code LIMIT};
+     * {@code order by s.id} makes the truncation set deterministic.
      */
-    @Query(value = """
-            SELECT s.*
-            FROM endpoint_device_health_snapshots s
-            WHERE s.tenant_id = :tenantId
-              AND s.id IN (
-                SELECT ranked.id
-                FROM (
-                    SELECT eh.id AS id,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY eh.device_id
-                               ORDER BY eh.collected_at DESC, eh.created_at DESC, eh.id DESC
-                           ) AS rn
-                    FROM endpoint_device_health_snapshots eh
-                    WHERE eh.tenant_id = :tenantId
-                ) ranked
-                WHERE ranked.rn = 1
-                ORDER BY ranked.id
-                LIMIT :limit
-            )
-            """, nativeQuery = true)
+    @Query("""
+            select s
+            from EndpointDeviceHealthSnapshot s
+            where s.tenantId = :tenantId
+              and not exists (
+                select newer.id
+                from EndpointDeviceHealthSnapshot newer
+                where newer.tenantId = s.tenantId
+                  and newer.deviceId = s.deviceId
+                  and (
+                    newer.collectedAt > s.collectedAt
+                    or (newer.collectedAt = s.collectedAt and newer.createdAt > s.createdAt)
+                    or (newer.collectedAt = s.collectedAt and newer.createdAt = s.createdAt
+                        and newer.id > s.id)
+                  )
+              )
+            order by s.id
+            """)
     List<EndpointDeviceHealthSnapshot> findLatestPerDeviceForTenant(
-            @Param("tenantId") UUID tenantId,
-            @Param("limit") int limit);
+            @Param("tenantId") UUID tenantId, Pageable pageable);
 }

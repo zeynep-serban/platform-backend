@@ -124,40 +124,45 @@ public interface EndpointOutdatedSoftwareSnapshotRepository
      * Fleet-wide LATEST snapshot per device for a tenant (Faz 22.5, #1146
      * bulk CSV-export feed). Mirrors the AG-033
      * {@code EndpointDeviceHealthSnapshotRepository#findLatestPerDeviceForTenant}
-     * against the outdated-software snapshots, reusing the
+     * against the outdated-software snapshots.
+     *
+     * <p><strong>JPQL, not native</strong> (live-bug fix): a native query
+     * with an unqualified {@code FROM endpoint_outdated_software_snapshots}
+     * fails on live testai with {@code relation ... does not exist} because
+     * the tables live in the non-{@code public} {@code endpoint_admin_service}
+     * schema and the connection search_path does not include it. HQL/JPQL
+     * is schema-qualified by Hibernate from the entity mapping for every
+     * dialect (parity with the working per-device queries).
+     *
+     * <p>"Latest per device" via greatest-per-group {@code NOT EXISTS} (no
+     * strictly-newer snapshot for the same (tenant, device)) with the SAME
+     * lexicographic {@code (collected_at, created_at, id)} DESC tiebreaker
+     * as the per-device derived query (all three {@code NOT NULL}); the
+     * correlated probe rides the
      * {@code idx_endpoint_outdated_software_snapshots_tenant_device_time}
-     * composite index ordering with the SAME
-     * {@code collected_at DESC, created_at DESC, id DESC} tiebreaker as
-     * the per-device {@code findFirst...} derived query. The inner window
-     * (one row per device, {@code rn = 1}) is capped and used as an
-     * {@code IN}-subquery selecting whole snapshot rows; Hibernate maps
-     * them by column and the scalar-only mapper never walks the LAZY
-     * {@code packages} collection (no N+1). Returns at most {@code limit}
-     * entities; the caller fetches {@code cap + 1} and treats an over-cap
-     * result as truncated. Native (window function + LIMIT); supported by
-     * PostgreSQL and H2 2.x.
+     * index. {@code select s} loads whole entities; the scalar-only mapper
+     * never walks the LAZY {@code packages} collection (no N+1).
+     * {@code Pageable} applies the cap+1 {@code LIMIT}; {@code order by
+     * s.id} makes the truncation set deterministic.
      */
-    @Query(value = """
-            SELECT s.*
-            FROM endpoint_outdated_software_snapshots s
-            WHERE s.tenant_id = :tenantId
-              AND s.id IN (
-                SELECT ranked.id
-                FROM (
-                    SELECT os.id AS id,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY os.device_id
-                               ORDER BY os.collected_at DESC, os.created_at DESC, os.id DESC
-                           ) AS rn
-                    FROM endpoint_outdated_software_snapshots os
-                    WHERE os.tenant_id = :tenantId
-                ) ranked
-                WHERE ranked.rn = 1
-                ORDER BY ranked.id
-                LIMIT :limit
-            )
-            """, nativeQuery = true)
+    @Query("""
+            select s
+            from EndpointOutdatedSoftwareSnapshot s
+            where s.tenantId = :tenantId
+              and not exists (
+                select newer.id
+                from EndpointOutdatedSoftwareSnapshot newer
+                where newer.tenantId = s.tenantId
+                  and newer.deviceId = s.deviceId
+                  and (
+                    newer.collectedAt > s.collectedAt
+                    or (newer.collectedAt = s.collectedAt and newer.createdAt > s.createdAt)
+                    or (newer.collectedAt = s.collectedAt and newer.createdAt = s.createdAt
+                        and newer.id > s.id)
+                  )
+              )
+            order by s.id
+            """)
     List<EndpointOutdatedSoftwareSnapshot> findLatestPerDeviceForTenant(
-            @Param("tenantId") UUID tenantId,
-            @Param("limit") int limit);
+            @Param("tenantId") UUID tenantId, Pageable pageable);
 }
