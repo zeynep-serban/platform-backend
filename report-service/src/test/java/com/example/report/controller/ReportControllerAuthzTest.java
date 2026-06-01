@@ -45,7 +45,11 @@ class ReportControllerAuthzTest {
                 null, // queryEngine
                 mock(com.example.report.audit.ReportAuditClient.class),
                 new com.fasterxml.jackson.databind.ObjectMapper(),
-                new com.example.report.authz.CompanyHeaderScopeNarrower()
+                new com.example.report.authz.CompanyHeaderScopeNarrower(),
+                // PR-D2.1c2 (ADR-0015): remote-http executor + AG-Grid translator
+                // injected; not exercised in these CRUD authorization tests.
+                mock(com.example.report.execution.RemoteReportExecutor.class),
+                new com.example.report.execution.AgGridFilterTranslator()
         );
     }
 

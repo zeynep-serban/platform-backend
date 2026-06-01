@@ -125,6 +125,97 @@ class ReportExportControllerAuthzTest {
         assertEquals(200, response.getStatusCode().value());
     }
 
+    // ── PR-D2.1c2 (Codex 019e838e iter post-impl PARTIAL absorb) —
+    // ── remote-http guard MUST run AFTER authz/export-permission so
+    // ── unauthorized callers get 403 (not 422 capability leak).
+
+    @Test
+    void exportRemote_noReportView_403_authzWinsOverRemoteGuard() {
+        // Remote-http report + caller with no REPORT_VIEW → 403, NOT 422.
+        // The 422 capability leak via remote-http differentiation must
+        // never beat the authz check.
+        AuthzMeResponse authz = authzWith(false, List.of());
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("users-overview")).thenReturn(Optional.of(reportRemote("users-overview", null)));
+
+        var ex = assertThrows(ResponseStatusException.class, () ->
+                controller.exportReport("users-overview", "csv", null, null, null, testJwt("user1")));
+        assertEquals(403, ex.getStatusCode().value());
+    }
+
+    @Test
+    void exportRemote_reportViewOnlyNoExport_403_authzWinsOverRemoteGuard() {
+        // Remote-http report + caller with REPORT_VIEW but no
+        // REPORT_EXPORT → 403 (canExport denies), NOT 422.
+        AuthzMeResponse authz = authzWith(false, List.of("REPORT_VIEW"));
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("users-overview")).thenReturn(Optional.of(reportRemote("users-overview", null)));
+
+        var ex = assertThrows(ResponseStatusException.class, () ->
+                controller.exportReport("users-overview", "csv", null, null, null, testJwt("user1")));
+        assertEquals(403, ex.getStatusCode().value());
+    }
+
+    @Test
+    void exportRemote_fullyAuthorized_422_REMOTE_EXPORT_NOT_SUPPORTED() {
+        // Only when both REPORT_VIEW and REPORT_EXPORT are present
+        // does the 422 REMOTE_EXPORT_NOT_SUPPORTED surface.
+        AuthzMeResponse authz = authzWith(false, List.of("REPORT_VIEW", "REPORT_EXPORT"));
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("users-overview")).thenReturn(Optional.of(reportRemote("users-overview", null)));
+
+        var response = controller.exportReport(
+                "users-overview", "csv", null, null, null, testJwt("user1"));
+
+        assertEquals(422, response.getStatusCode().value());
+        var err = readErrorBody(response);
+        assertEquals("REMOTE_EXPORT_NOT_SUPPORTED", err.code());
+    }
+
+    @Test
+    void exportPostRemote_noReportView_403_authzWinsOverRemoteGuard() {
+        AuthzMeResponse authz = authzWith(false, List.of());
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("users-overview")).thenReturn(Optional.of(reportRemote("users-overview", null)));
+
+        var ex = assertThrows(ResponseStatusException.class, () ->
+                controller.exportReportPost("users-overview",
+                        new com.example.report.dto.ReportExportRequestDto(
+                                "csv", null, null, null, false, null, null),
+                        null, testJwt("user1")));
+        assertEquals(403, ex.getStatusCode().value());
+    }
+
+    @Test
+    void exportPostRemote_reportViewOnlyNoExport_403_authzWinsOverRemoteGuard() {
+        AuthzMeResponse authz = authzWith(false, List.of("REPORT_VIEW"));
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("users-overview")).thenReturn(Optional.of(reportRemote("users-overview", null)));
+
+        var ex = assertThrows(ResponseStatusException.class, () ->
+                controller.exportReportPost("users-overview",
+                        new com.example.report.dto.ReportExportRequestDto(
+                                "csv", null, null, null, false, null, null),
+                        null, testJwt("user1")));
+        assertEquals(403, ex.getStatusCode().value());
+    }
+
+    @Test
+    void exportPostRemote_fullyAuthorized_422_REMOTE_EXPORT_NOT_SUPPORTED() {
+        AuthzMeResponse authz = authzWith(false, List.of("REPORT_VIEW", "REPORT_EXPORT"));
+        when(permissionResolver.getAuthzMe(any())).thenReturn(authz);
+        when(registry.get("users-overview")).thenReturn(Optional.of(reportRemote("users-overview", null)));
+
+        var response = controller.exportReportPost("users-overview",
+                new com.example.report.dto.ReportExportRequestDto(
+                        "csv", null, null, null, false, null, null),
+                null, testJwt("user1"));
+
+        assertEquals(422, response.getStatusCode().value());
+        var err = readErrorBody(response);
+        assertEquals("REMOTE_EXPORT_NOT_SUPPORTED", err.code());
+    }
+
     @Test
     void export_excelFormat_contentTypeSwitches() {
         AuthzMeResponse authz = authzWith(true, List.of());
@@ -350,6 +441,38 @@ class ReportExportControllerAuthzTest {
                 null,
                 null,
                 access);
+    }
+
+    /**
+     * PR-D2.1c2 (ADR-0015, Codex 019e838e post-impl PARTIAL absorb) — remote-http
+     * report fixture for the 422 guard authz-ordering verification suite below.
+     */
+    private static ReportDefinition reportRemote(String key, String permission) {
+        var access = permission != null
+                ? new AccessConfig(permission, null, null, null)
+                : null;
+        var execution = new com.example.report.registry.ExecutionConfig(
+                com.example.report.registry.ExecutionKind.REMOTE_HTTP,
+                "user-service",
+                "/api/v1/users",
+                "paged-items-total");
+        return new ReportDefinition(
+                key,
+                "1",
+                "Remote Report " + key,
+                "desc",
+                "category",
+                null, // source NOT required for remote-http
+                null,
+                "static",
+                null,
+                null,
+                List.of(new ColumnDefinition("col1", "Col 1", "text", 150, false)),
+                null,
+                null,
+                access,
+                null, null, null,
+                execution);
     }
 
     private static AuthzMeResponse authzWith(boolean superAdmin, List<String> permissions) {

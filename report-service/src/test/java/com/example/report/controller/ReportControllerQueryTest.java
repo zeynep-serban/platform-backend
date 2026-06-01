@@ -92,7 +92,11 @@ class ReportControllerQueryTest {
                 queryEngine,
                 auditClient,
                 new ObjectMapper(),
-                new CompanyHeaderScopeNarrower());
+                new CompanyHeaderScopeNarrower(),
+                // PR-D2.1c2 (ADR-0015): remote-http executor + AG-Grid
+                // translator; not exercised in this SQL-path test suite.
+                org.mockito.Mockito.mock(com.example.report.execution.RemoteReportExecutor.class),
+                new com.example.report.execution.AgGridFilterTranslator());
     }
 
     @Nested

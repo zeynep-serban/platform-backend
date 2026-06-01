@@ -15,6 +15,14 @@ import com.example.report.dto.ReportListItemDto;
 import com.example.report.dto.ReportMetadataDto;
 import com.example.report.dto.ReportQueryErrorDto;
 import com.example.report.dto.ReportQueryRequestDto;
+import com.example.report.execution.AgGridFilterTranslator;
+import com.example.report.execution.RemoteAllowlistException;
+import com.example.report.execution.RemoteAuthException;
+import com.example.report.execution.RemoteAuthzException;
+import com.example.report.execution.RemoteExecutionException;
+import com.example.report.execution.RemoteReportExecutor;
+import com.example.report.execution.RemoteReportRequest;
+import com.example.report.execution.RemoteReportResult;
 import com.example.report.query.QueryEngine;
 import com.example.report.query.SqlBuilder;
 import com.example.report.registry.ColumnDefinition;
@@ -53,6 +61,9 @@ public class ReportController {
     private final ReportAuditClient auditClient;
     private final ObjectMapper objectMapper;
     private final CompanyHeaderScopeNarrower companyHeaderNarrower;
+    // PR-D2.1c2 (ADR-0015): remote-http executor + AG-Grid filter translator.
+    private final RemoteReportExecutor remoteReportExecutor;
+    private final AgGridFilterTranslator agGridFilterTranslator;
 
     public ReportController(ReportRegistry registry,
                             CustomReportRepository customReportRepository,
@@ -62,7 +73,9 @@ public class ReportController {
                             QueryEngine queryEngine,
                             ReportAuditClient auditClient,
                             ObjectMapper objectMapper,
-                            CompanyHeaderScopeNarrower companyHeaderNarrower) {
+                            CompanyHeaderScopeNarrower companyHeaderNarrower,
+                            RemoteReportExecutor remoteReportExecutor,
+                            AgGridFilterTranslator agGridFilterTranslator) {
         this.registry = registry;
         this.customReportRepository = customReportRepository;
         this.permissionClient = permissionClient;
@@ -72,6 +85,8 @@ public class ReportController {
         this.auditClient = auditClient;
         this.objectMapper = objectMapper;
         this.companyHeaderNarrower = companyHeaderNarrower;
+        this.remoteReportExecutor = remoteReportExecutor;
+        this.agGridFilterTranslator = agGridFilterTranslator;
     }
 
     @GetMapping
@@ -277,6 +292,21 @@ public class ReportController {
 
         pageSize = Math.min(Math.max(pageSize, 1), 500);
 
+        // PR-D2.1c2 (ADR-0015): dispatch to remote-http executor when
+        // the report declares execution.kind=REMOTE_HTTP. Falls back to
+        // legacy SQL QueryEngine path for SQL reports.
+        if (def.isRemoteHttp()) {
+            ResponseEntity<?> remoteResponse = dispatchRemoteFlat(
+                    def, page, pageSize, /* search */ null,
+                    agGridFilter, sortModel, jwt, companyHeader, key, authz);
+            // The helper already builds a PagedResultDto on success and
+            // a ReportQueryErrorDto on error; raw cast is safe because
+            // the contract is fixed.
+            @SuppressWarnings({"unchecked","rawtypes"})
+            ResponseEntity casted = (ResponseEntity) remoteResponse;
+            return casted;
+        }
+
         QueryEngine.PagedData result = queryEngine.executeQuery(def, scopedAuthz, agGridFilter, sortModel, page, pageSize);
 
         auditClient.logReportAccess(key, authz.getUserId(), JwtClaimExtractor.extractAuditUsername(jwt));
@@ -286,6 +316,108 @@ public class ReportController {
         return ResponseEntity.ok()
                 .headers(com.example.report.query.DegradationHeaders.of(result.warnings()))
                 .body(new PagedResultDto<>(result.items(), result.total(), result.page(), result.pageSize()));
+    }
+
+    /**
+     * PR-D2.1c2 (ADR-0015, Codex 019e8306 iter-6) — remote-http dispatch
+     * helper shared by {@code GET /data} and {@code POST /query} (flat
+     * path). Grouping and pivot requests are caught upstream and
+     * rejected with {@code 400 REMOTE_GROUPING_NOT_SUPPORTED} before
+     * this helper is invoked; the helper only handles the flat shape.
+     *
+     * <h3>Status mapping</h3>
+     *
+     * <ul>
+     *   <li>AG-Grid translator {@link IllegalArgumentException} →
+     *       {@code 400 REMOTE_FILTER_UNSUPPORTED}</li>
+     *   <li>{@link RemoteAllowlistException} →
+     *       {@code 503 REMOTE_EXECUTOR_UNAVAILABLE} (feature gate off
+     *       or {@code (service, path)} not on allowlist)</li>
+     *   <li>{@link RemoteAuthException} →
+     *       {@code 401 REMOTE_AUTHENTICATION_FAILED}</li>
+     *   <li>{@link RemoteAuthzException} →
+     *       {@code 403 REMOTE_AUTHORIZATION_FAILED}</li>
+     *   <li>{@link RemoteExecutionException} →
+     *       {@code 502 REMOTE_EXECUTION_FAILED}</li>
+     * </ul>
+     */
+    private ResponseEntity<?> dispatchRemoteFlat(
+            ReportDefinition def, int page, int pageSize, String search,
+            Map<String, Object> agGridFilter, List<Map<String, String>> sortModel,
+            Jwt jwt, String companyHeader, String key, AuthzMeResponse authz) {
+
+        // 1. Translate AG-Grid filter model → downstream payload.
+        Map<String, Object> downstreamFilter;
+        try {
+            downstreamFilter = agGridFilterTranslator.translate(agGridFilter);
+        } catch (IllegalArgumentException iae) {
+            return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
+                    "REMOTE_FILTER_UNSUPPORTED", iae.getMessage()));
+        }
+
+        // 2. Build the sort entry list from AG-Grid's [{colId, sort}, ...].
+        List<RemoteReportRequest.SortEntry> sortEntries = new ArrayList<>();
+        if (sortModel != null) {
+            for (Map<String, String> entry : sortModel) {
+                if (entry == null) continue;
+                String colId = entry.get("colId");
+                String sortDir = entry.get("sort");
+                if (colId == null || colId.isBlank() || sortDir == null || sortDir.isBlank()) {
+                    continue;
+                }
+                try {
+                    sortEntries.add(new RemoteReportRequest.SortEntry(colId, sortDir));
+                } catch (IllegalArgumentException iae) {
+                    return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
+                            "REMOTE_SORT_INVALID", iae.getMessage()));
+                }
+            }
+        }
+
+        // 3. Build the normalized request DTO. JWT + tenant come from
+        //    the security context (controller validated upstream).
+        String jwtToken = (jwt != null) ? jwt.getTokenValue() : null;
+        RemoteReportRequest request;
+        try {
+            request = new RemoteReportRequest(
+                    page, pageSize, search, sortEntries,
+                    downstreamFilter,
+                    (companyHeader != null && !companyHeader.isBlank()) ? companyHeader : null,
+                    jwtToken);
+        } catch (IllegalArgumentException iae) {
+            return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
+                    "REMOTE_REQUEST_INVALID", iae.getMessage()));
+        }
+
+        // 4. Execute + map Remote*Exception → structured status.
+        try {
+            RemoteReportResult result = remoteReportExecutor.execute(def, request);
+            auditClient.logReportAccess(key, authz.getUserId(),
+                    JwtClaimExtractor.extractAuditUsername(jwt));
+            return ResponseEntity.ok().body(new PagedResultDto<>(
+                    result.rows(), result.total(), page, pageSize));
+        } catch (RemoteAllowlistException ex) {
+            log.warn("remote-http dispatch rejected by allowlist: reportKey={} service={} path={}",
+                    def.key(), ex.service(), ex.path());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(new ReportQueryErrorDto(
+                    "REMOTE_EXECUTOR_UNAVAILABLE",
+                    "remote-http executor is not configured for this report's "
+                            + "(service, path) tuple; check report.remote-executor "
+                            + "feature gate and allowlist seed"));
+        } catch (RemoteAuthException ex) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(new ReportQueryErrorDto(
+                    "REMOTE_AUTHENTICATION_FAILED",
+                    "downstream service rejected the JWT (401); reportKey="
+                            + def.key()));
+        } catch (RemoteAuthzException ex) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(new ReportQueryErrorDto(
+                    "REMOTE_AUTHORIZATION_FAILED",
+                    "downstream service denied access (403); reportKey="
+                            + def.key()));
+        } catch (RemoteExecutionException ex) {
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(new ReportQueryErrorDto(
+                    "REMOTE_EXECUTION_FAILED", ex.getMessage()));
+        }
     }
 
     /**
@@ -325,6 +457,18 @@ public class ReportController {
         ReportDefinition def = findReportOrThrow(key);
         AuthzMeResponse authz = resolveAndCheckAccess(def, jwt);
         AuthzMeResponse scopedAuthz = companyHeaderNarrower.narrow(authz, companyHeader);
+
+        // PR-D2.1c2 (ADR-0015): remote-http reports don't support distinct
+        // filter-values in faz 1; downstream services don't expose a
+        // /distinct-values contract. Fail-closed 422.
+        if (def.isRemoteHttp()) {
+            return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                    .body(new ReportQueryErrorDto(
+                            "REMOTE_FILTER_VALUES_NOT_SUPPORTED",
+                            "remote-http reports do not support distinct "
+                                    + "filter-values in PR-D2.1c2; use text-input "
+                                    + "filter or wait for c2.5 contract widening"));
+        }
 
         // Clamp the request limit into [1, maxFilterValues]. A null or
         // out-of-range limit silently snaps to the configured cap
@@ -419,6 +563,34 @@ public class ReportController {
         ReportQueryRequestDto safeRequest = request != null
                 ? request
                 : new ReportQueryRequestDto(null, null, null, null, null, null, null, null, null);
+
+        // PR-D2.1c2 (ADR-0015): remote-http reports support flat shape
+        // only. Grouping / pivot must be rejected before dispatch.
+        if (def.isRemoteHttp()) {
+            boolean wantsGrouping = safeRequest.requestsGrouping()
+                    || (safeRequest.rowGroupCols() != null && !safeRequest.rowGroupCols().isEmpty())
+                    || (safeRequest.pivotCols() != null && !safeRequest.pivotCols().isEmpty())
+                    || Boolean.TRUE.equals(safeRequest.pivotMode())
+                    || (safeRequest.valueCols() != null && !safeRequest.valueCols().isEmpty())
+                    || (safeRequest.groupKeys() != null && !safeRequest.groupKeys().isEmpty());
+            if (wantsGrouping) {
+                return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
+                        "REMOTE_GROUPING_NOT_SUPPORTED",
+                        "remote-http reports do not support server-side "
+                                + "grouping / pivot in PR-D2.1c2; only flat "
+                                + "page/sort/filter dispatch is allowed."));
+            }
+            int[] paging;
+            try {
+                paging = computePaging(safeRequest.startRow(), safeRequest.endRow());
+            } catch (PagingException pe) {
+                return ResponseEntity.badRequest().body(
+                        new ReportQueryErrorDto(pe.code, pe.getMessage()));
+            }
+            return dispatchRemoteFlat(def, paging[0], paging[1], /* search */ null,
+                    safeRequest.filterModel(), safeRequest.sortModel(),
+                    jwt, companyHeader, key, authz);
+        }
 
         // PR-0.3 capability dispatcher. Four buckets:
         // 1. Multi-level GROUP BY (1..N rowGroupCols + 0..N groupKeys

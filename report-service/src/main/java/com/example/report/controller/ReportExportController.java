@@ -98,6 +98,19 @@ public class ReportExportController {
         if (!accessEvaluator.canExport(authz)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "REPORT_EXPORT permission required");
         }
+
+        // PR-D2.1c2 (ADR-0015, Codex 019e838e post-impl PARTIAL absorb):
+        // remote-http reports do not support stream-based export in faz 1.
+        // Guard MUST run after authz/export-permission so unauthorized
+        // users still get 403 (not 422) — otherwise the 422 leaks the
+        // report's remote-http capability to anyone who knows the key.
+        if (def.isRemoteHttp()) {
+            return unprocessableForRemote("REMOTE_EXPORT_NOT_SUPPORTED",
+                    "remote-http reports do not support CSV/Excel export "
+                            + "in PR-D2.1c2; use the UI grid 'Export visible' "
+                            + "or wait for c2.5 streaming widening");
+        }
+
         // Narrow to the picker selection so exported data matches what
         // the user sees on screen (mirrors getData; without it the export
         // would silently include data from every allowed company).
@@ -169,6 +182,18 @@ public class ReportExportController {
         if (!accessEvaluator.canExport(authz)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "REPORT_EXPORT permission required");
         }
+
+        // PR-D2.1c2 (ADR-0015, Codex 019e838e post-impl PARTIAL absorb):
+        // remote-http guard runs AFTER authz/export-permission so
+        // unauthorized callers still get 403 (not 422) — preventing
+        // capability leak via the response status differentiation.
+        if (def.isRemoteHttp()) {
+            return unprocessableForRemote("REMOTE_EXPORT_NOT_SUPPORTED",
+                    "remote-http reports do not support CSV/Excel export "
+                            + "in PR-D2.1c2; use the UI grid 'Export visible' "
+                            + "or wait for c2.5 streaming widening");
+        }
+
         AuthzMeResponse scopedAuthz = companyHeaderNarrower.narrow(authz, companyHeader);
 
         ReportExportRequestDto safeRequest = requestBody != null ? requestBody
@@ -403,6 +428,21 @@ public class ReportExportController {
             out.write(bytes);
         };
         return ResponseEntity.badRequest()
+                .header("Content-Type", "application/json; charset=UTF-8")
+                .body(body);
+    }
+
+    /**
+     * PR-D2.1c2 (ADR-0015) — fail-closed 422 envelope for remote-http
+     * reports. Stream-based export deferred to faz 2 (separate PR).
+     */
+    private ResponseEntity<StreamingResponseBody> unprocessableForRemote(String code, String message) {
+        ReportQueryErrorDto err = new ReportQueryErrorDto(code, message);
+        StreamingResponseBody body = out -> {
+            byte[] bytes = objectMapper.writeValueAsBytes(err);
+            out.write(bytes);
+        };
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .header("Content-Type", "application/json; charset=UTF-8")
                 .body(body);
     }
