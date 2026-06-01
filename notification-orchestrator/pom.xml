@@ -91,7 +91,19 @@
         <dependency>
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
-            <version>2.6.0</version>
+            <!--
+              #304 CI fix: 2.6.0 (Spring Boot 3.4-era) is incompatible
+              with Spring 6.2.11 (Spring Boot 3.5.6): it calls a
+              deprecated/removed `ControllerAdviceBean(Object)` ctor
+              that now NoSuchMethodErrors on every OpenAPI doc
+              generation involving a @RestControllerAdvice
+              (OpenApiContractTest 3 errors, dispatch fail on
+              /v3/api-docs). Bumped to 2.8.x — the Spring Boot 3.5+
+              aligned line with the Spring 6.2 ControllerAdviceBean
+              constructor adapter. Latent pre-existing version skew
+              that this PR tickles by adding the first advice.
+            -->
+            <version>2.8.13</version>
         </dependency>
 
         <!-- Faz 23.2 PR-A iter-1 absorb: BouncyCastle removed (DKIM full RFC 6376

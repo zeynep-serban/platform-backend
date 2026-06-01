@@ -6,8 +6,11 @@ import com.serban.notify.api.dto.SubmitIntentResponse;
 import com.serban.notify.config.NotifyConfig;
 import com.serban.notify.domain.NotificationIntent;
 import com.serban.notify.exception.CrossOrgAccessException;
+import com.serban.notify.exception.ValidationErrorResponse;
 import com.serban.notify.repository.NotificationIntentRepository;
 import com.serban.notify.service.IntentSubmissionService;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import jakarta.validation.Valid;
@@ -71,7 +74,8 @@ public class NotificationIntentController {
     @PostMapping
     @ApiResponses({
         @ApiResponse(responseCode = "202", description = "Intent accepted (new or REPLAYED)"),
-        @ApiResponse(responseCode = "400", description = "Validation error"),
+        @ApiResponse(responseCode = "400", description = "Validation error",
+            content = @Content(schema = @Schema(implementation = ValidationErrorResponse.class))),
         @ApiResponse(responseCode = "403", description = "Cross-org access denied"),
         @ApiResponse(responseCode = "404", description = "Template not found"),
         @ApiResponse(responseCode = "429", description = "Abuse guard blocked (rate limit / webhook fan-out cap; T1.6 Faz 23.2.F)"),

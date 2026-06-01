@@ -71,13 +71,54 @@ class NotificationIntentControllerTest extends AbstractPostgresTest {
 
     @Test
     void postSubmitMissingFieldReturns400() throws Exception {
-        // Missing required intentId
+        // Missing required intentId — pre-#304 this returned 400 with an empty
+        // body. #304 adds MethodArgumentNotValidAdvice which surfaces a
+        // structured details[] array with field-level validation messages so a
+        // future canary smoke can diagnose payload issues without enabling the
+        // global server.error.include-message=always flag.
         String invalidJson = "{\"orgId\":\"default\",\"topicKey\":\"x.y\"}";
         mockMvc.perform(post("/api/v1/notify/intents")
                 .header("X-Org-Id", "default")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(invalidJson))
-            .andExpect(status().isBadRequest());
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("validation"))
+            .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("validation")))
+            .andExpect(jsonPath("$.details").isArray())
+            .andExpect(jsonPath("$.details", org.hamcrest.Matchers.not(org.hamcrest.Matchers.empty())))
+            // intentId is the missing field; assert that the structured details
+            // surface the field name + the developer-authored message (so a
+            // CONTRACT-style smoke can grep for the precise violation).
+            .andExpect(jsonPath("$.details[?(@.field == 'intentId')].message",
+                    org.hamcrest.Matchers.hasItem(org.hamcrest.Matchers.containsString("intent_id required"))));
+    }
+
+    @Test
+    void postSubmitMultipleMissingFieldsSurfaceAllInDetails() throws Exception {
+        // #304: every constraint violation must appear in details[], not just
+        // the first. Empty body trips the SubmitIntentRequest record's
+        // NotBlank/NotNull constraints — the exact field set varies as the
+        // record evolves, so this test pins (a) details has at least 3
+        // entries and (b) the three smoke-relevant fields (intentId, orgId,
+        // topicKey) are always among them. The advice maps every FieldError
+        // to a details entry; full-field-set coverage is enforced
+        // structurally in the handler, not pinned by this assertion (which
+        // would otherwise tie this test to the record's exact field count
+        // and need updating on every field add — Codex 019e806a nit).
+        String invalidJson = "{}";
+        mockMvc.perform(post("/api/v1/notify/intents")
+                .header("X-Org-Id", "default")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(invalidJson))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("validation"))
+            .andExpect(jsonPath("$.details", org.hamcrest.Matchers.hasSize(
+                    org.hamcrest.Matchers.greaterThanOrEqualTo(3))))
+            // intentId / orgId / topicKey are the three fields a smoke would
+            // most-frequently typo. Pin their presence so a future widening of
+            // SubmitIntentRequest does not silently drop them from details.
+            .andExpect(jsonPath("$.details[*].field",
+                    org.hamcrest.Matchers.hasItems("intentId", "orgId", "topicKey")));
     }
 
     @Test
