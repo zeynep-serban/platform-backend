@@ -60,7 +60,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         // AG-037 — hotfix-posture sanitizer + service wired into the same
         // COLLECT_INVENTORY pre-persist + ingest path.
         com.example.endpointadmin.security.HotfixPosturePayloadPolicy.class,
-        EndpointHotfixPostureService.class
+        EndpointHotfixPostureService.class,
+        // AG-038-be — diagnostics ingest service + policy (Faz 22.5).
+        com.example.endpointadmin.security.DiagnosticsPayloadPolicy.class,
+        EndpointDiagnosticsService.class
 })
 class EndpointAgentCommandServiceTest {
 

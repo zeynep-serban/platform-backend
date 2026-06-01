@@ -44,11 +44,13 @@ public class EndpointAgentCommandService {
     private final DeviceHealthPayloadPolicy deviceHealthPayloadPolicy;
     private final OutdatedSoftwarePayloadPolicy outdatedSoftwarePayloadPolicy;
     private final HotfixPosturePayloadPolicy hotfixPosturePayloadPolicy;
+    private final com.example.endpointadmin.security.DiagnosticsPayloadPolicy diagnosticsPayloadPolicy;
     private final EndpointSoftwareInventoryService softwareInventoryService;
     private final EndpointHardwareInventoryService hardwareInventoryService;
     private final EndpointDeviceHealthService deviceHealthService;
     private final EndpointOutdatedSoftwareService outdatedSoftwareService;
     private final EndpointHotfixPostureService hotfixPostureService;
+    private final EndpointDiagnosticsService diagnosticsService;
     private final EndpointInstallAuditService installAuditService;
     private final Clock clock;
     private final Duration claimTtl;
@@ -61,11 +63,13 @@ public class EndpointAgentCommandService {
                                        DeviceHealthPayloadPolicy deviceHealthPayloadPolicy,
                                        OutdatedSoftwarePayloadPolicy outdatedSoftwarePayloadPolicy,
                                        HotfixPosturePayloadPolicy hotfixPosturePayloadPolicy,
+                                       com.example.endpointadmin.security.DiagnosticsPayloadPolicy diagnosticsPayloadPolicy,
                                        EndpointSoftwareInventoryService softwareInventoryService,
                                        EndpointHardwareInventoryService hardwareInventoryService,
                                        EndpointDeviceHealthService deviceHealthService,
                                        EndpointOutdatedSoftwareService outdatedSoftwareService,
                                        EndpointHotfixPostureService hotfixPostureService,
+                                       EndpointDiagnosticsService diagnosticsService,
                                        EndpointInstallAuditService installAuditService,
                                        Clock clock,
                                        @Value("${endpoint-admin.commands.claim-ttl-seconds:300}") long claimTtlSeconds) {
@@ -77,11 +81,13 @@ public class EndpointAgentCommandService {
         this.deviceHealthPayloadPolicy = deviceHealthPayloadPolicy;
         this.outdatedSoftwarePayloadPolicy = outdatedSoftwarePayloadPolicy;
         this.hotfixPosturePayloadPolicy = hotfixPosturePayloadPolicy;
+        this.diagnosticsPayloadPolicy = diagnosticsPayloadPolicy;
         this.softwareInventoryService = softwareInventoryService;
         this.hardwareInventoryService = hardwareInventoryService;
         this.deviceHealthService = deviceHealthService;
         this.outdatedSoftwareService = outdatedSoftwareService;
         this.hotfixPostureService = hotfixPostureService;
+        this.diagnosticsService = diagnosticsService;
         this.installAuditService = installAuditService;
         this.clock = clock;
         this.claimTtl = Duration.ofSeconds(Math.max(30L, claimTtlSeconds));
@@ -197,6 +203,21 @@ public class EndpointAgentCommandService {
                 //    the transaction so neither endpoint_command_results
                 //    nor the hotfix-posture tables persist anything.
                 effectiveDetails = hotfixPosturePayloadPolicy.sanitize(effectiveDetails);
+                // 4b. Diagnostics validator/sanitizer (AG-038-be). Runs after
+                //    hotfix-posture sanitize on the sanitized form and
+                //    validates the details.inventory.diagnostics (+ redundant
+                //    top-level details.diagnostics) sub-tree against the
+                //    contract redaction boundary. Codex 019e82d7 iter-3 P1
+                //    #1 absorb: closes the type-confusion bypass where a
+                //    non-Map diagnostics value would skip AG-038 policy and
+                //    let the generic software policy miss the forbidden keys
+                //    (apiURL, host, credentialId, token, ...) the AG-038
+                //    contract guards against. A present-but-non-Map block or
+                //    any policy breach aborts the result submit with 400 and
+                //    rolls back the transaction so neither
+                //    endpoint_command_results nor the diagnostics tables
+                //    persist anything.
+                effectiveDetails = diagnosticsPayloadPolicy.sanitize(effectiveDetails);
                 // 5. Software validator (validate-only) on the sanitized form.
                 inventoryPayloadPolicy.validate(effectiveDetails);
             } catch (IllegalArgumentException ex) {
@@ -315,6 +336,25 @@ public class EndpointAgentCommandService {
             if (EndpointHotfixPostureService.hasHotfixPostureBlock(effectiveDetails)) {
                 try {
                     hotfixPostureService.ingest(
+                            command.getDevice(), command, result, effectiveDetails);
+                } catch (IllegalArgumentException ex) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            ex.getMessage());
+                }
+            }
+            // AG-038-be agent self-diagnostics ingest — same transaction,
+            // same sanitized effectiveDetails. Only runs when the
+            // sanitized payload actually carries a
+            // details.inventory.diagnostics block (opt-in; absent unless
+            // backend requested includeDiagnostics=true). Dual idempotency
+            // (Codex 019e82d7 iter-2): targetless ON CONFLICT DO NOTHING +
+            // sequential winner lookup races both source_command_result_id
+            // and (tenant, device, hash) UNIQUEs transaction-cleanly. NO
+            // exception swallow — any policy-bypass IllegalStateException
+            // rolls full tx back.
+            if (EndpointDiagnosticsService.hasDiagnosticsBlock(effectiveDetails)) {
+                try {
+                    diagnosticsService.ingest(
                             command.getDevice(), command, result, effectiveDetails);
                 } catch (IllegalArgumentException ex) {
                     throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
