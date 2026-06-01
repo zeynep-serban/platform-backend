@@ -25,7 +25,7 @@
     {
       "field": "FULL_NAME",
       "headerName": "Ad Soyad",
-      "type": "text",
+      "type": "bold-text",
       "width": 200,
       "sensitive": false
     },
@@ -46,9 +46,15 @@
     {
       "field": "GENDER",
       "headerName": "Cinsiyet",
-      "type": "text",
+      "type": "badge",
       "width": 90,
-      "sensitive": false
+      "sensitive": false,
+      "variantMap": {
+        "Erkek": "info",
+        "Kadın": "primary",
+        "Diğer": "muted"
+      },
+      "defaultVariant": "muted"
     },
     {
       "field": "AGE",
@@ -67,9 +73,15 @@
     {
       "field": "EMPLOYMENT_TYPE",
       "headerName": "İstihdam Türü",
-      "type": "text",
+      "type": "badge",
       "width": 120,
-      "sensitive": false
+      "sensitive": false,
+      "variantMap": {
+        "Tam Zamanlı": "success",
+        "Yarı Zamanlı": "warning",
+        "Sözleşmeli": "info"
+      },
+      "defaultVariant": "muted"
     },
     {
       "field": "LOCATION",
@@ -83,14 +95,16 @@
       "headerName": "İşe Giriş",
       "type": "date",
       "width": 110,
-      "sensitive": false
+      "sensitive": false,
+      "format": "short"
     },
     {
       "field": "TENURE_YEARS",
       "headerName": "Kıdem (Yıl)",
       "type": "number",
       "width": 90,
-      "sensitive": false
+      "sensitive": false,
+      "suffix": "yıl"
     },
     {
       "field": "GENERATION",
@@ -102,6 +116,59 @@
   ],
   "defaultSort": "FULL_NAME",
   "defaultSortDirection": "ASC",
+  "sharedReportId": "hr-demografik-yapi",
+  "filterDefinitions": [
+    {
+      "key": "search",
+      "kind": "text-search",
+      "operator": "contains",
+      "targetField": "FULL_NAME",
+      "i18nLabelKey": "Ara",
+      "urlParam": "search"
+    },
+    {
+      "key": "department",
+      "kind": "text-search",
+      "operator": "contains",
+      "targetField": "DEPARTMENT_NAME",
+      "i18nLabelKey": "Departman",
+      "urlParam": "department"
+    },
+    {
+      "key": "location",
+      "kind": "text-search",
+      "operator": "contains",
+      "targetField": "LOCATION",
+      "i18nLabelKey": "Lokasyon",
+      "urlParam": "location"
+    },
+    {
+      "key": "gender",
+      "kind": "enum-select",
+      "operator": "equals",
+      "targetField": "GENDER",
+      "i18nLabelKey": "Cinsiyet",
+      "urlParam": "gender",
+      "options": [
+        { "value": "Erkek", "label": "Erkek" },
+        { "value": "Kadın", "label": "Kadın" },
+        { "value": "Diğer", "label": "Diğer" }
+      ]
+    },
+    {
+      "key": "employmentType",
+      "kind": "enum-select",
+      "operator": "equals",
+      "targetField": "EMPLOYMENT_TYPE",
+      "i18nLabelKey": "İstihdam Türü",
+      "urlParam": "employmentType",
+      "options": [
+        { "value": "Tam Zamanlı", "label": "Tam Zamanlı" },
+        { "value": "Yarı Zamanlı", "label": "Yarı Zamanlı" },
+        { "value": "Sözleşmeli", "label": "Sözleşmeli" }
+      ]
+    }
+  ],
   "access": {
     "reportGroup": "HR_REPORTS"
   }

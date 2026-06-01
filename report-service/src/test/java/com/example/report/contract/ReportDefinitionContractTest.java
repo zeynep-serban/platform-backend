@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.example.report.contract.report.ContractGateSummary;
 import com.example.report.contract.report.ContractViolation;
 import com.example.report.registry.ColumnDefinition;
+import com.example.report.registry.FilterDefinition;
+import com.example.report.registry.FilterKind;
 import com.example.report.registry.ReportDefinition;
 import com.example.report.registry.ReportRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -238,10 +240,82 @@ class ReportDefinitionContractTest {
                         "GENDER", "AGE", "EDUCATION", "EMPLOYMENT_TYPE", "LOCATION",
                         "HIRE_DATE", "TENURE_YEARS", "GENERATION");
 
+        // PR-D2a (Codex thread 019e81fd, 2026-06-01) — backend metadata-prep
+        // for the first static→dynamic migration target. Pins the column
+        // type widening + filter definitions + identity carry that PR-D2b
+        // (frontend hybrid) will consume.
+        ColumnDefinition fullName = def.columns().stream()
+                .filter(c -> "FULL_NAME".equals(c.field()))
+                .findFirst().orElseThrow();
+        assertThat(fullName.type()).isEqualTo("bold-text");
+
+        ColumnDefinition gender = def.columns().stream()
+                .filter(c -> "GENDER".equals(c.field()))
+                .findFirst().orElseThrow();
+        assertThat(gender.type()).isEqualTo("badge");
+        assertThat(gender.variantMap()).containsEntry("Kadın", "primary");
+        assertThat(gender.defaultVariant()).isEqualTo("muted");
+
+        ColumnDefinition employmentType = def.columns().stream()
+                .filter(c -> "EMPLOYMENT_TYPE".equals(c.field()))
+                .findFirst().orElseThrow();
+        assertThat(employmentType.type()).isEqualTo("badge");
+        assertThat(employmentType.variantMap()).containsEntry("Tam Zamanlı", "success");
+        assertThat(employmentType.defaultVariant()).isEqualTo("muted");
+
+        ColumnDefinition tenureYears = def.columns().stream()
+                .filter(c -> "TENURE_YEARS".equals(c.field()))
+                .findFirst().orElseThrow();
+        assertThat(tenureYears.suffix()).isEqualTo("yıl");
+
+        ColumnDefinition hireDate = def.columns().stream()
+                .filter(c -> "HIRE_DATE".equals(c.field()))
+                .findFirst().orElseThrow();
+        assertThat(hireDate.format()).isEqualTo("short");
+
+        // EDUCATION + GENERATION stay text per D0 §2.7 (lowest-risk scope).
+        ColumnDefinition education = def.columns().stream()
+                .filter(c -> "EDUCATION".equals(c.field()))
+                .findFirst().orElseThrow();
+        assertThat(education.type()).isEqualTo("text");
+
         ColumnDefinition generation = def.columns().stream()
                 .filter(c -> "GENERATION".equals(c.field()))
                 .findFirst().orElseThrow();
         assertThat(generation.type()).isEqualTo("text");
+
+        // PR-D2a identity carry — preserves favorites + saved-filter scope
+        // for D2b/D3 when the dynamic catalog eventually owns the route.
+        assertThat(def.sharedReportId()).isEqualTo("hr-demografik-yapi");
+
+        // PR-D2a filterDefinitions — 5 entries, ordered, with search.targetField
+        // pointed at FULL_NAME so the D1b translator emits a real column filter
+        // (without targetField, search would resolve to a phantom `search` column).
+        assertThat(def.filterDefinitions()).hasSize(5);
+        assertThat(def.filterDefinitions().stream().map(FilterDefinition::key).toList())
+                .containsExactly("search", "department", "location", "gender", "employmentType");
+
+        FilterDefinition search = def.filterDefinitions().get(0);
+        assertThat(search.kind()).isEqualTo(FilterKind.TEXT_SEARCH);
+        assertThat(search.targetField()).isEqualTo("FULL_NAME");
+        assertThat(search.operator()).isEqualTo("contains");
+
+        FilterDefinition department = def.filterDefinitions().get(1);
+        assertThat(department.kind()).isEqualTo(FilterKind.TEXT_SEARCH);
+        assertThat(department.targetField()).isEqualTo("DEPARTMENT_NAME");
+
+        FilterDefinition location = def.filterDefinitions().get(2);
+        assertThat(location.targetField()).isEqualTo("LOCATION");
+
+        FilterDefinition genderFilter = def.filterDefinitions().get(3);
+        assertThat(genderFilter.kind()).isEqualTo(FilterKind.ENUM_SELECT);
+        assertThat(genderFilter.targetField()).isEqualTo("GENDER");
+        assertThat(genderFilter.options()).hasSize(3);
+
+        FilterDefinition employmentTypeFilter = def.filterDefinitions().get(4);
+        assertThat(employmentTypeFilter.kind()).isEqualTo(FilterKind.ENUM_SELECT);
+        assertThat(employmentTypeFilter.targetField()).isEqualTo("EMPLOYMENT_TYPE");
+        assertThat(employmentTypeFilter.options()).hasSize(3);
 
         // Codex 019e3b64 B1: no phantom per-report permission — access gates
         // by REPORT_VIEW + HR_REPORTS group only (the permission catalog has
