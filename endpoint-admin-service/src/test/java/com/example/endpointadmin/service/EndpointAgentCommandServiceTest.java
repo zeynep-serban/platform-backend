@@ -63,7 +63,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         EndpointHotfixPostureService.class,
         // AG-038-be — diagnostics ingest service + policy (Faz 22.5).
         com.example.endpointadmin.security.DiagnosticsPayloadPolicy.class,
-        EndpointDiagnosticsService.class
+        EndpointDiagnosticsService.class,
+        // AG-039-be — critical services ingest service + policy (Faz 22.5).
+        com.example.endpointadmin.security.ServicesPayloadPolicy.class,
+        EndpointServicesService.class
 })
 class EndpointAgentCommandServiceTest {
 

@@ -45,12 +45,14 @@ public class EndpointAgentCommandService {
     private final OutdatedSoftwarePayloadPolicy outdatedSoftwarePayloadPolicy;
     private final HotfixPosturePayloadPolicy hotfixPosturePayloadPolicy;
     private final com.example.endpointadmin.security.DiagnosticsPayloadPolicy diagnosticsPayloadPolicy;
+    private final com.example.endpointadmin.security.ServicesPayloadPolicy servicesPayloadPolicy;
     private final EndpointSoftwareInventoryService softwareInventoryService;
     private final EndpointHardwareInventoryService hardwareInventoryService;
     private final EndpointDeviceHealthService deviceHealthService;
     private final EndpointOutdatedSoftwareService outdatedSoftwareService;
     private final EndpointHotfixPostureService hotfixPostureService;
     private final EndpointDiagnosticsService diagnosticsService;
+    private final EndpointServicesService servicesService;
     private final EndpointInstallAuditService installAuditService;
     private final Clock clock;
     private final Duration claimTtl;
@@ -64,12 +66,14 @@ public class EndpointAgentCommandService {
                                        OutdatedSoftwarePayloadPolicy outdatedSoftwarePayloadPolicy,
                                        HotfixPosturePayloadPolicy hotfixPosturePayloadPolicy,
                                        com.example.endpointadmin.security.DiagnosticsPayloadPolicy diagnosticsPayloadPolicy,
+                                       com.example.endpointadmin.security.ServicesPayloadPolicy servicesPayloadPolicy,
                                        EndpointSoftwareInventoryService softwareInventoryService,
                                        EndpointHardwareInventoryService hardwareInventoryService,
                                        EndpointDeviceHealthService deviceHealthService,
                                        EndpointOutdatedSoftwareService outdatedSoftwareService,
                                        EndpointHotfixPostureService hotfixPostureService,
                                        EndpointDiagnosticsService diagnosticsService,
+                                       EndpointServicesService servicesService,
                                        EndpointInstallAuditService installAuditService,
                                        Clock clock,
                                        @Value("${endpoint-admin.commands.claim-ttl-seconds:300}") long claimTtlSeconds) {
@@ -82,12 +86,14 @@ public class EndpointAgentCommandService {
         this.outdatedSoftwarePayloadPolicy = outdatedSoftwarePayloadPolicy;
         this.hotfixPosturePayloadPolicy = hotfixPosturePayloadPolicy;
         this.diagnosticsPayloadPolicy = diagnosticsPayloadPolicy;
+        this.servicesPayloadPolicy = servicesPayloadPolicy;
         this.softwareInventoryService = softwareInventoryService;
         this.hardwareInventoryService = hardwareInventoryService;
         this.deviceHealthService = deviceHealthService;
         this.outdatedSoftwareService = outdatedSoftwareService;
         this.hotfixPostureService = hotfixPostureService;
         this.diagnosticsService = diagnosticsService;
+        this.servicesService = servicesService;
         this.installAuditService = installAuditService;
         this.clock = clock;
         this.claimTtl = Duration.ofSeconds(Math.max(30L, claimTtlSeconds));
@@ -218,6 +224,14 @@ public class EndpointAgentCommandService {
                 //    endpoint_command_results nor the diagnostics tables
                 //    persist anything.
                 effectiveDetails = diagnosticsPayloadPolicy.sanitize(effectiveDetails);
+                // 4c. Services validator/sanitizer (AG-039-be). Runs after
+                //    diagnostics sanitize on the sanitized form and validates
+                //    the details.inventory.services sub-tree against the
+                //    contract redaction boundary. Codex 019e836c 3-iter
+                //    AGREE chain: strict-allowlist + exact-six invariant +
+                //    canonical-order validate-then-sort + value-level
+                //    denylist + type-confusion REJECT.
+                effectiveDetails = servicesPayloadPolicy.sanitize(effectiveDetails);
                 // 5. Software validator (validate-only) on the sanitized form.
                 inventoryPayloadPolicy.validate(effectiveDetails);
             } catch (IllegalArgumentException ex) {
@@ -355,6 +369,20 @@ public class EndpointAgentCommandService {
             if (EndpointDiagnosticsService.hasDiagnosticsBlock(effectiveDetails)) {
                 try {
                     diagnosticsService.ingest(
+                            command.getDevice(), command, result, effectiveDetails);
+                } catch (IllegalArgumentException ex) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            ex.getMessage());
+                }
+            }
+            // AG-039-be services inventory ingest — same transaction,
+            // same sanitized effectiveDetails. Only runs when the
+            // sanitized payload carries a details.inventory.services
+            // block (opt-in; absent unless backend requested
+            // includeServices=true).
+            if (EndpointServicesService.hasServicesBlock(effectiveDetails)) {
+                try {
+                    servicesService.ingest(
                             command.getDevice(), command, result, effectiveDetails);
                 } catch (IllegalArgumentException ex) {
                     throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
