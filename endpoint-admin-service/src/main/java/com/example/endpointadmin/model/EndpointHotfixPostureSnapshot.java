@@ -9,6 +9,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Index;
 import jakarta.persistence.OneToMany;
+import jakarta.persistence.OrderBy;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
@@ -242,17 +243,21 @@ public class EndpointHotfixPostureSnapshot {
     @Column(name = "version", nullable = false)
     private Long version;
 
-    /** Child installed-hotfix facets (LAZY). */
+    /** Child installed-hotfix facets (LAZY). {@code @OrderBy} pins the
+     *  deterministic replay order to the {@code rowOrdinal} the agent
+     *  emitted (Codex 019e822b P2 follow-up). */
     @OneToMany(mappedBy = "snapshot", cascade = CascadeType.ALL,
             fetch = FetchType.LAZY, orphanRemoval = true)
+    @OrderBy("rowOrdinal ASC")
     private List<EndpointHotfixPostureInstalled> installedHotfixes = new ArrayList<>();
 
     /** Child pending-update facets (LAZY). Each pending row has its OWN
      *  LAZY {@code kbs} grand-child collection — kept LAZY for v1 (latest
      *  fetch returns ONE snapshot; N+1 is acceptable per Codex 019e81fe
-     *  iter-3 residual notes). */
+     *  iter-3 residual notes). {@code @OrderBy} pins replay order. */
     @OneToMany(mappedBy = "snapshot", cascade = CascadeType.ALL,
             fetch = FetchType.LAZY, orphanRemoval = true)
+    @OrderBy("rowOrdinal ASC")
     private List<EndpointHotfixPosturePending> pendingUpdates = new ArrayList<>();
 
     /** Child pendingByCategory rollup (LAZY). Preserves the FULL
@@ -260,6 +265,7 @@ public class EndpointHotfixPostureSnapshot {
      *  list is capped (Codex 019e81fe iter-2 P1.1). */
     @OneToMany(mappedBy = "snapshot", cascade = CascadeType.ALL,
             fetch = FetchType.LAZY, orphanRemoval = true)
+    @OrderBy("rowOrdinal ASC")
     private List<EndpointHotfixPosturePendingCategoryCount> pendingByCategory = new ArrayList<>();
 
     @PrePersist

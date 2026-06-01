@@ -11,6 +11,7 @@ import jakarta.persistence.Index;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
+import jakarta.persistence.OrderBy;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
@@ -79,9 +80,12 @@ public class EndpointHotfixPosturePending {
 
     /** Grand-child KB ids (LAZY). Composite FK
      *  {@code (pending_id, tenant_id)} requires the parent
-     *  {@code UNIQUE(id, tenant_id)} above. */
+     *  {@code UNIQUE(id, tenant_id)} above. {@code @OrderBy} pins the
+     *  deterministic replay order to the {@code rowOrdinal} the agent
+     *  emitted (Codex 019e822b P2 follow-up). */
     @OneToMany(mappedBy = "pending", cascade = CascadeType.ALL,
             fetch = FetchType.LAZY, orphanRemoval = true)
+    @OrderBy("rowOrdinal ASC")
     private List<EndpointHotfixPosturePendingKb> kbs = new ArrayList<>();
 
     @PrePersist
