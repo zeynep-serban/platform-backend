@@ -1,0 +1,49 @@
+{
+  "contractVersion": 1,
+  "key": "monthly-login",
+  "version": "1.0",
+  "title": "Giriş & Oturum Denetim Olayları",
+  "description": "Kullanıcı giriş / oturum eylemleri (action) ve servis bazlı denetim olaylarının grid filtreli listesi. PR-D2.4 dördüncü LIVE remote-http modülü — permission-service /api/audit/events üzerinden çalışır (paged-events-total + audit-events-v1). Codex 019e83fd + 019e84bb absorb: option (a) filter-only liste; aggregation (aylık sayım / top-user / time-series) sonraki sprint mart layer'a (PR-D2.5+) bırakıldı. AY/DATE bazlı görünüm contract-level normalize (timestamp grid filter → dateFrom/dateTo query param) RemoteRequestNormalizer'ın audit-events-v1 widening sprintinde gelecek; bu PR rate-limited path ile login/session action filter'ını ve search arama'sını exercise eder. Yeni route segment 'monthly-login' frontend tarafı bağımsız capability; mevcut 'monthly-login-summary' static modülünü değiştirmez (deliberate new path, migration değil).",
+  "category": "Güvenlik",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "row",
+    "scopeType": "company",
+    "schemaResolver": "remoteHttpCompanyHeader",
+    "reason": "Permission-service /api/audit/events tenant scoping X-Company-Id header ile enforce edilir; report-service RemoteReportRequest.companyId aracılığıyla header'ı verbatim propagate eder. RemoteReportExecutor fail-closed allowlist + JWT propagation. Tenant izolasyonu downstream permission-service audit/authz katmanında. PR-D2.3 ile aynı endpoint (paylaşılan tenancy + RBAC zinciri)."
+  },
+  "execution": {
+    "kind": "remote-http",
+    "service": "permission-service",
+    "path": "/api/audit/events",
+    "responseShape": "paged-events-total"
+  },
+  "routeSegment": "monthly-login",
+  "sharedReportId": "monthly-login",
+  "columns": [
+    {"field": "timestamp", "headerName": "Giriş Zamanı", "type": "date", "format": "datetime", "width": 180},
+    {"field": "userEmail", "headerName": "Kullanıcı", "type": "text", "width": 240},
+    {"field": "action", "headerName": "Eylem", "type": "text", "width": 200},
+    {"field": "service", "headerName": "Kaynak Servis", "type": "text", "width": 160},
+    {
+      "field": "level",
+      "headerName": "Seviye",
+      "type": "badge",
+      "width": 120,
+      "variantMap": {
+        "INFO": "info",
+        "WARN": "warning",
+        "ERROR": "danger",
+        "DEBUG": "muted"
+      },
+      "defaultVariant": "muted"
+    },
+    {"field": "correlationId", "headerName": "Korelasyon ID", "type": "text", "width": 240},
+    {"field": "id", "headerName": "Olay ID", "type": "text", "width": 280}
+  ],
+  "defaultSort": "timestamp",
+  "defaultSortDirection": "DESC",
+  "access": {
+    "permission": "audit-view"
+  }
+}

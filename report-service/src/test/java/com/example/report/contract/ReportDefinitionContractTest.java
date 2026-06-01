@@ -77,7 +77,7 @@ class ReportDefinitionContractTest {
     }
 
     @Test
-    @DisplayName("Aggregate: 35 reports discovered (drift guard) — PR-D2.3 audit-report added")
+    @DisplayName("Aggregate: 36 reports discovered (drift guard) — PR-D2.4 monthly-login added")
     void aggregate_thirtyTwoReportsDiscovered() {
         // PR-D2.1d (ADR-0015, Codex 019e83bd iter-2 PARTIAL absorb):
         // bumped 32 → 33 for users-overview (first LIVE remote-http report,
@@ -89,7 +89,11 @@ class ReportDefinitionContractTest {
         // bumped 34 → 35 for audit-report (third LIVE remote-http report,
         // execution.kind=remote-http, service=permission-service, path=/api/audit/events,
         // responseShape=paged-events-total — c2.5 widening).
-        assertThat(CACHED.reportCount()).isEqualTo(35);
+        // PR-D2.4 (ADR-0015): bumped 35 → 36 for monthly-login (fourth
+        // LIVE remote-http report; same endpoint as audit-report but
+        // login-context columns; Codex aggregation warning kabul —
+        // option (a) filter-only path, mart layer deferred to D2.5+).
+        assertThat(CACHED.reportCount()).isEqualTo(36);
     }
 
     @Test
@@ -124,13 +128,14 @@ class ReportDefinitionContractTest {
     }
 
     @Test
-    @DisplayName("ReportRegistry: 32 reports loadable + exceptions.json excluded")
+    @DisplayName("ReportRegistry: 36 reports loadable + exceptions.json excluded")
     void reportRegistry_loadableAcceptanceTest() {
         // Codex iter-3 §1c absorb (carry-forward to 1e): runtime registry must
-        // load all 33 known keys; exceptions.json is excluded as a non-report
+        // load all known keys; exceptions.json is excluded as a non-report
         // (handled by ExceptionsRegistry; ReportRegistry log-swallows the
         // bind failure since it doesn't match ReportDefinition shape).
         // PR-D2.1d: bumped 32 → 33 for users-overview (first remote-http report).
+        // PR-D2.4: bumped 35 → 36 for monthly-login (fourth remote-http report).
         // Test uses classpath*:reports/ (multi-entry enumeration) because
         // Surefire fork classpath includes both target/classes + target/test-classes.
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
@@ -138,13 +143,14 @@ class ReportDefinitionContractTest {
         registry.loadDefinitions();
 
         assertThat(registry.getAll())
-                .as("Runtime registry must load 35 reports")
-                .hasSize(35);
+                .as("Runtime registry must load 36 reports")
+                .hasSize(36);
         assertThat(registry.get("hr-personel-listesi")).isPresent();
         assertThat(registry.get("fin-fatura-satirlari")).isPresent();
         assertThat(registry.get("users-overview")).isPresent();  // PR-D2.1d
         assertThat(registry.get("access-report")).isPresent();   // PR-D2.2
         assertThat(registry.get("audit-report")).isPresent();    // PR-D2.3
+        assertThat(registry.get("monthly-login")).isPresent();   // PR-D2.4
         assertThat(registry.get("exceptions")).isEmpty();  // excluded
     }
 
@@ -486,11 +492,14 @@ class ReportDefinitionContractTest {
     }
 
     static Stream<String> knownReportKeys() {
-        // Drift guard: exact 35-key list matches registry inventory at
+        // Drift guard: exact 36-key list matches registry inventory at
         // commit-time. New report → add here; missing report → fail.
         // PR-D2.1d: added "users-overview" (first remote-http report).
         // PR-D2.2: added "access-report" (second remote-http report).
         // PR-D2.3: added "audit-report" (third remote-http, paged-events-total).
+        // PR-D2.4: added "monthly-login" (fourth remote-http, paged-events-total
+        // — same endpoint as audit-report; login-context columns; Codex
+        // aggregation warning kabul, option (a) filter-only path).
         return Stream.of(
                 "fin-alacak-yaslandirma", "fin-banka-hareketleri", "fin-borc-yaslandirma",
                 "fin-butce-gerceklesen", "fin-cari-hareketler", "fin-cari-islemler",
@@ -503,7 +512,7 @@ class ReportDefinitionContractTest {
                 "hr-egitim-katilim", "hr-giris-cikis", "hr-izin-raporu",
                 "hr-maas-gecmisi", "hr-maas-raporu", "hr-personel-listesi",
                 "hr-puantaj", "satis-ozet", "stok-durum",
-                "users-overview", "access-report", "audit-report");
+                "users-overview", "access-report", "audit-report", "monthly-login");
     }
 
     private static void writeArtifacts(ContractGateSummary summary) throws IOException {
