@@ -69,7 +69,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         EndpointServicesService.class,
         // AG-040-be — startup-exposure ingest service + policy (Faz 22.5).
         com.example.endpointadmin.security.StartupExposurePayloadPolicy.class,
-        EndpointStartupExposureService.class
+        EndpointStartupExposureService.class,
+        // AG-041-be — Application Control (WDAC + AppLocker) ingest service + policy (Faz 22.5).
+        com.example.endpointadmin.security.AppControlPayloadPolicy.class,
+        EndpointAppControlService.class
 })
 class EndpointAgentCommandServiceTest {
 

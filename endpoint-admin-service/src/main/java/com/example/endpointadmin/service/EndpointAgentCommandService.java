@@ -47,6 +47,7 @@ public class EndpointAgentCommandService {
     private final com.example.endpointadmin.security.DiagnosticsPayloadPolicy diagnosticsPayloadPolicy;
     private final com.example.endpointadmin.security.ServicesPayloadPolicy servicesPayloadPolicy;
     private final com.example.endpointadmin.security.StartupExposurePayloadPolicy startupExposurePayloadPolicy;
+    private final com.example.endpointadmin.security.AppControlPayloadPolicy appControlPayloadPolicy;
     private final EndpointSoftwareInventoryService softwareInventoryService;
     private final EndpointHardwareInventoryService hardwareInventoryService;
     private final EndpointDeviceHealthService deviceHealthService;
@@ -55,6 +56,7 @@ public class EndpointAgentCommandService {
     private final EndpointDiagnosticsService diagnosticsService;
     private final EndpointServicesService servicesService;
     private final EndpointStartupExposureService startupExposureService;
+    private final EndpointAppControlService appControlService;
     private final EndpointInstallAuditService installAuditService;
     private final Clock clock;
     private final Duration claimTtl;
@@ -70,6 +72,7 @@ public class EndpointAgentCommandService {
                                        com.example.endpointadmin.security.DiagnosticsPayloadPolicy diagnosticsPayloadPolicy,
                                        com.example.endpointadmin.security.ServicesPayloadPolicy servicesPayloadPolicy,
                                        com.example.endpointadmin.security.StartupExposurePayloadPolicy startupExposurePayloadPolicy,
+                                       com.example.endpointadmin.security.AppControlPayloadPolicy appControlPayloadPolicy,
                                        EndpointSoftwareInventoryService softwareInventoryService,
                                        EndpointHardwareInventoryService hardwareInventoryService,
                                        EndpointDeviceHealthService deviceHealthService,
@@ -78,6 +81,7 @@ public class EndpointAgentCommandService {
                                        EndpointDiagnosticsService diagnosticsService,
                                        EndpointServicesService servicesService,
                                        EndpointStartupExposureService startupExposureService,
+                                       EndpointAppControlService appControlService,
                                        EndpointInstallAuditService installAuditService,
                                        Clock clock,
                                        @Value("${endpoint-admin.commands.claim-ttl-seconds:300}") long claimTtlSeconds) {
@@ -92,6 +96,7 @@ public class EndpointAgentCommandService {
         this.diagnosticsPayloadPolicy = diagnosticsPayloadPolicy;
         this.servicesPayloadPolicy = servicesPayloadPolicy;
         this.startupExposurePayloadPolicy = startupExposurePayloadPolicy;
+        this.appControlPayloadPolicy = appControlPayloadPolicy;
         this.softwareInventoryService = softwareInventoryService;
         this.hardwareInventoryService = hardwareInventoryService;
         this.deviceHealthService = deviceHealthService;
@@ -100,6 +105,7 @@ public class EndpointAgentCommandService {
         this.diagnosticsService = diagnosticsService;
         this.servicesService = servicesService;
         this.startupExposureService = startupExposureService;
+        this.appControlService = appControlService;
         this.installAuditService = installAuditService;
         this.clock = clock;
         this.claimTtl = Duration.ofSeconds(Math.max(30L, claimTtlSeconds));
@@ -247,6 +253,16 @@ public class EndpointAgentCommandService {
                 //    SUMMARY_VALUE_DENYLIST_RE reuse + type-confusion
                 //    REJECT.
                 effectiveDetails = startupExposurePayloadPolicy.sanitize(effectiveDetails);
+                // 4e. App-control validator/sanitizer (AG-041-be). Runs
+                //    after startup-exposure sanitize on the sanitized form
+                //    and validates the details.inventory.appControl
+                //    sub-tree against the contract redaction boundary.
+                //    Codex 019e840e plan iter-2 AGREE: 20-key stable wire
+                //    shape (required probeErrors empty-list-never-null)
+                //    + WDAC/AppLocker enum allowlists + EndpointService
+                //    Wire enums superset for AppIDSvc + null-preserving
+                //    canonical hash + probeComplete implication.
+                effectiveDetails = appControlPayloadPolicy.sanitize(effectiveDetails);
                 // 5. Software validator (validate-only) on the sanitized form.
                 inventoryPayloadPolicy.validate(effectiveDetails);
             } catch (IllegalArgumentException ex) {
@@ -412,6 +428,20 @@ public class EndpointAgentCommandService {
             if (EndpointStartupExposureService.hasStartupExposureBlock(effectiveDetails)) {
                 try {
                     startupExposureService.ingest(
+                            command.getDevice(), command, result, effectiveDetails);
+                } catch (IllegalArgumentException ex) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            ex.getMessage());
+                }
+            }
+            // AG-041-be Application Control (WDAC + AppLocker) ingest —
+            // same transaction, same sanitized effectiveDetails. Only runs
+            // when the sanitized payload carries a details.inventory.appControl
+            // block (opt-in; absent unless backend requested
+            // includeAppControl=true).
+            if (EndpointAppControlService.hasAppControlBlock(effectiveDetails)) {
+                try {
+                    appControlService.ingest(
                             command.getDevice(), command, result, effectiveDetails);
                 } catch (IllegalArgumentException ex) {
                     throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
