@@ -1,0 +1,49 @@
+{
+  "contractVersion": 1,
+  "key": "audit-report",
+  "version": "1.0",
+  "title": "Denetim Olayları",
+  "description": "Tüm denetim olayları, kullanıcı eylem geçmişi. PR-D2.3 üçüncü LIVE remote-http modülü — permission-service /api/audit/events üzerinden çalışır (c2.5 paged-events-total + audit-events-v1).",
+  "category": "Yönetim",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "row",
+    "scopeType": "company",
+    "schemaResolver": "remoteHttpCompanyHeader",
+    "reason": "Permission-service /api/audit/events tenant scoping is enforced via X-Company-Id header; report-service propagates verbatim through RemoteReportRequest.companyId. RemoteReportExecutor fail-closed allowlist + JWT propagation. Tenant isolation owned by downstream permission-service audit/authz layer."
+  },
+  "execution": {
+    "kind": "remote-http",
+    "service": "permission-service",
+    "path": "/api/audit/events",
+    "responseShape": "paged-events-total"
+  },
+  "routeSegment": "audit-report",
+  "sharedReportId": "audit-report",
+  "columns": [
+    {"field": "id", "headerName": "Olay ID", "type": "text", "width": 280},
+    {"field": "timestamp", "headerName": "Zaman", "type": "date", "format": "datetime", "width": 160},
+    {"field": "userEmail", "headerName": "Kullanıcı", "type": "text", "width": 200},
+    {"field": "action", "headerName": "Eylem", "type": "text", "width": 200},
+    {"field": "service", "headerName": "Servis", "type": "text", "width": 160},
+    {
+      "field": "level",
+      "headerName": "Seviye",
+      "type": "badge",
+      "width": 120,
+      "variantMap": {
+        "INFO": "info",
+        "WARN": "warning",
+        "ERROR": "danger",
+        "DEBUG": "muted"
+      },
+      "defaultVariant": "muted"
+    },
+    {"field": "correlationId", "headerName": "Correlation ID", "type": "text", "width": 240}
+  ],
+  "defaultSort": "timestamp",
+  "defaultSortDirection": "DESC",
+  "access": {
+    "permission": "audit-view"
+  }
+}

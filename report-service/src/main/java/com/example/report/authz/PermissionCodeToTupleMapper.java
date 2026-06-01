@@ -94,6 +94,12 @@ public class PermissionCodeToTupleMapper {
         // the downstream permission-service @RequireModule(value="ACCESS",
         // relation="can_view") gate at /api/v1/roles.
         staticMap.put("access-view",   new Tuple(REL_CAN_VIEW,   TYPE_MODULE, "ACCESS"));
+        // PR-D2.3 (ADR-0015, Codex 019e83fd): audit-view alias for the
+        // AUDIT module's can_view relation. Used by audit-report
+        // ReportDefinition.access.permission so catalog visibility mirrors
+        // the downstream permission-service @RequireModule(value="AUDIT",
+        // relation="can_view") gate at /api/audit/events.
+        staticMap.put("audit-view",    new Tuple(REL_CAN_VIEW,   TYPE_MODULE, "AUDIT"));
         STATIC_ALIASES = Collections.unmodifiableMap(staticMap);
 
         // ---- Scope markers --------------------------------------------------

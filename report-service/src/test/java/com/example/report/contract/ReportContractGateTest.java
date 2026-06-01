@@ -41,11 +41,13 @@ class ReportContractGateTest {
         // (first remote-http report, execution.kind=remote-http).
         // PR-D2.2 (ADR-0015): bumped 33 → 34 for access-report
         // (second remote-http report, service=permission-service).
+        // PR-D2.3 (ADR-0015): bumped 34 → 35 for audit-report
+        // (third remote-http, paged-events-total c2.5).
         ContractReport report = ReportContractGate.create().gate();
 
         assertThat(report.reportCount())
-                .as("All 34 migrated reports plus exceptions.json (excluded) discovered by sweep")
-                .isEqualTo(34);
+                .as("All 35 migrated reports plus exceptions.json (excluded) discovered by sweep")
+                .isEqualTo(35);
 
         // Codex iter-4 §1d-AGREE: gate must produce zero unsuppressed FAILs.
         // Codex 019e3f5c: all governance debt is rule-closed (RC-001 carve-out

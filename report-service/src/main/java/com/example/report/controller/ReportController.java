@@ -20,6 +20,7 @@ import com.example.report.execution.RemoteAllowlistException;
 import com.example.report.execution.RemoteAuthException;
 import com.example.report.execution.RemoteAuthzException;
 import com.example.report.execution.RemoteExecutionException;
+import com.example.report.execution.RemoteRequestNormalizationException;
 import com.example.report.execution.RemoteReportExecutor;
 import com.example.report.execution.RemoteReportRequest;
 import com.example.report.execution.RemoteReportResult;
@@ -423,6 +424,14 @@ public class ReportController {
         } catch (RemoteExecutionException ex) {
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(new ReportQueryErrorDto(
                     "REMOTE_EXECUTION_FAILED", ex.getMessage()));
+        } catch (RemoteRequestNormalizationException ex) {
+            // PR-D2.1c5 (Codex 019e83fd iter-1 amend): typed exception from
+            // RemoteRequestNormalizer for caller-side validation failures
+            // (e.g. audit-events-v1 multi-sort, logic=or with multi conditions).
+            // Map to structured 400 so the user sees a real client-side error,
+            // not a generic 502 "downstream timeout".
+            return ResponseEntity.badRequest().body(new ReportQueryErrorDto(
+                    ex.code(), ex.getMessage()));
         }
     }
 

@@ -30,6 +30,14 @@ public class RemoteResponseNormalizer {
 
     public static final String SHAPE_PAGED_ITEMS_TOTAL = "paged-items-total";
     public static final String SHAPE_ITEMS_ARRAY = "items-array";
+    /**
+     * PR-D2.1c5 (Codex 019e83fd iter-1 amend): permission-service
+     * /api/audit/events response shape — {@code {events: [...], total: N, page: P}}.
+     * Differs from {@link #SHAPE_PAGED_ITEMS_TOTAL} only in the rows field
+     * name ({@code events} vs {@code items}); same total semantics + same
+     * row validation contract.
+     */
+    public static final String SHAPE_PAGED_EVENTS_TOTAL = "paged-events-total";
 
     /**
      * Transform a raw downstream {@link JsonNode} to a {@link RemoteReportResult}
@@ -49,40 +57,48 @@ public class RemoteResponseNormalizer {
                     "downstream response body was null");
         }
         return switch (responseShape) {
-            case SHAPE_PAGED_ITEMS_TOTAL -> normalizePagedItemsTotal(body, service, path);
+            case SHAPE_PAGED_ITEMS_TOTAL -> normalizePagedTotal(body, service, path, SHAPE_PAGED_ITEMS_TOTAL, "items");
+            case SHAPE_PAGED_EVENTS_TOTAL -> normalizePagedTotal(body, service, path, SHAPE_PAGED_EVENTS_TOTAL, "events");
             case SHAPE_ITEMS_ARRAY -> normalizeItemsArray(body, service, path);
             default -> throw new IllegalArgumentException(
                     "Unknown responseShape: " + responseShape
                             + " (supported: " + SHAPE_PAGED_ITEMS_TOTAL
+                            + ", " + SHAPE_PAGED_EVENTS_TOTAL
                             + ", " + SHAPE_ITEMS_ARRAY + ")");
         };
     }
 
-    private RemoteReportResult normalizePagedItemsTotal(JsonNode body, String service, String path) {
+    /**
+     * PR-D2.1c5: shared paged-total handler (Codex 019e83fd amend —
+     * "ortak private helper ile items/events field adını parametreleştir").
+     * Body shape: {@code {<rowsField>: [...], total: N}}.
+     */
+    private RemoteReportResult normalizePagedTotal(JsonNode body, String service, String path,
+                                                    String shape, String rowsField) {
         if (!body.isObject()) {
             throw new RemoteExecutionException(service, path, null,
-                    "expected JSON object for shape " + SHAPE_PAGED_ITEMS_TOTAL
+                    "expected JSON object for shape " + shape
                             + " but got " + body.getNodeType());
         }
-        JsonNode itemsNode = body.get("items");
-        if (itemsNode == null || !itemsNode.isArray()) {
+        JsonNode rowsNode = body.get(rowsField);
+        if (rowsNode == null || !rowsNode.isArray()) {
             throw new RemoteExecutionException(service, path, null,
-                    "shape " + SHAPE_PAGED_ITEMS_TOTAL
-                            + " requires 'items' array field");
+                    "shape " + shape
+                            + " requires '" + rowsField + "' array field");
         }
         JsonNode totalNode = body.get("total");
         if (totalNode == null || !totalNode.canConvertToLong()) {
             throw new RemoteExecutionException(service, path, null,
-                    "shape " + SHAPE_PAGED_ITEMS_TOTAL
+                    "shape " + shape
                             + " requires 'total' integer field");
         }
         long total = totalNode.asLong();
         if (total < 0) {
             throw new RemoteExecutionException(service, path, null,
-                    "shape " + SHAPE_PAGED_ITEMS_TOTAL
+                    "shape " + shape
                             + " 'total' must be >= 0, got " + total);
         }
-        return new RemoteReportResult(extractRows(itemsNode, service, path), total);
+        return new RemoteReportResult(extractRows(rowsNode, service, path), total);
     }
 
     private RemoteReportResult normalizeItemsArray(JsonNode body, String service, String path) {

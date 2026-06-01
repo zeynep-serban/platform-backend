@@ -37,6 +37,15 @@ report:
         path: /api/v1/roles
         base-url: ${REPORT_REMOTE_EXECUTOR_PERMISSION_SERVICE_BASE_URL:http://permission-service:8090}
         request-shape: style-api-paged-v1
+      # PR-D2.3 (ADR-0015): audit-report remote-http endpoint.
+      # AuditEventController returns AuditEventPageResponse{events, page, total}
+      # → paged-events-total response shape (PR-D2.1c5 widening).
+      # Request: audit-events-v1 (filter[xxx]= + dateFrom/dateTo/action/level/
+      # service/correlationId/search direct passthrough).
+      - service: permission-service
+        path: /api/audit/events
+        base-url: ${REPORT_REMOTE_EXECUTOR_PERMISSION_SERVICE_BASE_URL:http://permission-service:8090}
+        request-shape: audit-events-v1
   postgres:
     url: ${REPORT_PG_URL:jdbc:postgresql://platform-pg.platform-system:5432/users}
     username: ${REPORT_PG_USERNAME:postgres}

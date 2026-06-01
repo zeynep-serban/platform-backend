@@ -126,9 +126,141 @@ class RemoteRequestNormalizerTest {
     void unknownShapeRejected() {
         var request = new RemoteReportRequest(
                 1, 25, null, List.of(), Map.of(), null, null);
-        assertThatThrownBy(() -> normalizer.toQueryParams("audit-events-v1", request))
+        assertThatThrownBy(() -> normalizer.toQueryParams("aggregation-mart-v1", request))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Unknown requestShape: audit-events-v1");
+                .hasMessageContaining("Unknown requestShape: aggregation-mart-v1");
+    }
+
+    /* PR-D2.1c5: audit-events-v1 shape tests */
+
+    @Test
+    @DisplayName("audit-events-v1 maps page + pageSize + search")
+    void auditEventsV1MapsPagePageSizeSearch() {
+        var request = new RemoteReportRequest(
+                3, 25, "kullanici ali", List.of(), Map.of(), null, null);
+        var params = normalizer.toQueryParams(
+                RemoteRequestNormalizer.SHAPE_AUDIT_EVENTS_V1, request);
+        assertThat(params.getFirst("page")).isEqualTo("3");
+        assertThat(params.getFirst("pageSize")).isEqualTo("25");
+        assertThat(params.getFirst("search")).isEqualTo("kullanici ali");
+    }
+
+    @Test
+    @DisplayName("audit-events-v1 direct fields go to plain query params (NOT filter[...])")
+    void auditEventsV1DirectFieldsPlainParams() {
+        var conditions = List.<Map<String, Object>>of(
+                Map.of("field", "dateFrom", "op", "equals", "value", "2026-06-01"),
+                Map.of("field", "dateTo", "op", "equals", "value", "2026-06-30"),
+                Map.of("field", "action", "op", "equals", "value", "SESSION_CREATED"),
+                Map.of("field", "level", "op", "equals", "value", "INFO"),
+                Map.of("field", "service", "op", "equals", "value", "auth-service"));
+        var advancedFilter = new java.util.LinkedHashMap<String, Object>();
+        advancedFilter.put("logic", "and");
+        advancedFilter.put("conditions", conditions);
+
+        var request = new RemoteReportRequest(
+                1, 50, null, List.of(), advancedFilter, null, null);
+        var params = normalizer.toQueryParams(
+                RemoteRequestNormalizer.SHAPE_AUDIT_EVENTS_V1, request);
+        assertThat(params.getFirst("dateFrom")).isEqualTo("2026-06-01");
+        assertThat(params.getFirst("dateTo")).isEqualTo("2026-06-30");
+        assertThat(params.getFirst("action")).isEqualTo("SESSION_CREATED");
+        assertThat(params.getFirst("level")).isEqualTo("INFO");
+        assertThat(params.getFirst("service")).isEqualTo("auth-service");
+        // No filter[xxx] for direct fields
+        assertThat(params).doesNotContainKey("filter[dateFrom]");
+    }
+
+    @Test
+    @DisplayName("audit-events-v1 non-direct fields go to filter[<field>]=<value>")
+    void auditEventsV1NonDirectFieldsFilterPattern() {
+        var conditions = List.<Map<String, Object>>of(
+                Map.of("field", "customField", "op", "equals", "value", "abc"));
+        var advancedFilter = new java.util.LinkedHashMap<String, Object>();
+        advancedFilter.put("logic", "and");
+        advancedFilter.put("conditions", conditions);
+
+        var request = new RemoteReportRequest(
+                1, 50, null, List.of(), advancedFilter, null, null);
+        var params = normalizer.toQueryParams(
+                RemoteRequestNormalizer.SHAPE_AUDIT_EVENTS_V1, request);
+        assertThat(params.getFirst("filter[customField]")).isEqualTo("abc");
+    }
+
+    @Test
+    @DisplayName("audit-events-v1 single sort field,dir honored")
+    void auditEventsV1SingleSortHonored() {
+        var request = new RemoteReportRequest(
+                1, 50, null,
+                List.of(new RemoteReportRequest.SortEntry("timestamp", "DESC")),
+                Map.of(), null, null);
+        var params = normalizer.toQueryParams(
+                RemoteRequestNormalizer.SHAPE_AUDIT_EVENTS_V1, request);
+        assertThat(params.getFirst("sort")).isEqualTo("timestamp,desc");
+    }
+
+    @Test
+    @DisplayName("audit-events-v1 multi-sort throws RemoteRequestNormalizationException")
+    void auditEventsV1MultiSortRejects() {
+        var request = new RemoteReportRequest(
+                1, 50, null,
+                List.of(
+                        new RemoteReportRequest.SortEntry("timestamp", "DESC"),
+                        new RemoteReportRequest.SortEntry("action", "ASC")),
+                Map.of(), null, null);
+        assertThatThrownBy(() -> normalizer.toQueryParams(
+                RemoteRequestNormalizer.SHAPE_AUDIT_EVENTS_V1, request))
+                .isInstanceOf(RemoteRequestNormalizationException.class)
+                .matches(ex -> "REMOTE_SORT_MULTI_UNSUPPORTED".equals(
+                        ((RemoteRequestNormalizationException) ex).code()));
+    }
+
+    @Test
+    @DisplayName("audit-events-v1 logic=or with multi conditions throws")
+    void auditEventsV1LogicOrRejects() {
+        var conditions = List.<Map<String, Object>>of(
+                Map.of("field", "action", "op", "equals", "value", "LOGIN"),
+                Map.of("field", "action", "op", "equals", "value", "LOGOUT"));
+        var advancedFilter = new java.util.LinkedHashMap<String, Object>();
+        advancedFilter.put("logic", "or");
+        advancedFilter.put("conditions", conditions);
+
+        var request = new RemoteReportRequest(
+                1, 50, null, List.of(), advancedFilter, null, null);
+        assertThatThrownBy(() -> normalizer.toQueryParams(
+                RemoteRequestNormalizer.SHAPE_AUDIT_EVENTS_V1, request))
+                .isInstanceOf(RemoteRequestNormalizationException.class)
+                .matches(ex -> "REMOTE_FILTER_OR_UNSUPPORTED".equals(
+                        ((RemoteRequestNormalizationException) ex).code()));
+    }
+
+    @Test
+    @DisplayName("audit-events-v1 NO advancedFilter JSON param (downstream does not parse)")
+    void auditEventsV1NoAdvancedFilterParam() {
+        var conditions = List.<Map<String, Object>>of(
+                Map.of("field", "action", "op", "equals", "value", "LOGIN"));
+        var advancedFilter = new java.util.LinkedHashMap<String, Object>();
+        advancedFilter.put("logic", "and");
+        advancedFilter.put("conditions", conditions);
+
+        var request = new RemoteReportRequest(
+                1, 50, null, List.of(), advancedFilter, null, null);
+        var params = normalizer.toQueryParams(
+                RemoteRequestNormalizer.SHAPE_AUDIT_EVENTS_V1, request);
+        assertThat(params).doesNotContainKey("advancedFilter");
+        assertThat(params.getFirst("action")).isEqualTo("LOGIN");
+    }
+
+    @Test
+    @DisplayName("audit-events-v1 empty advancedFilter emits no filter params")
+    void auditEventsV1EmptyFilterClean() {
+        var request = new RemoteReportRequest(
+                1, 50, null, List.of(), Map.of(), null, null);
+        var params = normalizer.toQueryParams(
+                RemoteRequestNormalizer.SHAPE_AUDIT_EVENTS_V1, request);
+        assertThat(params).hasSize(2); // only page + pageSize
+        assertThat(params).containsKey("page");
+        assertThat(params).containsKey("pageSize");
     }
 
     @Test

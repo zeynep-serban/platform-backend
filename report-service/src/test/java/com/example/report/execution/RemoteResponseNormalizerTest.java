@@ -144,9 +144,72 @@ class RemoteResponseNormalizerTest {
     void unknownShapeRejected() throws Exception {
         JsonNode body = mapper.readTree("{}");
         assertThatThrownBy(() -> normalizer.normalize(
-                "audit-events-v1", body, "x", "/y"))
+                "aggregation-mart-v1", body, "x", "/y"))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Unknown responseShape: audit-events-v1");
+                .hasMessageContaining("Unknown responseShape: aggregation-mart-v1");
+    }
+
+    @Test
+    @DisplayName("PR-D2.1c5: paged-events-total happy path (events + total)")
+    void pagedEventsTotalHappy() throws Exception {
+        JsonNode body = mapper.readTree("""
+                {
+                  "events": [
+                    {"id": "evt-1", "action": "LOGIN", "userEmail": "a@b"},
+                    {"id": "evt-2", "action": "LOGOUT", "userEmail": "c@d"}
+                  ],
+                  "total": 42,
+                  "page": 1
+                }
+                """);
+        var result = normalizer.normalize(
+                RemoteResponseNormalizer.SHAPE_PAGED_EVENTS_TOTAL,
+                body, "permission-service", "/api/audit/events");
+        assertThat(result.rows()).hasSize(2);
+        assertThat(result.total()).isEqualTo(42);
+        assertThat(result.rows().get(0).get("action")).isEqualTo("LOGIN");
+    }
+
+    @Test
+    @DisplayName("PR-D2.1c5: paged-events-total missing 'events' field rejected (NOT 'items')")
+    void pagedEventsTotalMissingEvents() throws Exception {
+        // Critical: rows field name is "events" not "items" — paged-items-total
+        // body would FAIL here even though same structure (different rowsField).
+        JsonNode body = mapper.readTree("""
+                { "items": [{"id":"x"}], "total": 1 }
+                """);
+        assertThatThrownBy(() -> normalizer.normalize(
+                RemoteResponseNormalizer.SHAPE_PAGED_EVENTS_TOTAL,
+                body, "permission-service", "/api/audit/events"))
+                .isInstanceOf(RemoteExecutionException.class)
+                .hasMessageContaining("'events' array field");
+    }
+
+    @Test
+    @DisplayName("PR-D2.1c5: paged-events-total total missing rejected")
+    void pagedEventsTotalMissingTotal() throws Exception {
+        JsonNode body = mapper.readTree("""
+                { "events": [] }
+                """);
+        assertThatThrownBy(() -> normalizer.normalize(
+                RemoteResponseNormalizer.SHAPE_PAGED_EVENTS_TOTAL,
+                body, "permission-service", "/api/audit/events"))
+                .isInstanceOf(RemoteExecutionException.class)
+                .hasMessageContaining("'total' integer field");
+    }
+
+    @Test
+    @DisplayName("PR-D2.1c5: paged-events-total non-object row in events → fail-closed")
+    void pagedEventsTotalNonObjectRow() throws Exception {
+        JsonNode body = mapper.readTree("""
+                { "events": [{"id":"a"}, "scalar"], "total": 2 }
+                """);
+        assertThatThrownBy(() -> normalizer.normalize(
+                RemoteResponseNormalizer.SHAPE_PAGED_EVENTS_TOTAL,
+                body, "permission-service", "/api/audit/events"))
+                .isInstanceOf(RemoteExecutionException.class)
+                .hasMessageContaining("row at index 1")
+                .hasMessageContaining("not a JSON object");
     }
 
     @Test

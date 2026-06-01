@@ -171,9 +171,9 @@
           "pattern": "^/[a-zA-Z0-9/_.-]+$"
         },
         "responseShape": {
-          "description": "Downstream response normalizer shape. Required when kind=remote-http; must be absent when kind=sql. 'paged-items-total' = {items, total, ...}; 'items-array' = flat array.",
+          "description": "Downstream response normalizer shape. Required when kind=remote-http; must be absent when kind=sql. 'paged-items-total' = {items, total, ...}; 'paged-events-total' = {events, total, ...} (audit endpoints, PR-D2.1c5); 'items-array' = flat array.",
           "type": "string",
-          "enum": ["paged-items-total", "items-array"]
+          "enum": ["paged-items-total", "paged-events-total", "items-array"]
         }
       },
       "allOf": [
