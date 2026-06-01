@@ -56,7 +56,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         // AG-036 — outdated-software sanitizer + service wired into the same
         // COLLECT_INVENTORY pre-persist + ingest path.
         com.example.endpointadmin.security.OutdatedSoftwarePayloadPolicy.class,
-        EndpointOutdatedSoftwareService.class
+        EndpointOutdatedSoftwareService.class,
+        // AG-037 — hotfix-posture sanitizer + service wired into the same
+        // COLLECT_INVENTORY pre-persist + ingest path.
+        com.example.endpointadmin.security.HotfixPosturePayloadPolicy.class,
+        EndpointHotfixPostureService.class
 })
 class EndpointAgentCommandServiceTest {
 

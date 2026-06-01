@@ -14,6 +14,7 @@ import com.example.endpointadmin.security.DeviceCredentialException;
 import com.example.endpointadmin.security.DeviceCredentialResult;
 import com.example.endpointadmin.security.DeviceHealthPayloadPolicy;
 import com.example.endpointadmin.security.HardwareInventoryPayloadPolicy;
+import com.example.endpointadmin.security.HotfixPosturePayloadPolicy;
 import com.example.endpointadmin.security.InstallEvidencePayloadPolicy;
 import com.example.endpointadmin.security.OutdatedSoftwarePayloadPolicy;
 import com.example.endpointadmin.security.SoftwareInventoryPayloadPolicy;
@@ -42,10 +43,12 @@ public class EndpointAgentCommandService {
     private final HardwareInventoryPayloadPolicy hardwareInventoryPayloadPolicy;
     private final DeviceHealthPayloadPolicy deviceHealthPayloadPolicy;
     private final OutdatedSoftwarePayloadPolicy outdatedSoftwarePayloadPolicy;
+    private final HotfixPosturePayloadPolicy hotfixPosturePayloadPolicy;
     private final EndpointSoftwareInventoryService softwareInventoryService;
     private final EndpointHardwareInventoryService hardwareInventoryService;
     private final EndpointDeviceHealthService deviceHealthService;
     private final EndpointOutdatedSoftwareService outdatedSoftwareService;
+    private final EndpointHotfixPostureService hotfixPostureService;
     private final EndpointInstallAuditService installAuditService;
     private final Clock clock;
     private final Duration claimTtl;
@@ -57,10 +60,12 @@ public class EndpointAgentCommandService {
                                        HardwareInventoryPayloadPolicy hardwareInventoryPayloadPolicy,
                                        DeviceHealthPayloadPolicy deviceHealthPayloadPolicy,
                                        OutdatedSoftwarePayloadPolicy outdatedSoftwarePayloadPolicy,
+                                       HotfixPosturePayloadPolicy hotfixPosturePayloadPolicy,
                                        EndpointSoftwareInventoryService softwareInventoryService,
                                        EndpointHardwareInventoryService hardwareInventoryService,
                                        EndpointDeviceHealthService deviceHealthService,
                                        EndpointOutdatedSoftwareService outdatedSoftwareService,
+                                       EndpointHotfixPostureService hotfixPostureService,
                                        EndpointInstallAuditService installAuditService,
                                        Clock clock,
                                        @Value("${endpoint-admin.commands.claim-ttl-seconds:300}") long claimTtlSeconds) {
@@ -71,10 +76,12 @@ public class EndpointAgentCommandService {
         this.hardwareInventoryPayloadPolicy = hardwareInventoryPayloadPolicy;
         this.deviceHealthPayloadPolicy = deviceHealthPayloadPolicy;
         this.outdatedSoftwarePayloadPolicy = outdatedSoftwarePayloadPolicy;
+        this.hotfixPosturePayloadPolicy = hotfixPosturePayloadPolicy;
         this.softwareInventoryService = softwareInventoryService;
         this.hardwareInventoryService = hardwareInventoryService;
         this.deviceHealthService = deviceHealthService;
         this.outdatedSoftwareService = outdatedSoftwareService;
+        this.hotfixPostureService = hotfixPostureService;
         this.installAuditService = installAuditService;
         this.clock = clock;
         this.claimTtl = Duration.ofSeconds(Math.max(30L, claimTtlSeconds));
@@ -172,7 +179,25 @@ public class EndpointAgentCommandService {
                 //    neither endpoint_command_results nor the outdated-software
                 //    tables persist anything.
                 effectiveDetails = outdatedSoftwarePayloadPolicy.sanitize(effectiveDetails);
-                // 4. Software validator (validate-only) on the sanitized form.
+                // 4. Hotfix-posture validator/sanitizer (AG-037). Runs on the
+                //    outdated-software-sanitized form and validates the
+                //    details.inventory.hotfixPosture block against the
+                //    contract redaction boundary (strict allowlist
+                //    projection, schemaVersion=1, KbId regex
+                //    {@code ^KB[0-9]{4,10}$}, count invariants
+                //    [installedTruncated/pendingTruncated semantics +
+                //    sum(pendingByCategory.count) == pendingTotalCount],
+                //    agent-health typed enums [ServiceState 4-state +
+                //    notificationLevel ~ '^[0-9]{1,4}$'], no secret
+                //    values, no forbidden MS-update fields
+                //    [productCode/msiGuid/title/installClient/etc.]). A
+                //    fail-closed reject (off-contract key, forbidden
+                //    secret, malformed KbId, broken count invariant)
+                //    aborts the result submit with 400 and rolls back
+                //    the transaction so neither endpoint_command_results
+                //    nor the hotfix-posture tables persist anything.
+                effectiveDetails = hotfixPosturePayloadPolicy.sanitize(effectiveDetails);
+                // 5. Software validator (validate-only) on the sanitized form.
                 inventoryPayloadPolicy.validate(effectiveDetails);
             } catch (IllegalArgumentException ex) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -271,6 +296,25 @@ public class EndpointAgentCommandService {
             if (EndpointOutdatedSoftwareService.hasOutdatedSoftwareBlock(effectiveDetails)) {
                 try {
                     outdatedSoftwareService.ingest(
+                            command.getDevice(), command, result, effectiveDetails);
+                } catch (IllegalArgumentException ex) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            ex.getMessage());
+                }
+            }
+            // AG-037 hotfix-posture ingest — same transaction, same
+            // sanitized effectiveDetails. Only runs when the sanitized
+            // payload actually carries a details.inventory.hotfixPosture
+            // block (opt-in; absent unless backend requested
+            // includeHotfixPosture=true). Dual idempotency (Codex
+            // 019e81fe iter-3 P1.1 + iter-4): targetless ON CONFLICT
+            // DO NOTHING + sequential winner lookup races both
+            // source_command_result_id and (tenant, device, hash)
+            // UNIQUEs transaction-cleanly. NO exception swallow — any
+            // policy-bypass IllegalStateException rolls full tx back.
+            if (EndpointHotfixPostureService.hasHotfixPostureBlock(effectiveDetails)) {
+                try {
+                    hotfixPostureService.ingest(
                             command.getDevice(), command, result, effectiveDetails);
                 } catch (IllegalArgumentException ex) {
                     throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
