@@ -15,9 +15,29 @@
     "schemaMode",
     "columns"
   ],
-  "anyOf": [
-    {"required": ["source"]},
-    {"required": ["sourceQuery"]}
+  "allOf": [
+    {
+      "description": "PR-D2.1b/d (ADR-0015, Codex thread 019e83bd iter-2 PARTIAL absorb): remote-http execution adapter exempts the report from the source/sourceQuery requirement, because data comes from another platform service over HTTP rather than the local MSSQL QueryEngine path. SQL kind (default) still requires either source (table name) or sourceQuery (custom SQL).",
+      "if": {
+        "required": ["execution"],
+        "properties": {
+          "execution": {
+            "type": "object",
+            "required": ["kind"],
+            "properties": {
+              "kind": {"const": "remote-http"}
+            }
+          }
+        }
+      },
+      "then": {},
+      "else": {
+        "anyOf": [
+          {"required": ["source"]},
+          {"required": ["sourceQuery"]}
+        ]
+      }
+    }
   ],
   "properties": {
     "contractVersion": {
@@ -118,9 +138,73 @@
       "description": "PR-D1a (Codex 019e800b): metadata-driven sidebar filter widget contract. When present, the dynamic-report factory renders these widgets in place of the legacy CompanyPicker + search pair. See docs/architecture/dynamic-report-migration-d0.md §4 for the per-module proposed entries.",
       "type": "array",
       "items": {"$ref": "#/$defs/FilterDefinition"}
+    },
+    "execution": {
+      "description": "PR-D2.1b/d (ADR-0015): report execution adapter configuration. When absent or kind=sql, the report uses the legacy MSSQL QueryEngine path with source/sourceQuery. When kind=remote-http, the report dispatches to a source-owned adapter (e.g. user-service, permission-service) over an allowlist'li HTTP call. See ExecutionConfig sub-schema for shape.",
+      "$ref": "#/$defs/ExecutionConfig"
     }
   },
   "$defs": {
+    "ExecutionConfig": {
+      "description": "PR-D2.1b/d (ADR-0015, Codex thread 019e83bd iter-2 PARTIAL absorb): execution dispatch metadata. kind='sql' (default, legacy MSSQL QueryEngine) or kind='remote-http' (source-owned adapter via WebClient + allowlist). When kind=remote-http, service/path/responseShape are required and source/sourceQuery on the parent report definition are exempt. When kind=sql, service/path/responseShape must be absent (mutual exclusion enforced).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "description": "Execution dispatch kind. Matches ExecutionKind enum wire values.",
+          "type": "string",
+          "enum": ["sql", "remote-http"]
+        },
+        "service": {
+          "description": "Remote service name (allowlist key, e.g. 'user-service', 'permission-service'). Required when kind=remote-http; must be absent when kind=sql.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "path": {
+          "description": "Remote service path (allowlist key, e.g. '/api/v1/users'). Required when kind=remote-http; must be absent when kind=sql.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^/[a-zA-Z0-9/_.-]+$"
+        },
+        "responseShape": {
+          "description": "Downstream response normalizer shape. Required when kind=remote-http; must be absent when kind=sql. 'paged-items-total' = {items, total, ...}; 'items-array' = flat array.",
+          "type": "string",
+          "enum": ["paged-items-total", "items-array"]
+        }
+      },
+      "allOf": [
+        {
+          "description": "remote-http: service/path/responseShape required",
+          "if": {
+            "required": ["kind"],
+            "properties": {"kind": {"const": "remote-http"}}
+          },
+          "then": {
+            "required": ["service", "path", "responseShape"]
+          }
+        },
+        {
+          "description": "sql: service/path/responseShape must be absent (mutual exclusion)",
+          "if": {
+            "required": ["kind"],
+            "properties": {"kind": {"const": "sql"}}
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["service"]},
+                {"required": ["path"]},
+                {"required": ["responseShape"]}
+              ]
+            }
+          }
+        }
+      ]
+    },
     "ColumnDefinition": {
       "type": "object",
       "additionalProperties": false,

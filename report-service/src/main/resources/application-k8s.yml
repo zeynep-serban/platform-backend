@@ -14,6 +14,20 @@ spring:
 # - Secondary PostgreSQL (platform metadata: custom_reports, alerts, schedules) — aşağıda
 # - WorkcubeMssqlConfig (PR #6) feature-flagged "ek" secondary qualifier opsiyonu olarak kalır
 report:
+  # PR-D2.1d (ADR-0015, Codex 019e83bd iter-2 PARTIAL absorb):
+  # remote-http executor allowlist seed for k8s profile. Cluster env
+  # has user-service routable via DNS at http://user-service:8089 (NOT
+  # 8082 — port verified against platform-k8s-gitops Service+Deployment).
+  # application.yml default keeps enabled: false (dev/test guard); the
+  # k8s profile flips it on when at least one allowlist entry exists.
+  remote-executor:
+    enabled: ${REPORT_REMOTE_EXECUTOR_ENABLED:true}
+    timeout: ${REPORT_REMOTE_EXECUTOR_TIMEOUT:5s}
+    allowlist:
+      - service: user-service
+        path: /api/v1/users
+        base-url: ${REPORT_REMOTE_EXECUTOR_USER_SERVICE_BASE_URL:http://user-service:8089}
+        request-shape: style-api-paged-v1
   postgres:
     url: ${REPORT_PG_URL:jdbc:postgresql://platform-pg.platform-system:5432/users}
     username: ${REPORT_PG_USERNAME:postgres}

@@ -276,6 +276,12 @@ public class ReportController {
             @RequestParam(defaultValue = "50") int pageSize,
             @RequestParam(required = false) String sort,
             @RequestParam(required = false) String advancedFilter,
+            // PR-D2.1d (ADR-0015, Codex 019e83bd iter-2 PARTIAL absorb): forward
+            // search query param to remote dispatch (RemoteRequestNormalizer
+            // already maps it to downstream `search=` param for style-api-paged-v1
+            // shape). SQL path ignores it because QueryEngine builds search
+            // server-side via advancedFilter; the flow stays a no-op for SQL.
+            @RequestParam(required = false) String search,
             @RequestHeader(value = CompanyHeaderScopeNarrower.HEADER_NAME, required = false) String companyHeader,
             @AuthenticationPrincipal Jwt jwt) {
 
@@ -297,7 +303,7 @@ public class ReportController {
         // legacy SQL QueryEngine path for SQL reports.
         if (def.isRemoteHttp()) {
             ResponseEntity<?> remoteResponse = dispatchRemoteFlat(
-                    def, page, pageSize, /* search */ null,
+                    def, page, pageSize, search,
                     agGridFilter, sortModel, jwt, companyHeader, key, authz);
             // The helper already builds a PagedResultDto on success and
             // a ReportQueryErrorDto on error; raw cast is safe because

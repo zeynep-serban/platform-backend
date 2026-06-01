@@ -1,0 +1,55 @@
+{
+  "contractVersion": 1,
+  "key": "users-overview",
+  "version": "1.0",
+  "title": "Kullanıcılar Genel Bakış",
+  "description": "Tüm kullanıcılar, rolleri, durumu, son giriş zamanı. PR-D2.1d ilk LIVE remote-http pure-grid module — user-service /api/v1/users üzerinden çalışır.",
+  "category": "Yönetim",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "row",
+    "scopeType": "company",
+    "schemaResolver": "remoteHttpCompanyHeader",
+    "reason": "User-service /api/v1/users tenant scoping is enforced via X-Company-Id header; report-service propagates the header verbatim through RemoteReportRequest.companyId. RemoteReportExecutor enforces fail-closed allowlist + JWT propagation. Tenant isolation contract is owned by the downstream user-service authz layer (PR-D2.1b/d ADR-0015)."
+  },
+  "execution": {
+    "kind": "remote-http",
+    "service": "user-service",
+    "path": "/api/v1/users",
+    "responseShape": "paged-items-total"
+  },
+  "routeSegment": "users-overview",
+  "sharedReportId": "users-overview",
+  "columns": [
+    {"field": "id", "headerName": "ID", "type": "number", "width": 80},
+    {"field": "name", "headerName": "Ad Soyad", "type": "text", "width": 200},
+    {"field": "email", "headerName": "E-posta", "type": "text", "width": 240},
+    {
+      "field": "role",
+      "headerName": "Rol",
+      "type": "badge",
+      "width": 120,
+      "variantMap": {"ADMIN": "danger", "USER": "muted"},
+      "labelMap": {"ADMIN": "shared.role.admin", "USER": "shared.role.user"},
+      "defaultVariant": "muted"
+    },
+    {
+      "field": "enabled",
+      "headerName": "Durum",
+      "type": "status",
+      "width": 100,
+      "statusMap": {
+        "true": {"variant": "success", "labelKey": "shared.status.active"},
+        "false": {"variant": "muted", "labelKey": "shared.status.inactive"}
+      },
+      "defaultVariant": "muted"
+    },
+    {"field": "createDate", "headerName": "Oluşturma", "type": "date", "format": "datetime", "width": 160},
+    {"field": "lastLogin", "headerName": "Son Giriş", "type": "date", "format": "datetime", "width": 160}
+  ],
+  "defaultSort": "createDate",
+  "defaultSortDirection": "DESC",
+  "access": {
+    "permission": "user-read"
+  }
+}

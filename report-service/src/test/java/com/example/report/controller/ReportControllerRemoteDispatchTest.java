@@ -118,7 +118,7 @@ class ReportControllerRemoteDispatchTest {
                             List.of(Map.of("EMPLOYEE_ID", 42)), 1L, 1, 50));
 
             ResponseEntity<?> resp = controller.getData(
-                    "hr-demografik", 1, 50, null, null, null, testJwt("admin"));
+                    "hr-demografik", 1, 50, null, null, null, null, testJwt("admin"));
 
             assertThat(resp.getStatusCode().value()).isEqualTo(200);
             verify(queryEngine).executeQuery(any(), any(), any(), any(), eq(1), eq(50));
@@ -136,7 +136,7 @@ class ReportControllerRemoteDispatchTest {
                             List.of(Map.of("id", 1L, "email", "ali@example.com")), 17L));
 
             ResponseEntity<?> resp = controller.getData(
-                    "users-overview", 1, 50, null, null, null, testJwt("admin"));
+                    "users-overview", 1, 50, null, null, null, null, testJwt("admin"));
 
             assertThat(resp.getStatusCode().value()).isEqualTo(200);
             PagedResultDto<?> body = (PagedResultDto<?>) resp.getBody();
@@ -157,7 +157,7 @@ class ReportControllerRemoteDispatchTest {
                     "{\"email\":{\"type\":\"startsWith\",\"filter\":\"admin\"}}";
 
             ResponseEntity<?> resp = controller.getData(
-                    "users-overview", 1, 50, null, unsupported, null, testJwt("admin"));
+                    "users-overview", 1, 50, null, unsupported, null, null, testJwt("admin"));
 
             assertThat(resp.getStatusCode().value()).isEqualTo(400);
             ReportQueryErrorDto err = (ReportQueryErrorDto) resp.getBody();
@@ -177,7 +177,7 @@ class ReportControllerRemoteDispatchTest {
                     .thenThrow(new RemoteAllowlistException("user-service", "/api/v1/users"));
 
             ResponseEntity<?> resp = controller.getData(
-                    "users-overview", 1, 50, null, null, null, testJwt("admin"));
+                    "users-overview", 1, 50, null, null, null, null, testJwt("admin"));
 
             assertThat(resp.getStatusCode().value()).isEqualTo(503);
             ReportQueryErrorDto err = (ReportQueryErrorDto) resp.getBody();
@@ -194,7 +194,7 @@ class ReportControllerRemoteDispatchTest {
                     .thenThrow(new RemoteAuthException("user-service", "/api/v1/users", null));
 
             ResponseEntity<?> resp = controller.getData(
-                    "users-overview", 1, 50, null, null, null, testJwt("admin"));
+                    "users-overview", 1, 50, null, null, null, null, testJwt("admin"));
 
             assertThat(resp.getStatusCode().value()).isEqualTo(401);
             ReportQueryErrorDto err = (ReportQueryErrorDto) resp.getBody();
@@ -211,7 +211,7 @@ class ReportControllerRemoteDispatchTest {
                     .thenThrow(new RemoteAuthzException("user-service", "/api/v1/users", null));
 
             ResponseEntity<?> resp = controller.getData(
-                    "users-overview", 1, 50, null, null, null, testJwt("admin"));
+                    "users-overview", 1, 50, null, null, null, null, testJwt("admin"));
 
             assertThat(resp.getStatusCode().value()).isEqualTo(403);
             ReportQueryErrorDto err = (ReportQueryErrorDto) resp.getBody();
@@ -230,12 +230,36 @@ class ReportControllerRemoteDispatchTest {
                             "downstream timeout after PT5S"));
 
             ResponseEntity<?> resp = controller.getData(
-                    "users-overview", 1, 50, null, null, null, testJwt("admin"));
+                    "users-overview", 1, 50, null, null, null, null, testJwt("admin"));
 
             assertThat(resp.getStatusCode().value()).isEqualTo(502);
             ReportQueryErrorDto err = (ReportQueryErrorDto) resp.getBody();
             assertThat(err.code()).isEqualTo("REMOTE_EXECUTION_FAILED");
             assertThat(err.message()).contains("timeout");
+        }
+
+        @Test
+        @DisplayName("PR-D2.1d: search query param forwarded to RemoteReportRequest")
+        void searchQueryParamForwardedToRemote() {
+            // PR-D2.1d (ADR-0015, Codex 019e83bd iter-2 PARTIAL absorb):
+            // /data search query param must reach RemoteReportRequest.search()
+            // so the downstream user-service /api/v1/users gets `search=`.
+            stubAuthz(true, List.of());
+            ReportDefinition def = remoteReport("users-overview");
+            when(registry.get("users-overview")).thenReturn(Optional.of(def));
+            when(remoteReportExecutor.execute(any(), any()))
+                    .thenReturn(new RemoteReportResult(List.of(), 0L));
+
+            ResponseEntity<?> resp = controller.getData(
+                    "users-overview", 1, 50, null, null, "ali", null, testJwt("admin"));
+
+            assertThat(resp.getStatusCode().value()).isEqualTo(200);
+            // Capture the actual RemoteReportRequest the controller built
+            // and assert search() carries the query param verbatim.
+            org.mockito.ArgumentCaptor<RemoteReportRequest> captor =
+                    org.mockito.ArgumentCaptor.forClass(RemoteReportRequest.class);
+            verify(remoteReportExecutor).execute(any(), captor.capture());
+            assertThat(captor.getValue().search()).isEqualTo("ali");
         }
     }
 

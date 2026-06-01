@@ -77,9 +77,12 @@ class ReportDefinitionContractTest {
     }
 
     @Test
-    @DisplayName("Aggregate: 32 reports discovered (drift guard)")
+    @DisplayName("Aggregate: 33 reports discovered (drift guard) — PR-D2.1d users-overview added")
     void aggregate_thirtyTwoReportsDiscovered() {
-        assertThat(CACHED.reportCount()).isEqualTo(32);
+        // PR-D2.1d (ADR-0015, Codex 019e83bd iter-2 PARTIAL absorb):
+        // bumped 32 → 33 for users-overview (first LIVE remote-http report,
+        // execution.kind=remote-http, service=user-service, path=/api/v1/users).
+        assertThat(CACHED.reportCount()).isEqualTo(33);
     }
 
     @Test
@@ -117,9 +120,10 @@ class ReportDefinitionContractTest {
     @DisplayName("ReportRegistry: 32 reports loadable + exceptions.json excluded")
     void reportRegistry_loadableAcceptanceTest() {
         // Codex iter-3 §1c absorb (carry-forward to 1e): runtime registry must
-        // load all 32 known keys; exceptions.json is excluded as a non-report
+        // load all 33 known keys; exceptions.json is excluded as a non-report
         // (handled by ExceptionsRegistry; ReportRegistry log-swallows the
         // bind failure since it doesn't match ReportDefinition shape).
+        // PR-D2.1d: bumped 32 → 33 for users-overview (first remote-http report).
         // Test uses classpath*:reports/ (multi-entry enumeration) because
         // Surefire fork classpath includes both target/classes + target/test-classes.
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
@@ -127,10 +131,11 @@ class ReportDefinitionContractTest {
         registry.loadDefinitions();
 
         assertThat(registry.getAll())
-                .as("Runtime registry must load 32 reports")
-                .hasSize(32);
+                .as("Runtime registry must load 33 reports")
+                .hasSize(33);
         assertThat(registry.get("hr-personel-listesi")).isPresent();
         assertThat(registry.get("fin-fatura-satirlari")).isPresent();
+        assertThat(registry.get("users-overview")).isPresent();  // PR-D2.1d
         assertThat(registry.get("exceptions")).isEmpty();  // excluded
     }
 
@@ -472,8 +477,9 @@ class ReportDefinitionContractTest {
     }
 
     static Stream<String> knownReportKeys() {
-        // Drift guard: exact 32-key list matches registry inventory at
+        // Drift guard: exact 33-key list matches registry inventory at
         // commit-time. New report → add here; missing report → fail.
+        // PR-D2.1d: added "users-overview" (first remote-http report).
         return Stream.of(
                 "fin-alacak-yaslandirma", "fin-banka-hareketleri", "fin-borc-yaslandirma",
                 "fin-butce-gerceklesen", "fin-cari-hareketler", "fin-cari-islemler",
@@ -485,7 +491,8 @@ class ReportDefinitionContractTest {
                 "hr-bordro-detay", "hr-compensation-detay", "hr-demografik-yapi",
                 "hr-egitim-katilim", "hr-giris-cikis", "hr-izin-raporu",
                 "hr-maas-gecmisi", "hr-maas-raporu", "hr-personel-listesi",
-                "hr-puantaj", "satis-ozet", "stok-durum");
+                "hr-puantaj", "satis-ozet", "stok-durum",
+                "users-overview");
     }
 
     private static void writeArtifacts(ContractGateSummary summary) throws IOException {
