@@ -411,6 +411,132 @@ class HotfixPosturePayloadPolicyTest {
         assertThat(((String) projectedErrors.get(0).get("summary")).length()).isLessThanOrEqualTo(200);
     }
 
+    // ------------------------------------------------------------------
+    // 9. Agent-side `omitempty` shape (Codex 019e822b post-impl P1)
+    // ------------------------------------------------------------------
+    // The merged platform-agent (PR #45) marshals these fields with
+    // `omitempty`: installedHotfixes, installedTruncated, pendingUpdates,
+    // pendingByCategory, pendingTruncated, probeErrors. Real Windows
+    // clean-posture + non-Windows stub payloads omit these when empty/
+    // false. The backend MUST accept the missing keys and normalize
+    // them on the projection.
+
+    @Test
+    void agentCleanNoPendingOmitemptyShapeSurvivesSanitize() {
+        Map<String, Object> hp = new LinkedHashMap<>();
+        hp.put("schemaVersion", 1);
+        hp.put("supported", true);
+        hp.put("probeComplete", true);
+        hp.put("collectedAt", "2026-06-01T12:34:56Z");
+        hp.put("probeDurationMs", 410);
+        hp.put("installedSourceUsed", "wua");
+        // installedHotfixes ABSENT (omitempty empty list).
+        hp.put("installedCount", 0);
+        // installedTruncated ABSENT (omitempty false).
+        hp.put("pendingSourceUsed", "wua");
+        // pendingUpdates ABSENT (omitempty empty list).
+        // pendingByCategory ABSENT (omitempty empty list).
+        hp.put("pendingTotalCount", 0);
+        // pendingTruncated ABSENT (omitempty false).
+        hp.put("healthSourceUsed", "composite");
+        Map<String, Object> ah = new LinkedHashMap<>();
+        ah.put("wuaServiceState", "RUNNING");
+        ah.put("bitsServiceState", "RUNNING");
+        ah.put("lastDetectAt", "2026-05-31T08:00:00Z");
+        ah.put("lastInstallAt", "2026-05-30T22:00:00Z");
+        ah.put("autoUpdatePolicyEnabled", true);
+        ah.put("autoUpdateEffectiveEnabled", true);
+        ah.put("notificationLevel", "4");
+        hp.put("agentHealth", ah);
+        // probeErrors ABSENT (omitempty empty list).
+
+        assertThatCode(() -> policy.sanitize(wrap(hp))).doesNotThrowAnyException();
+        Map<String, Object> sanitized = policy.sanitize(wrap(hp));
+        Map<String, Object> projected = hpOf(sanitized);
+        // Normalized values: empty list + false.
+        assertThat((List<?>) projected.get("installedHotfixes")).isEmpty();
+        assertThat(projected.get("installedTruncated")).isEqualTo(false);
+        assertThat((List<?>) projected.get("pendingUpdates")).isEmpty();
+        assertThat((List<?>) projected.get("pendingByCategory")).isEmpty();
+        assertThat(projected.get("pendingTruncated")).isEqualTo(false);
+    }
+
+    @Test
+    void unsupportedNonWindowsOmitemptyShapeSurvivesSanitize() {
+        // Non-Windows stub: supported=false, probeComplete=false, source
+        // attributions = "none", agentHealth UNKNOWN. Empty lists omitted
+        // via `omitempty`. Persisted fail-closed as evidence (NOT
+        // rejected as malformed).
+        Map<String, Object> hp = new LinkedHashMap<>();
+        hp.put("schemaVersion", 1);
+        hp.put("supported", false);
+        hp.put("probeComplete", false);
+        hp.put("collectedAt", "2026-06-01T12:34:56Z");
+        hp.put("probeDurationMs", 0);
+        hp.put("installedSourceUsed", "none");
+        hp.put("installedCount", 0);
+        hp.put("pendingSourceUsed", "none");
+        hp.put("pendingTotalCount", 0);
+        hp.put("healthSourceUsed", "none");
+        Map<String, Object> ah = new LinkedHashMap<>();
+        ah.put("wuaServiceState", "UNKNOWN");
+        ah.put("bitsServiceState", "UNKNOWN");
+        hp.put("agentHealth", ah);
+        // probeErrors PRESENT (the stub emits a single UNSUPPORTED_PLATFORM
+        // error per the agent contract).
+        Map<String, Object> err = new LinkedHashMap<>();
+        err.put("source", "none");
+        err.put("code", "UNSUPPORTED_PLATFORM");
+        hp.put("probeErrors", new ArrayList<>(List.of(err)));
+
+        assertThatCode(() -> policy.sanitize(wrap(hp))).doesNotThrowAnyException();
+        Map<String, Object> sanitized = policy.sanitize(wrap(hp));
+        Map<String, Object> projected = hpOf(sanitized);
+        assertThat(projected.get("supported")).isEqualTo(false);
+        assertThat(projected.get("probeComplete")).isEqualTo(false);
+        assertThat(projected.get("installedSourceUsed")).isEqualTo("none");
+        assertThat(projected.get("pendingSourceUsed")).isEqualTo("none");
+        assertThat(projected.get("healthSourceUsed")).isEqualTo("none");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> errors = (List<Map<String, Object>>) projected.get("probeErrors");
+        assertThat(errors).hasSize(1);
+        assertThat(errors.get(0).get("code")).isEqualTo("UNSUPPORTED_PLATFORM");
+    }
+
+    @Test
+    void missingTruncationFlagsNormalizeToFalse() {
+        // pending PRESENT but pendingTruncated omitted (clean
+        // no-truncation default). pendingTotalCount matches list size.
+        Map<String, Object> hp = goldenWithPending();
+        hp.remove("pendingTruncated");
+        hp.remove("installedTruncated");
+        Map<String, Object> sanitized = policy.sanitize(wrap(hp));
+        Map<String, Object> projected = hpOf(sanitized);
+        assertThat(projected.get("pendingTruncated")).isEqualTo(false);
+        assertThat(projected.get("installedTruncated")).isEqualTo(false);
+    }
+
+    @Test
+    void nonZeroPendingTotalWithMissingByCategoryStillRejects() {
+        // Invariant guard: pendingByCategory absent (normalize to empty)
+        // + pendingTotalCount > 0 → sum(0) != totalCount → REJECT.
+        Map<String, Object> hp = new LinkedHashMap<>();
+        hp.put("schemaVersion", 1);
+        hp.put("supported", true);
+        hp.put("probeComplete", true);
+        hp.put("installedSourceUsed", "wua");
+        hp.put("installedCount", 0);
+        hp.put("pendingSourceUsed", "wua");
+        hp.put("pendingTotalCount", 5); // claims 5 pending but list/rollup absent
+        hp.put("healthSourceUsed", "composite");
+        Map<String, Object> ah = new LinkedHashMap<>();
+        ah.put("wuaServiceState", "RUNNING");
+        ah.put("bitsServiceState", "RUNNING");
+        hp.put("agentHealth", ah);
+        assertThatThrownBy(() -> policy.sanitize(wrap(hp)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
     @Test
     void absentHotfixPostureBlockIsValidOptOut() {
         // No hotfixPosture at all — service ingest hook gates with

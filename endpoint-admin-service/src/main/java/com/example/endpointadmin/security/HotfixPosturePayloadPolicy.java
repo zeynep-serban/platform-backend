@@ -127,20 +127,30 @@ public class HotfixPosturePayloadPolicy {
             "probeErrors"
     );
 
-    /** Top-level required (Codex iter-3 freeze test alignment). */
+    /**
+     * Top-level required (Codex post-impl 019e822b P1: aligned to merged
+     * agent `omitempty` wire shape — `installedHotfixes`,
+     * `installedTruncated`, `pendingUpdates`, `pendingByCategory`,
+     * `pendingTruncated`, `probeErrors` are agent-side `omitempty`
+     * (platform-agent PR #45 `internal/inventory/hotfix_posture.go:327`).
+     * Clean Windows posture + non-Windows `supported=false` stub legitimately
+     * omit empties; required-list rejection would 400 normal traffic).
+     *
+     * <p>Missing omitempty fields are NORMALIZED on the policy projection:
+     * arrays → empty list; truncation bools → false. The invariants
+     * (`installedCount == installedHotfixes.size` when not truncated;
+     * `sum(pendingByCategory.count) == pendingTotalCount`) still catch
+     * malformed payloads where the count is non-zero but the list is
+     * absent.
+     */
     private static final Set<String> TOP_REQUIRED_KEYS = Set.of(
             "schemaVersion",
             "supported",
             "probeComplete",
             "installedSourceUsed",
-            "installedHotfixes",
             "installedCount",
-            "installedTruncated",
             "pendingSourceUsed",
-            "pendingUpdates",
-            "pendingByCategory",
             "pendingTotalCount",
-            "pendingTruncated",
             "healthSourceUsed",
             "agentHealth"
     );
@@ -337,11 +347,16 @@ public class HotfixPosturePayloadPolicy {
                             + " at " + path + ".schemaVersion (expected " + ACCEPTED_SCHEMA_VERSIONS + ")");
         }
 
-        // 4. Boolean fields.
+        // 4. Boolean fields. Required ones (supported/probeComplete) must
+        //    be Boolean; truncation flags are agent-side `omitempty` so we
+        //    NORMALIZE missing/null to `false` (matches the clean Windows
+        //    no-truncation default).
         requireBoolean(hp.get("supported"), path + ".supported");
         requireBoolean(hp.get("probeComplete"), path + ".probeComplete");
-        requireBoolean(hp.get("installedTruncated"), path + ".installedTruncated");
-        requireBoolean(hp.get("pendingTruncated"), path + ".pendingTruncated");
+        boolean installedTruncNormalized = readBooleanOrFalse(
+                hp.get("installedTruncated"), path + ".installedTruncated");
+        boolean pendingTruncNormalized = readBooleanOrFalse(
+                hp.get("pendingTruncated"), path + ".pendingTruncated");
 
         // 5. Source enums.
         String installedSrc = requireEnum(hp.get("installedSourceUsed"),
@@ -376,12 +391,18 @@ public class HotfixPosturePayloadPolicy {
         }
 
         // 7. installedHotfixes — array, max 512, each row allowlist + KB regex.
-        Object installedRaw = hp.get("installedHotfixes");
+        //    `installedHotfixes` is agent-side `omitempty`: missing/null
+        //    normalizes to an empty list (matches the wire's clean no-
+        //    installed-hotfix default).
+        Object installedRaw = hp.containsKey("installedHotfixes")
+                ? hp.get("installedHotfixes") : new ArrayList<>();
+        if (installedRaw == null) {
+            installedRaw = new ArrayList<>();
+        }
         if (!(installedRaw instanceof List<?> installedList)) {
             throw new IllegalArgumentException(
                     "Expected array at " + path + ".installedHotfixes but got "
-                            + (installedRaw == null ? "null"
-                                    : installedRaw.getClass().getSimpleName()));
+                            + installedRaw.getClass().getSimpleName());
         }
         if (installedList.size() > MAX_INSTALLED) {
             throw new IllegalArgumentException(
@@ -401,12 +422,18 @@ public class HotfixPosturePayloadPolicy {
         }
 
         // 8. pendingUpdates — array, max 20, each row allowlist + enum.
-        Object pendingRaw = hp.get("pendingUpdates");
+        //    `pendingUpdates` is agent-side `omitempty`: missing/null
+        //    normalizes to an empty list. The count/cap invariants below
+        //    still catch a non-zero `pendingTotalCount` with absent list.
+        Object pendingRaw = hp.containsKey("pendingUpdates")
+                ? hp.get("pendingUpdates") : new ArrayList<>();
+        if (pendingRaw == null) {
+            pendingRaw = new ArrayList<>();
+        }
         if (!(pendingRaw instanceof List<?> pendingList)) {
             throw new IllegalArgumentException(
                     "Expected array at " + path + ".pendingUpdates but got "
-                            + (pendingRaw == null ? "null"
-                                    : pendingRaw.getClass().getSimpleName()));
+                            + pendingRaw.getClass().getSimpleName());
         }
         if (pendingList.size() > MAX_PENDING) {
             throw new IllegalArgumentException(
@@ -426,13 +453,19 @@ public class HotfixPosturePayloadPolicy {
         }
 
         // 9. pendingByCategory — array, each row allowlist + unique
-        //    category + sum invariant.
-        Object byCategoryRaw = hp.get("pendingByCategory");
+        //    category + sum invariant. Agent-side `omitempty`:
+        //    missing/null normalizes to an empty list. The sum invariant
+        //    (sum == pendingTotalCount) still catches a non-zero
+        //    `pendingTotalCount` with absent rollup.
+        Object byCategoryRaw = hp.containsKey("pendingByCategory")
+                ? hp.get("pendingByCategory") : new ArrayList<>();
+        if (byCategoryRaw == null) {
+            byCategoryRaw = new ArrayList<>();
+        }
         if (!(byCategoryRaw instanceof List<?> byCategoryList)) {
             throw new IllegalArgumentException(
                     "Expected array at " + path + ".pendingByCategory but got "
-                            + (byCategoryRaw == null ? "null"
-                                    : byCategoryRaw.getClass().getSimpleName()));
+                            + byCategoryRaw.getClass().getSimpleName());
         }
         List<Object> projectedByCategory = new ArrayList<>();
         Set<String> seenCategories = new java.util.HashSet<>();
@@ -462,29 +495,28 @@ public class HotfixPosturePayloadPolicy {
                             + " != pendingTotalCount=" + pendingTotalCount);
         }
 
-        // 10. Count/cap invariants (Codex iter-3 P1.3).
-        boolean installedTrunc = (Boolean) hp.get("installedTruncated");
-        if (!installedTrunc && installedCount != projectedInstalled.size()) {
+        // 10. Count/cap invariants (Codex iter-3 P1.3). Truncation flags
+        //     come from the normalized values (omitempty → false).
+        if (!installedTruncNormalized && installedCount != projectedInstalled.size()) {
             throw new IllegalArgumentException(
                     "installedTruncated=false but installedCount=" + installedCount
                             + " != installedHotfixes.size=" + projectedInstalled.size()
                             + " at " + path);
         }
-        if (installedTrunc && installedCount < projectedInstalled.size()) {
+        if (installedTruncNormalized && installedCount < projectedInstalled.size()) {
             throw new IllegalArgumentException(
                     "installedTruncated=true but installedCount=" + installedCount
                             + " < installedHotfixes.size=" + projectedInstalled.size()
                             + " (pre-truncation total must be >= persisted children) at " + path);
         }
 
-        boolean pendingTrunc = (Boolean) hp.get("pendingTruncated");
-        if (!pendingTrunc && pendingTotalCount != projectedPending.size()) {
+        if (!pendingTruncNormalized && pendingTotalCount != projectedPending.size()) {
             throw new IllegalArgumentException(
                     "pendingTruncated=false but pendingTotalCount=" + pendingTotalCount
                             + " != pendingUpdates.size=" + projectedPending.size()
                             + " at " + path);
         }
-        if (pendingTrunc && pendingTotalCount < projectedPending.size()) {
+        if (pendingTruncNormalized && pendingTotalCount < projectedPending.size()) {
             throw new IllegalArgumentException(
                     "pendingTruncated=true but pendingTotalCount=" + pendingTotalCount
                             + " < pendingUpdates.size=" + projectedPending.size()
@@ -537,12 +569,12 @@ public class HotfixPosturePayloadPolicy {
         out.put("installedSourceUsed", installedSrc);
         out.put("installedHotfixes", projectedInstalled);
         out.put("installedCount", (int) installedCount);
-        out.put("installedTruncated", installedTrunc);
+        out.put("installedTruncated", installedTruncNormalized);
         out.put("pendingSourceUsed", pendingSrc);
         out.put("pendingUpdates", projectedPending);
         out.put("pendingByCategory", projectedByCategory);
         out.put("pendingTotalCount", (int) pendingTotalCount);
-        out.put("pendingTruncated", pendingTrunc);
+        out.put("pendingTruncated", pendingTruncNormalized);
         out.put("healthSourceUsed", healthSrc);
         out.put("agentHealth", projectedAgentHealth);
         if (projectedProbeErrors != null) {
@@ -834,6 +866,21 @@ public class HotfixPosturePayloadPolicy {
         throw new IllegalArgumentException(
                 "Expected boolean at " + path + " but got "
                         + (value == null ? "null" : value.getClass().getSimpleName()));
+    }
+
+    /**
+     * Read a boolean field permitting missing/null (omitempty wire shape)
+     * → defaults to {@code false}. Used for AG-037 truncation flags
+     * which the agent marshals with `omitempty` (Codex 019e822b P1).
+     * A present non-null non-Boolean value is still REJECTED loud (a
+     * malformed type cannot silently become false).
+     */
+    private static boolean readBooleanOrFalse(Object value, String path) {
+        if (value == null) return false;
+        if (value instanceof Boolean b) return b;
+        throw new IllegalArgumentException(
+                "Expected boolean or null at " + path + " but got "
+                        + value.getClass().getSimpleName());
     }
 
     private static void requireBooleanOrNull(Object value, String path) {
