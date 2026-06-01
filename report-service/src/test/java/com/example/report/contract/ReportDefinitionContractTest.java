@@ -7,6 +7,7 @@ import com.example.report.contract.report.ContractViolation;
 import com.example.report.registry.ColumnDefinition;
 import com.example.report.registry.FilterDefinition;
 import com.example.report.registry.FilterKind;
+import com.example.report.registry.FilterOptionEntry;
 import com.example.report.registry.ReportDefinition;
 import com.example.report.registry.ReportRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -330,6 +331,134 @@ class ReportDefinitionContractTest {
                 .contains("ROW_NUMBER() OVER (PARTITION BY eio.EMPLOYEE_ID")
                 .contains("N'Belirtilmemiş'")
                 .contains("N'Kadın'");
+    }
+
+    @Test
+    @DisplayName("hr-compensation-detay: PR-D3a metadata-prep contract")
+    void hrCompensationDetay_PRD3aContract() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        ReportRegistry registry = new ReportRegistry(mapper, "classpath*:reports/");
+        registry.loadDefinitions();
+
+        ReportDefinition def = registry.get("hr-compensation-detay").orElseThrow();
+
+        // Column count + exact order pinned (19 columns).
+        assertThat(def.columns().stream().map(ColumnDefinition::field).toList())
+                .containsExactly(
+                        "EMPLOYEE_ID", "FULL_NAME", "DEPARTMENT_NAME", "POSITION_NAME",
+                        "BRANCH_NAME", "COMPANY_NAME", "COLLAR_TYPE", "GENDER",
+                        "EDUCATION", "TENURE_YEARS", "AGE", "GROSS_SALARY",
+                        "NET_SALARY", "TOTAL_EMPLOYER_COST", "SSK_EMPLOYER",
+                        "INCOME_TAX", "OVERTIME_PAY", "SEVERANCE_AMOUNT", "IS_CRITICAL");
+
+        // PR-D3a column widening per Codex thread 019e8282 iter-3 AGREE.
+        ColumnDefinition fullName = def.columns().stream()
+                .filter(c -> "FULL_NAME".equals(c.field())).findFirst().orElseThrow();
+        assertThat(fullName.type()).isEqualTo("bold-text");
+
+        // COLLAR_TYPE: badge + variantMap (static parity: 1=warning, 2=info) +
+        // labelMap i18n keys + defaultVariant=muted.
+        ColumnDefinition collarType = def.columns().stream()
+                .filter(c -> "COLLAR_TYPE".equals(c.field())).findFirst().orElseThrow();
+        assertThat(collarType.type()).isEqualTo("badge");
+        assertThat(collarType.variantMap())
+                .containsEntry("1", "warning")
+                .containsEntry("2", "info");
+        assertThat(collarType.labelMap())
+                .containsEntry("1", "reports.hrCompensation.collarType.blue")
+                .containsEntry("2", "reports.hrCompensation.collarType.white");
+        assertThat(collarType.defaultVariant()).isEqualTo("muted");
+
+        // GENDER: badge + static parity (0=Kadın=primary, 1=Erkek=info).
+        ColumnDefinition gender = def.columns().stream()
+                .filter(c -> "GENDER".equals(c.field())).findFirst().orElseThrow();
+        assertThat(gender.type()).isEqualTo("badge");
+        assertThat(gender.variantMap())
+                .containsEntry("0", "primary")
+                .containsEntry("1", "info");
+        assertThat(gender.labelMap())
+                .containsEntry("0", "reports.hrCompensation.gender.female")
+                .containsEntry("1", "reports.hrCompensation.gender.male");
+        assertThat(gender.defaultVariant()).isEqualTo("muted");
+
+        // EDUCATION stays text per D0 §2.7 lowest-risk scope.
+        ColumnDefinition education = def.columns().stream()
+                .filter(c -> "EDUCATION".equals(c.field())).findFirst().orElseThrow();
+        assertThat(education.type()).isEqualTo("text");
+
+        // TENURE_YEARS: number + suffix "yıl" (parity with hr-demografik).
+        ColumnDefinition tenureYears = def.columns().stream()
+                .filter(c -> "TENURE_YEARS".equals(c.field())).findFirst().orElseThrow();
+        assertThat(tenureYears.suffix()).isEqualTo("yıl");
+
+        // 7 salary columns: currency + TRY + decimals=0 + sensitive=true.
+        java.util.List<String> currencyFields = java.util.List.of(
+                "GROSS_SALARY", "NET_SALARY", "TOTAL_EMPLOYER_COST",
+                "SSK_EMPLOYER", "INCOME_TAX", "OVERTIME_PAY", "SEVERANCE_AMOUNT");
+        for (String field : currencyFields) {
+            ColumnDefinition col = def.columns().stream()
+                    .filter(c -> field.equals(c.field())).findFirst().orElseThrow();
+            assertThat(col.type()).as("%s.type", field).isEqualTo("currency");
+            assertThat(col.currencyCode()).as("%s.currencyCode", field).isEqualTo("TRY");
+            assertThat(col.decimals()).as("%s.decimals", field).isEqualTo(0);
+            assertThat(col.sensitive()).as("%s.sensitive", field).isTrue();
+        }
+
+        // IS_CRITICAL boolean (schema-safe; trueLabelKey/falseLabelKey
+        // NOT in backend contract per additionalProperties=false).
+        ColumnDefinition isCritical = def.columns().stream()
+                .filter(c -> "IS_CRITICAL".equals(c.field())).findFirst().orElseThrow();
+        assertThat(isCritical.type()).isEqualTo("boolean");
+
+        // Identity carry — preserves favorites + saved-filter scope for
+        // the PR-D2b hybrid wrapper when the dynamic catalog fuses with
+        // the static hr-compensation-report module at route `hr-compensation`.
+        assertThat(def.routeSegment()).isEqualTo("hr-compensation");
+        assertThat(def.sharedReportId()).isEqualTo("hr-compensation");
+
+        // defaultSort preserved (UX policy unchanged in D3a).
+        assertThat(def.defaultSort()).isEqualTo("GROSS_SALARY");
+        assertThat(def.defaultSortDirection()).isEqualTo("DESC");
+
+        // Access preserved (CRITICAL — auth/sensitive salary surface).
+        assertThat(def.access().permission()).isEqualTo("reports.hr-compensation-detay.view");
+        assertThat(def.access().reportGroup()).isEqualTo("HR_REPORTS");
+        assertThat(def.access().columnRestrictions())
+                .containsKey("reports.hr.salary-view");
+        assertThat(def.access().columnRestrictions().get("reports.hr.salary-view"))
+                .containsExactly("GROSS_SALARY", "NET_SALARY", "TOTAL_EMPLOYER_COST",
+                                 "SSK_EMPLOYER", "INCOME_TAX", "OVERTIME_PAY", "SEVERANCE_AMOUNT");
+
+        // filterDefinitions: 6 entries ordered, aligned with HrCompensationFilters.
+        assertThat(def.filterDefinitions()).hasSize(6);
+        assertThat(def.filterDefinitions().stream().map(FilterDefinition::key).toList())
+                .containsExactly("search", "department", "company",
+                                 "collarType", "gender", "education");
+
+        FilterDefinition search = def.filterDefinitions().get(0);
+        assertThat(search.kind()).isEqualTo(FilterKind.TEXT_SEARCH);
+        assertThat(search.targetField()).isEqualTo("FULL_NAME");
+
+        FilterDefinition collarFilter = def.filterDefinitions().get(3);
+        assertThat(collarFilter.kind()).isEqualTo(FilterKind.ENUM_SELECT);
+        assertThat(collarFilter.targetField()).isEqualTo("COLLAR_TYPE");
+        assertThat(collarFilter.options()).hasSize(2);
+        assertThat(collarFilter.options().get(0).value()).isEqualTo("1");
+        assertThat(collarFilter.options().get(0).label()).isEqualTo("Mavi Yakalı");
+
+        FilterDefinition genderFilter = def.filterDefinitions().get(4);
+        assertThat(genderFilter.options()).hasSize(2);
+
+        // EDUCATION enum-select with 10 options, ASCII values matching SQL
+        // CASE output (Codex iter-2: SQL transliteration is ASCII, not Unicode).
+        FilterDefinition educationFilter = def.filterDefinitions().get(5);
+        assertThat(educationFilter.kind()).isEqualTo(FilterKind.ENUM_SELECT);
+        assertThat(educationFilter.targetField()).isEqualTo("EDUCATION");
+        assertThat(educationFilter.options()).hasSize(10);
+        assertThat(educationFilter.options().stream().map(FilterOptionEntry::value).toList())
+                .containsExactly("Ilkokul", "Ortaokul", "Lise", "Meslek Lisesi",
+                                 "Onlisans", "Lisans", "Muhendislik", "Fakulte",
+                                 "Yuksek Lisans", "Doktora");
     }
 
     @ParameterizedTest(name = "{0}")

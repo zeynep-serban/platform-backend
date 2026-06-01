@@ -25,7 +25,7 @@
     {
       "field": "FULL_NAME",
       "headerName": "Ad Soyad",
-      "type": "text",
+      "type": "bold-text",
       "width": 180,
       "sensitive": false
     },
@@ -60,16 +60,34 @@
     {
       "field": "COLLAR_TYPE",
       "headerName": "Yaka Tipi",
-      "type": "number",
+      "type": "badge",
       "width": 90,
-      "sensitive": false
+      "sensitive": false,
+      "variantMap": {
+        "1": "warning",
+        "2": "info"
+      },
+      "labelMap": {
+        "1": "reports.hrCompensation.collarType.blue",
+        "2": "reports.hrCompensation.collarType.white"
+      },
+      "defaultVariant": "muted"
     },
     {
       "field": "GENDER",
       "headerName": "Cinsiyet",
-      "type": "number",
+      "type": "badge",
       "width": 80,
-      "sensitive": false
+      "sensitive": false,
+      "variantMap": {
+        "0": "primary",
+        "1": "info"
+      },
+      "labelMap": {
+        "0": "reports.hrCompensation.gender.female",
+        "1": "reports.hrCompensation.gender.male"
+      },
+      "defaultVariant": "muted"
     },
     {
       "field": "EDUCATION",
@@ -83,7 +101,8 @@
       "headerName": "Kidem (Yil)",
       "type": "number",
       "width": 90,
-      "sensitive": false
+      "sensitive": false,
+      "suffix": "yıl"
     },
     {
       "field": "AGE",
@@ -95,62 +114,148 @@
     {
       "field": "GROSS_SALARY",
       "headerName": "Brut Maas",
-      "type": "number",
+      "type": "currency",
       "width": 120,
-      "sensitive": true
+      "sensitive": true,
+      "currencyCode": "TRY",
+      "decimals": 0
     },
     {
       "field": "NET_SALARY",
       "headerName": "Net Maas",
-      "type": "number",
+      "type": "currency",
       "width": 120,
-      "sensitive": true
+      "sensitive": true,
+      "currencyCode": "TRY",
+      "decimals": 0
     },
     {
       "field": "TOTAL_EMPLOYER_COST",
       "headerName": "Isveren Maliyeti",
-      "type": "number",
+      "type": "currency",
       "width": 130,
-      "sensitive": true
+      "sensitive": true,
+      "currencyCode": "TRY",
+      "decimals": 0
     },
     {
       "field": "SSK_EMPLOYER",
       "headerName": "SGK Isveren",
-      "type": "number",
+      "type": "currency",
       "width": 110,
-      "sensitive": true
+      "sensitive": true,
+      "currencyCode": "TRY",
+      "decimals": 0
     },
     {
       "field": "INCOME_TAX",
       "headerName": "Gelir Vergisi",
-      "type": "number",
+      "type": "currency",
       "width": 110,
-      "sensitive": true
+      "sensitive": true,
+      "currencyCode": "TRY",
+      "decimals": 0
     },
     {
       "field": "OVERTIME_PAY",
       "headerName": "Fazla Mesai",
-      "type": "number",
+      "type": "currency",
       "width": 100,
-      "sensitive": true
+      "sensitive": true,
+      "currencyCode": "TRY",
+      "decimals": 0
     },
     {
       "field": "SEVERANCE_AMOUNT",
       "headerName": "Kidem Tazm.",
-      "type": "number",
+      "type": "currency",
       "width": 120,
-      "sensitive": true
+      "sensitive": true,
+      "currencyCode": "TRY",
+      "decimals": 0
     },
     {
       "field": "IS_CRITICAL",
       "headerName": "Kritik Pozisyon",
-      "type": "number",
+      "type": "boolean",
       "width": 90,
       "sensitive": false
     }
   ],
   "defaultSort": "GROSS_SALARY",
   "defaultSortDirection": "DESC",
+  "routeSegment": "hr-compensation",
+  "sharedReportId": "hr-compensation",
+  "filterDefinitions": [
+    {
+      "key": "search",
+      "kind": "text-search",
+      "operator": "contains",
+      "targetField": "FULL_NAME",
+      "i18nLabelKey": "Ara",
+      "urlParam": "search"
+    },
+    {
+      "key": "department",
+      "kind": "text-search",
+      "operator": "contains",
+      "targetField": "DEPARTMENT_NAME",
+      "i18nLabelKey": "Departman",
+      "urlParam": "department"
+    },
+    {
+      "key": "company",
+      "kind": "text-search",
+      "operator": "contains",
+      "targetField": "COMPANY_NAME",
+      "i18nLabelKey": "Sirket",
+      "urlParam": "company"
+    },
+    {
+      "key": "collarType",
+      "kind": "enum-select",
+      "operator": "equals",
+      "targetField": "COLLAR_TYPE",
+      "i18nLabelKey": "Yaka Tipi",
+      "urlParam": "collarType",
+      "options": [
+        { "value": "1", "label": "Mavi Yakalı" },
+        { "value": "2", "label": "Beyaz Yakalı" }
+      ]
+    },
+    {
+      "key": "gender",
+      "kind": "enum-select",
+      "operator": "equals",
+      "targetField": "GENDER",
+      "i18nLabelKey": "Cinsiyet",
+      "urlParam": "gender",
+      "options": [
+        { "value": "0", "label": "Kadın" },
+        { "value": "1", "label": "Erkek" }
+      ]
+    },
+    {
+      "key": "education",
+      "kind": "enum-select",
+      "operator": "equals",
+      "targetField": "EDUCATION",
+      "i18nLabelKey": "Egitim",
+      "urlParam": "education",
+      "options": [
+        { "value": "Ilkokul", "label": "İlkokul" },
+        { "value": "Ortaokul", "label": "Ortaokul" },
+        { "value": "Lise", "label": "Lise" },
+        { "value": "Meslek Lisesi", "label": "Meslek Lisesi" },
+        { "value": "Onlisans", "label": "Önlisans" },
+        { "value": "Lisans", "label": "Lisans" },
+        { "value": "Muhendislik", "label": "Mühendislik" },
+        { "value": "Fakulte", "label": "Fakülte" },
+        { "value": "Yuksek Lisans", "label": "Yüksek Lisans" },
+        { "value": "Doktora", "label": "Doktora" }
+      ]
+    }
+  ],
   "access": {
     "permission": "reports.hr-compensation-detay.view",
     "columnRestrictions": {
