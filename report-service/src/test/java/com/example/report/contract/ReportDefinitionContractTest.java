@@ -77,12 +77,15 @@ class ReportDefinitionContractTest {
     }
 
     @Test
-    @DisplayName("Aggregate: 33 reports discovered (drift guard) — PR-D2.1d users-overview added")
+    @DisplayName("Aggregate: 34 reports discovered (drift guard) — PR-D2.2 access-report added")
     void aggregate_thirtyTwoReportsDiscovered() {
         // PR-D2.1d (ADR-0015, Codex 019e83bd iter-2 PARTIAL absorb):
         // bumped 32 → 33 for users-overview (first LIVE remote-http report,
         // execution.kind=remote-http, service=user-service, path=/api/v1/users).
-        assertThat(CACHED.reportCount()).isEqualTo(33);
+        // PR-D2.2 (ADR-0015, Codex 019e83f0 PARTIAL absorb):
+        // bumped 33 → 34 for access-report (second LIVE remote-http report,
+        // execution.kind=remote-http, service=permission-service, path=/api/v1/roles).
+        assertThat(CACHED.reportCount()).isEqualTo(34);
     }
 
     @Test
@@ -131,11 +134,12 @@ class ReportDefinitionContractTest {
         registry.loadDefinitions();
 
         assertThat(registry.getAll())
-                .as("Runtime registry must load 33 reports")
-                .hasSize(33);
+                .as("Runtime registry must load 34 reports")
+                .hasSize(34);
         assertThat(registry.get("hr-personel-listesi")).isPresent();
         assertThat(registry.get("fin-fatura-satirlari")).isPresent();
         assertThat(registry.get("users-overview")).isPresent();  // PR-D2.1d
+        assertThat(registry.get("access-report")).isPresent();   // PR-D2.2
         assertThat(registry.get("exceptions")).isEmpty();  // excluded
     }
 
@@ -477,9 +481,10 @@ class ReportDefinitionContractTest {
     }
 
     static Stream<String> knownReportKeys() {
-        // Drift guard: exact 33-key list matches registry inventory at
+        // Drift guard: exact 34-key list matches registry inventory at
         // commit-time. New report → add here; missing report → fail.
         // PR-D2.1d: added "users-overview" (first remote-http report).
+        // PR-D2.2: added "access-report" (second remote-http report).
         return Stream.of(
                 "fin-alacak-yaslandirma", "fin-banka-hareketleri", "fin-borc-yaslandirma",
                 "fin-butce-gerceklesen", "fin-cari-hareketler", "fin-cari-islemler",
@@ -492,7 +497,7 @@ class ReportDefinitionContractTest {
                 "hr-egitim-katilim", "hr-giris-cikis", "hr-izin-raporu",
                 "hr-maas-gecmisi", "hr-maas-raporu", "hr-personel-listesi",
                 "hr-puantaj", "satis-ozet", "stok-durum",
-                "users-overview");
+                "users-overview", "access-report");
     }
 
     private static void writeArtifacts(ContractGateSummary summary) throws IOException {

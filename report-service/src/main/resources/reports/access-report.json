@@ -1,0 +1,47 @@
+{
+  "contractVersion": 1,
+  "key": "access-report",
+  "version": "1.0",
+  "title": "Erişim Raporu",
+  "description": "Sistem rolleri, üye sayısı ve son düzenleme detayları. PR-D2.2 ikinci LIVE remote-http modülü — permission-service /api/v1/roles üzerinden çalışır.",
+  "category": "Yönetim",
+  "schemaMode": "static",
+  "tenantBoundary": {
+    "mode": "row",
+    "scopeType": "company",
+    "schemaResolver": "remoteHttpCompanyHeader",
+    "reason": "Permission-service /api/v1/roles tenant scoping is enforced via X-Company-Id header; report-service propagates the header verbatim through RemoteReportRequest.companyId. RemoteReportExecutor enforces fail-closed allowlist + JWT propagation. Tenant isolation contract is owned by the downstream permission-service authz layer (PR-D2.2 ADR-0015)."
+  },
+  "execution": {
+    "kind": "remote-http",
+    "service": "permission-service",
+    "path": "/api/v1/roles",
+    "responseShape": "paged-items-total"
+  },
+  "routeSegment": "access-report",
+  "sharedReportId": "access-report",
+  "columns": [
+    {"field": "id", "headerName": "ID", "type": "number", "width": 80},
+    {"field": "name", "headerName": "Rol Adı", "type": "text", "width": 200},
+    {"field": "description", "headerName": "Açıklama", "type": "text", "width": 320},
+    {"field": "memberCount", "headerName": "Üye Sayısı", "type": "number", "width": 120},
+    {
+      "field": "systemRole",
+      "headerName": "Tip",
+      "type": "status",
+      "width": 120,
+      "statusMap": {
+        "true": {"variant": "info", "labelKey": "shared.role.system"},
+        "false": {"variant": "muted", "labelKey": "shared.role.custom"}
+      },
+      "defaultVariant": "muted"
+    },
+    {"field": "lastModifiedAt", "headerName": "Son Değişiklik", "type": "date", "format": "datetime", "width": 160},
+    {"field": "lastModifiedBy", "headerName": "Düzenleyen", "type": "text", "width": 160}
+  ],
+  "defaultSort": "name",
+  "defaultSortDirection": "ASC",
+  "access": {
+    "permission": "access-view"
+  }
+}

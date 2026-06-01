@@ -199,12 +199,25 @@ class PermissionCodeToTupleMapperTest {
     // ---- Known-set accessors --------------------------------------------
 
     @Test
-    void knownModulePermissions_hasThreeCoreEntries() {
+    void knownModulePermissions_hasFourCoreEntries() {
+        // PR-D2.2 (ADR-0015, Codex 019e83f0): added "access-view" static
+        // alias for access-report ReportDefinition (permission-service
+        // /api/v1/roles via OpenFGA ACCESS.can_view).
         var known = mapper.knownModulePermissions();
         assertTrue(known.contains("REPORT_VIEW"));
         assertTrue(known.contains("REPORT_MANAGE"));
         assertTrue(known.contains("REPORT_EXPORT"));
-        assertEquals(3, known.size());
+        assertTrue(known.contains("access-view"));
+        assertEquals(4, known.size());
+    }
+
+    @Test
+    void accessViewAlias_mapsToAccessModuleCanView() {
+        // PR-D2.2 absorb: access-view → (can_view, module, ACCESS)
+        var t = mapper.toTuple("access-view").orElseThrow();
+        assertEquals("can_view", t.relation());
+        assertEquals("module", t.objectType());
+        assertEquals("ACCESS", t.objectId());
     }
 
     @Test

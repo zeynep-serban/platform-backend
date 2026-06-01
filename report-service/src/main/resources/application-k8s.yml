@@ -28,6 +28,15 @@ report:
         path: /api/v1/users
         base-url: ${REPORT_REMOTE_EXECUTOR_USER_SERVICE_BASE_URL:http://user-service:8089}
         request-shape: style-api-paged-v1
+      # PR-D2.2 (ADR-0015): access-report remote-http endpoint.
+      # permission-service Service exposes port 8090 (D-003 contract,
+      # targetPort 8084 container). AccessControllerV1.listRoles returns
+      # PagedResultDto<RoleDto> {items, total, page, pageSize} —
+      # paged-items-total response shape uyumlu.
+      - service: permission-service
+        path: /api/v1/roles
+        base-url: ${REPORT_REMOTE_EXECUTOR_PERMISSION_SERVICE_BASE_URL:http://permission-service:8090}
+        request-shape: style-api-paged-v1
   postgres:
     url: ${REPORT_PG_URL:jdbc:postgresql://platform-pg.platform-system:5432/users}
     username: ${REPORT_PG_USERNAME:postgres}
