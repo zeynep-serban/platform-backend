@@ -34,6 +34,15 @@ report:
     max-export-rows: 500000
   audit:
     internal-api-key: ${PERMISSION_SERVICE_INTERNAL_API_KEY:}
+  # PR-D2.1c1 (ADR-0015) — remote-http executor adapter config.
+  # Feature gate default disabled until PR-D2.1d (users-overview pilot)
+  # adds the first ReportDefinition with execution.kind=remote-http.
+  # AllowlistEntry path guard rejects // / .. / ? / # for security.
+  remote-executor:
+    enabled: ${REPORT_REMOTE_EXECUTOR_ENABLED:false}
+    timeout: ${REPORT_REMOTE_EXECUTOR_TIMEOUT:5s}
+    # allowlist seeded in per-env overlay (application-k8s.yml + dev profiles)
+    allowlist: []
 
 server:
   port: ${SERVER_PORT:8095}
