@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.example.report.contract.report.ContractGateSummary;
 import com.example.report.contract.report.ContractViolation;
 import com.example.report.registry.ColumnDefinition;
+import com.example.report.registry.ExecutionKind;
 import com.example.report.registry.FilterDefinition;
 import com.example.report.registry.FilterKind;
 import com.example.report.registry.FilterOptionEntry;
@@ -19,6 +20,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -159,6 +161,88 @@ class ReportDefinitionContractTest {
         assertThat(registry.get("monthly-login")).isPresent();   // PR-D2.4
         assertThat(registry.get("weekly-audit-digest")).isPresent();  // PR-D2.5
         assertThat(registry.get("exceptions")).isEmpty();  // excluded
+    }
+
+    /**
+     * ADR-0015 PR-E — Dynamic-by-default ratchet (Codex thread 019e8543
+     * AGREE WITH AMENDMENTS absorb).
+     *
+     * <p>Locks the D-chain 5/5 LIVE state with regression protection. Each of
+     * the five migrated pure-grid modules MUST keep {@code execution.kind ==
+     * REMOTE_HTTP} AND the exact {@code (service, path, responseShape)} tuple
+     * recorded here. Reverting any of these to SQL path, swapping the
+     * downstream endpoint, or changing the response shape will fail this test
+     * — explicit governance decision required to relax (update map + ADR-0015
+     * PR-E Closure note in tandem).
+     *
+     * <p>Why test-only (not production constant): the ratchet is governance
+     * intent — preventing accidental regression of migrated modules. It does
+     * not need to be queryable at runtime; making it a live constant would
+     * create false coupling. Future migrations (PR-D2.6+) must explicitly
+     * extend this map alongside the new ReportDefinition JSON — auto-discovery
+     * would defeat the ratchet purpose by silently accepting any new
+     * remote-http report as "expected".
+     */
+    private record ExpectedRemoteExecution(
+            String service,
+            String path,
+            String responseShape) {}
+
+    private static final Map<String, ExpectedRemoteExecution> DYNAMIC_BY_DEFAULT_REPORTS = Map.of(
+            "users-overview",
+            new ExpectedRemoteExecution("user-service", "/api/v1/users", "paged-items-total"),
+            "access-report",
+            new ExpectedRemoteExecution("permission-service", "/api/v1/roles", "paged-items-total"),
+            "audit-report",
+            new ExpectedRemoteExecution(
+                    "permission-service", "/api/audit/events", "paged-events-total"),
+            "monthly-login",
+            new ExpectedRemoteExecution(
+                    "permission-service", "/api/audit/events", "paged-events-total"),
+            "weekly-audit-digest",
+            new ExpectedRemoteExecution(
+                    "permission-service", "/api/audit/events", "paged-events-total"));
+
+    @Test
+    @DisplayName("ADR-0015 PR-E: migrated pure-grid reports stay remote-http (5/5 ratchet)")
+    void dynamicByDefault_migratedPureGridReportsStayRemoteHttp() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        ReportRegistry registry = new ReportRegistry(mapper, "classpath*:reports/");
+        registry.loadDefinitions();
+
+        assertThat(DYNAMIC_BY_DEFAULT_REPORTS)
+                .as("PR-E ratchet must lock exactly 5 keys — D-chain target")
+                .hasSize(5);
+
+        DYNAMIC_BY_DEFAULT_REPORTS.forEach((key, expected) -> {
+            ReportDefinition def = registry.get(key)
+                    .orElseThrow(() -> new AssertionError(
+                            "PR-E ratchet violation: dynamic-by-default report missing from "
+                                    + "registry: '" + key + "'. If intentional removal, update "
+                                    + "DYNAMIC_BY_DEFAULT_REPORTS and ADR-0015 PR-E Closure note "
+                                    + "in tandem (governance decision)."));
+
+            assertThat(def.execution())
+                    .as("%s: execution block must be present (PR-E ratchet)", key)
+                    .isNotNull();
+
+            assertThat(def.execution().kind())
+                    .as("%s: execution.kind must stay REMOTE_HTTP (PR-E ratchet — reverting to "
+                            + "SQL requires explicit governance update)", key)
+                    .isEqualTo(ExecutionKind.REMOTE_HTTP);
+
+            assertThat(def.execution().service())
+                    .as("%s: execution.service tuple drift (PR-E ratchet)", key)
+                    .isEqualTo(expected.service());
+
+            assertThat(def.execution().path())
+                    .as("%s: execution.path tuple drift (PR-E ratchet)", key)
+                    .isEqualTo(expected.path());
+
+            assertThat(def.execution().responseShape())
+                    .as("%s: execution.responseShape tuple drift (PR-E ratchet)", key)
+                    .isEqualTo(expected.responseShape());
+        });
     }
 
     @Test

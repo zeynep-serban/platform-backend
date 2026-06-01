@@ -108,9 +108,41 @@ Sprint estimate (Codex): **3 sprint + 1 buffer** for 5 modules (users → access
 
 PR-E (dynamic-by-default gate) tetikleyici noktası: 5 modülün hepsi dynamic path'te live smoke gördükten sonra.
 
+## PR-E Closure — Dynamic-by-default ratchet (2026-06-01)
+
+D-chain 5/5 LIVE achieved (users-overview / access-report / audit-report / monthly-login / weekly-audit-digest). PR-E gate closed as a **test-only ratchet** rather than a runtime constant — governance intent, not behavior coupling.
+
+### Ratchet location
+
+- Test: `report-service/src/test/java/com/example/report/contract/ReportDefinitionContractTest.java` — `dynamicByDefault_migratedPureGridReportsStayRemoteHttp()`
+- Lock: test-local `DYNAMIC_BY_DEFAULT_REPORTS` map (key → `(service, path, responseShape)` tuple)
+- Codex consensus thread: `019e8543` (AGREE WITH AMENDMENTS — test-only over production-constant, tuple-locked over kind-only)
+
+### What it enforces
+
+Each of the 5 migrated pure-grid modules MUST keep:
+- `execution.kind == REMOTE_HTTP`
+- Exact `(service, path, responseShape)` tuple
+
+Reverting any to SQL path, swapping downstream endpoint, or changing response shape → test fails. Explicit governance decision required to relax (update test map + this ADR section in tandem).
+
+### What it does NOT enforce
+
+- Frontend `useCatalog.ts` stays warn-only (static fallback remains for runtime resilience). The right guard for cluster drift is live smoke / e2e evidence (HARD RULE — Tarayıcıdan Sonuç Doğrulanmadan), not frontend fail-closed.
+- Allowlist drift (`check_reporting_allowlist_drift.py`) remains orthogonal — those are table-level RLS contracts; PR-E ratchet is report-level definition contract.
+
+### Why test-only (not production constant)
+
+A production `DynamicByDefaultRegistry.MIGRATED_KEYS` constant would suggest live authority (filtering at runtime), but the actual runtime behavior remains `RemoteAllowlist` (service+path) and `report.remote-executor.enabled` flag. Test-only avoids false coupling; the set's purpose is governance regression protection, not runtime behavior.
+
+### Future migrations (PR-D2.6+)
+
+When a 6th key migrates, update `DYNAMIC_BY_DEFAULT_REPORTS` map + this ADR section together. Auto-discovery is deliberately avoided — it would silently accept any new remote-http report as "expected", defeating the ratchet purpose.
+
 ## References
 
 - Codex thread `019e8306-c0f3-7012-9812-07b0ef99fa6f` (D verdict; pure-grid modül tablosu)
+- Codex thread `019e8543-aaa7-79f2-ad19-245dfbc0570f` (PR-E plan + merge gate consensus AGREE WITH AMENDMENTS)
 - ADR-0006 (report-contract-gate)
 - PR-D1a (Codex 019e800b) backend schema extension (routeSegment + sharedReportId + filterDefinitions)
 - PR-D1b.A/.B (Codex 019e8245) frontend transport DTO + factory + filter execution path
