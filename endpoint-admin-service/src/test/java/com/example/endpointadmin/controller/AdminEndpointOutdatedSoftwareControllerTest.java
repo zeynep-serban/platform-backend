@@ -5,6 +5,8 @@ import com.example.endpointadmin.model.EndpointOutdatedSoftwarePackage;
 import com.example.endpointadmin.model.EndpointOutdatedSoftwareSnapshot;
 import com.example.endpointadmin.security.AdminTenantContext;
 import com.example.endpointadmin.security.TenantContextResolver;
+import com.example.endpointadmin.dto.v1.admin.AdminOutdatedSoftwareDiffResponse;
+import com.example.endpointadmin.service.EndpointOutdatedSoftwareDiffService;
 import com.example.endpointadmin.service.EndpointOutdatedSoftwareService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -69,6 +71,9 @@ class AdminEndpointOutdatedSoftwareControllerTest {
 
     @MockitoBean
     private EndpointOutdatedSoftwareService outdatedSoftwareService;
+
+    @MockitoBean
+    private EndpointOutdatedSoftwareDiffService outdatedSoftwareDiffService;
 
     @MockitoBean
     private TenantContextResolver tenantContextResolver;
@@ -250,5 +255,29 @@ class AdminEndpointOutdatedSoftwareControllerTest {
         p.setInstalledVersion(installed);
         p.setAvailableVersion(available);
         return p;
+    }
+
+    /**
+     * BE-024b — route smoke (Faz 22.5 P2-A slice-3). The full diff branch
+     * logic is covered in {@code EndpointOutdatedSoftwareDiffServiceTest};
+     * here we just verify the controller wires the route + status code +
+     * NO_HISTORY shape.
+     */
+    @Test
+    void getDiffReturns200WithNoHistoryShape() throws Exception {
+        when(tenantContextResolver.resolveRequired()).thenReturn(adminContext());
+        when(outdatedSoftwareDiffService.diffLatest(adminContext(), DEVICE_ID))
+                .thenReturn(AdminOutdatedSoftwareDiffResponse.noHistory(DEVICE_ID));
+
+        mockMvc.perform(get(
+                        "/api/v1/admin/endpoint-devices/{deviceId}/outdated-software/diff",
+                        DEVICE_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.deviceId").value(DEVICE_ID.toString()))
+                .andExpect(jsonPath("$.status").value("NO_HISTORY"))
+                .andExpect(jsonPath("$.added").isArray())
+                .andExpect(jsonPath("$.removed").isArray())
+                .andExpect(jsonPath("$.versionChanged").isArray())
+                .andExpect(jsonPath("$.availableVersionBumped").isArray());
     }
 }

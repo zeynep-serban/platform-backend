@@ -1,12 +1,14 @@
 package com.example.endpointadmin.controller;
 
 import com.example.commonauth.openfga.RequireModule;
+import com.example.endpointadmin.dto.v1.admin.AdminOutdatedSoftwareDiffResponse;
 import com.example.endpointadmin.dto.v1.admin.AdminOutdatedSoftwareSnapshotResponse;
 import com.example.endpointadmin.dto.v1.admin.AdminOutdatedSoftwareSnapshotSummaryResponse;
 import com.example.endpointadmin.model.EndpointOutdatedSoftwareSnapshot;
 import com.example.endpointadmin.security.AdminTenantContext;
 import com.example.endpointadmin.security.EndpointAdminAuthz;
 import com.example.endpointadmin.security.TenantContextResolver;
+import com.example.endpointadmin.service.EndpointOutdatedSoftwareDiffService;
 import com.example.endpointadmin.service.EndpointOutdatedSoftwareService;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -71,12 +73,15 @@ public class AdminEndpointOutdatedSoftwareController {
     static final int MAX_PAGE_SIZE = 50;
 
     private final EndpointOutdatedSoftwareService outdatedSoftwareService;
+    private final EndpointOutdatedSoftwareDiffService outdatedSoftwareDiffService;
     private final TenantContextResolver tenantContextResolver;
 
     public AdminEndpointOutdatedSoftwareController(
             EndpointOutdatedSoftwareService outdatedSoftwareService,
+            EndpointOutdatedSoftwareDiffService outdatedSoftwareDiffService,
             TenantContextResolver tenantContextResolver) {
         this.outdatedSoftwareService = outdatedSoftwareService;
+        this.outdatedSoftwareDiffService = outdatedSoftwareDiffService;
         this.tenantContextResolver = tenantContextResolver;
     }
 
@@ -107,6 +112,21 @@ public class AdminEndpointOutdatedSoftwareController {
         return outdatedSoftwareService
                 .findHistory(context.tenantId(), deviceId, pageable)
                 .map(AdminOutdatedSoftwareSnapshotSummaryResponse::from);
+    }
+
+    /**
+     * BE-024b — latest-vs-previous outdated-software diff (Faz 22.5 P2-A
+     * slice-3). Always returns HTTP 200; status enum encodes the
+     * NO_HISTORY/INSUFFICIENT_HISTORY/NO_CHANGE/OK branch. Codex
+     * 019e8542 iter-2 AGREE absorb.
+     */
+    @GetMapping("/endpoint-devices/{deviceId}/outdated-software/diff")
+    @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.VIEWER)
+    @Transactional(readOnly = true)
+    public AdminOutdatedSoftwareDiffResponse getDeviceOutdatedSoftwareDiff(
+            @PathVariable UUID deviceId) {
+        AdminTenantContext context = tenantContextResolver.resolveRequired();
+        return outdatedSoftwareDiffService.diffLatest(context, deviceId);
     }
 
     /** Clamp the requested page size into [1, {@link #MAX_PAGE_SIZE}]. A zero
