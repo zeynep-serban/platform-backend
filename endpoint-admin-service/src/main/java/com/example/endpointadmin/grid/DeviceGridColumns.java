@@ -27,7 +27,11 @@ import java.util.Map;
  * {@code h} = latest device-health snapshot (LATERAL), {@code o} = latest
  * outdated-software snapshot (LATERAL), {@code pe} = latest compliance
  * evaluation (LATERAL, WEB-015 v2-a / schema v3), {@code ac} = latest
- * app-control snapshot (LATERAL, WEB-015 v2-a / schema v3).
+ * app-control snapshot (LATERAL, WEB-015 v2-a / schema v3),
+ * {@code dx} = latest diagnostics snapshot (LATERAL, WEB-015 v2-b /
+ * schema v4), {@code sx} = latest startup-exposure snapshot (LATERAL,
+ * WEB-015 v2-b / schema v4), {@code se} = latest services snapshot
+ * (LATERAL, WEB-015 v2-b / schema v4).
  *
  * <p>{@code header} is the Turkish display label used by the {@code /export}
  * path (PR-2b) — it is resolved SERVER-side from this registry, never taken
@@ -38,11 +42,20 @@ public final class DeviceGridColumns {
     private DeviceGridColumns() {}
 
     /**
-     * Device-grid query/export schema version. Bumped from 2 to 3 with
-     * WEB-015 v2-a (Codex 019e8785 iter-2): adds BE-025 prohibited-
-     * software + AG-041 app-control LATERAL summary columns.
+     * Device-grid query/export schema version.
+     *
+     * <ul>
+     *   <li>v2 — health (AG-033) + outdated (AG-036) LATERAL summary.</li>
+     *   <li>v3 — WEB-015 v2-a (Codex 019e8785 iter-2): BE-025 prohibited-
+     *       software + AG-041 app-control LATERAL summary columns.</li>
+     *   <li>v4 — WEB-015 v2-b (Codex 019e87bc iter-1 AGREE + 7 guardrails):
+     *       AG-038 diagnostics last-poll-latency + last-error-code/at +
+     *       AG-040 startup-exposure sentinels (rdp_enabled +
+     *       windows_firewall_event_log_enabled) +
+     *       AG-039 services_critical_stopped_count.</li>
+     * </ul>
      */
-    public static final int SCHEMA_VERSION = 3;
+    public static final int SCHEMA_VERSION = 4;
 
     /** Cached SHA-256 over the canonical, comma-joined column id list. */
     private static volatile String CACHED_COLUMN_IDS_HASH;
@@ -140,7 +153,78 @@ public final class DeviceGridColumns {
             new GridColumn("app_control_wdac_mode", "ac.wdac_mode",
                     ColumnType.ENUM, false, "WDAC Modu"),
             new GridColumn("app_control_app_id_svc_state", "ac.app_locker_app_id_svc_state",
-                    ColumnType.ENUM, false, "AppIDSvc Durumu")
+                    ColumnType.ENUM, false, "AppIDSvc Durumu"),
+            // WEB-015 v2-b (schema v4) AG-038 diagnostics latest-snapshot
+            // sentinels. dx.id IS NULL => all three NULL (LEFT JOIN no-snapshot
+            // fail-closed, NOT synthesized). last_error_code is the persisted
+            // VARCHAR(64) constrained by `^[A-Z][A-Z0-9_]{2,64}$` (V23
+            // diag_snap_last_error_code_re) — agent emits e.g.
+            // NEXT_COMMAND_TIMEOUT / DNS_TIMEOUT / UNSUPPORTED_PLATFORM /
+            // NETWORK_UNREACHABLE, so the surface MUST be TEXT (not a closed
+            // ENUM set filter) — Codex 019e87bc iter-1 must_fix #2. The DB
+            // V23 CHECK enforces an all-or-none triad on (last_error_code,
+            // last_error_occurred_at, last_error_summary); we expose code +
+            // occurred_at (summary stays drawer-only — payload-level redaction
+            // is already enforced by DiagnosticsPayloadPolicy). Column name
+            // surface mirrors UI semantics (last_error_at) but the SQL source
+            // is `dx.last_error_occurred_at` — Codex 019e87bc iter-1 must_fix #3.
+            new GridColumn("diagnostics_last_poll_latency_ms",
+                    "dx.last_poll_latency_ms",
+                    ColumnType.NUMBER, false, "Ajan Son Poll Gecikmesi (ms)"),
+            new GridColumn("diagnostics_last_error_code",
+                    "dx.last_error_code",
+                    ColumnType.TEXT, true, "Ajan Son Hata Kodu"),
+            new GridColumn("diagnostics_last_error_at",
+                    "dx.last_error_occurred_at",
+                    ColumnType.TIMESTAMP, false, "Ajan Son Hata Zamanı"),
+            // WEB-015 v2-b (schema v4) AG-040 startup-exposure sentinels.
+            // CASE-guarded so a no-snapshot device (sx.id IS NULL), a
+            // non-Windows runtime (sx.supported = false), or any probe error
+            // (sx.probe_complete = false) projects NULL — never a misleading
+            // `false`. Codex 019e87bc iter-1 must_fix #4: the V25 row's
+            // boolean column is NOT NULL (FAIL-CLOSED EVIDENCE: supported=
+            // false persisted), so the CASE guard is the ONLY way the grid
+            // can render NULL for "no measurable evidence yet" vs the
+            // genuine false reading.
+            new GridColumn("startup_rdp_enabled",
+                    "CASE"
+                            + " WHEN sx.id IS NULL"
+                            + "   OR sx.supported = false"
+                            + "   OR sx.probe_complete = false"
+                            + " THEN NULL"
+                            + " ELSE sx.rdp_enabled"
+                            + " END",
+                    ColumnType.BOOLEAN, false, "Başlangıç RDP Etkin"),
+            new GridColumn("startup_windows_firewall_event_log_enabled",
+                    "CASE"
+                            + " WHEN sx.id IS NULL"
+                            + "   OR sx.supported = false"
+                            + "   OR sx.probe_complete = false"
+                            + " THEN NULL"
+                            + " ELSE sx.windows_firewall_event_log_enabled"
+                            + " END",
+                    ColumnType.BOOLEAN, false, "Başlangıç Firewall Olay Günlüğü"),
+            // WEB-015 v2-b (schema v4) AG-039 services snapshot — single
+            // operational sentinel: how many of the 6 backend-canonical
+            // critical services (ServicesPayloadPolicy SERVICE_NAME_ALLOWLIST)
+            // are in state=STOPPED on the latest snapshot. Codex 019e87bc
+            // iter-1 must_fix #5: only the stopped count (running_count
+            // derivable; probe_errors_count drawer-only). CASE guard same
+            // as startup sentinels — no snapshot / unsupported / incomplete
+            // ⇒ NULL not 0 (Codex iter-1 must_fix #4). The stopped count
+            // itself is precomputed in the {@code se} LATERAL row
+            // (subquery against {@code endpoint_services_entries} stays
+            // schema-qualified there — registry can't access the runtime
+            // schema name).
+            new GridColumn("services_critical_stopped_count",
+                    "CASE"
+                            + " WHEN se.id IS NULL"
+                            + "   OR se.supported = false"
+                            + "   OR se.probe_complete = false"
+                            + " THEN NULL"
+                            + " ELSE se.critical_stopped_count"
+                            + " END",
+                    ColumnType.NUMBER, false, "Kritik Durdurulmuş Servis Sayısı")
     );
 
     private static final Map<String, GridColumn> BY_ID;

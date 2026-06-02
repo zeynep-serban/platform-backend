@@ -27,25 +27,45 @@ import org.junit.jupiter.api.Test;
  */
 class DeviceGridColumnsTest {
 
-    private static final List<String> EXPECTED_NEW_COL_IDS = List.of(
+    /** WEB-015 v2-a (schema v3) — BE-025 prohibited + AG-041 app-control. */
+    private static final List<String> EXPECTED_V2A_COL_IDS = List.of(
             "prohibited_status",
             "prohibited_decision",
             "prohibited_findings_count",
             "app_control_wdac_mode",
             "app_control_app_id_svc_state");
 
+    /** WEB-015 v2-b (schema v4) — AG-038 diagnostics + AG-040 startup + AG-039 services. */
+    private static final List<String> EXPECTED_V2B_COL_IDS = List.of(
+            "diagnostics_last_poll_latency_ms",
+            "diagnostics_last_error_code",
+            "diagnostics_last_error_at",
+            "startup_rdp_enabled",
+            "startup_windows_firewall_event_log_enabled",
+            "services_critical_stopped_count");
+
     @Test
-    void schemaVersionIsThree() {
-        assertThat(DeviceGridColumns.SCHEMA_VERSION).isEqualTo(3);
+    void schemaVersionIsFour() {
+        // WEB-015 v2-b (Codex 019e87bc iter-1 AGREE) — bump 3 to 4.
+        assertThat(DeviceGridColumns.SCHEMA_VERSION).isEqualTo(4);
     }
 
     @Test
-    void registryAppendsFiveNewColumnsAfterOutdatedColumns() {
+    void registryAppendsV2aColumnsAfterOutdatedColumns() {
         List<String> ids = DeviceGridColumns.allColumnIds();
         int outdatedCollectedAtIdx = ids.indexOf("outdated_collected_at");
         assertThat(outdatedCollectedAtIdx).isPositive();
         assertThat(ids.subList(outdatedCollectedAtIdx + 1, outdatedCollectedAtIdx + 1 + 5))
-                .containsExactlyElementsOf(EXPECTED_NEW_COL_IDS);
+                .containsExactlyElementsOf(EXPECTED_V2A_COL_IDS);
+    }
+
+    @Test
+    void registryAppendsV2bColumnsAfterAppControlColumns() {
+        List<String> ids = DeviceGridColumns.allColumnIds();
+        int appCtlSvcIdx = ids.indexOf("app_control_app_id_svc_state");
+        assertThat(appCtlSvcIdx).isPositive();
+        assertThat(ids.subList(appCtlSvcIdx + 1, appCtlSvcIdx + 1 + 6))
+                .containsExactlyElementsOf(EXPECTED_V2B_COL_IDS);
     }
 
     @Test
@@ -86,6 +106,79 @@ class DeviceGridColumnsTest {
         GridColumn svc = DeviceGridColumns.byId("app_control_app_id_svc_state");
         assertThat(svc).isNotNull();
         assertThat(svc.sqlExpr()).isEqualTo("ac.app_locker_app_id_svc_state");
+    }
+
+    @Test
+    void diagnosticsLatencyReadsDxAlias() {
+        GridColumn c = DeviceGridColumns.byId("diagnostics_last_poll_latency_ms");
+        assertThat(c).isNotNull();
+        assertThat(c.type()).isEqualTo(ColumnType.NUMBER);
+        assertThat(c.sqlExpr()).isEqualTo("dx.last_poll_latency_ms");
+    }
+
+    @Test
+    void diagnosticsLastErrorCodeIsTextNotEnum() {
+        // Codex 019e87bc iter-1 must_fix #2: NOT a closed enum tuple. The
+        // V23 DB CHECK enforces only the lexical regex `^[A-Z][A-Z0-9_]{2,64}$`,
+        // so the surface MUST be TEXT (free Set Filter labels would silently
+        // drop unmodelled codes like NEXT_COMMAND_TIMEOUT / DNS_TIMEOUT).
+        GridColumn c = DeviceGridColumns.byId("diagnostics_last_error_code");
+        assertThat(c).isNotNull();
+        assertThat(c.type()).isEqualTo(ColumnType.TEXT);
+        assertThat(c.sqlExpr()).isEqualTo("dx.last_error_code");
+    }
+
+    @Test
+    void diagnosticsLastErrorAtReadsCanonicalDbColumn() {
+        // Codex 019e87bc iter-1 must_fix #3: payload field is `lastError.occurredAt`,
+        // DB scalar is `last_error_occurred_at`. UI surface "last_error_at"
+        // is OK but the SQL source must address the V23 column verbatim.
+        GridColumn c = DeviceGridColumns.byId("diagnostics_last_error_at");
+        assertThat(c).isNotNull();
+        assertThat(c.type()).isEqualTo(ColumnType.TIMESTAMP);
+        assertThat(c.sqlExpr()).isEqualTo("dx.last_error_occurred_at");
+    }
+
+    @Test
+    void startupSentinelsCaseGuardNullForNotMeasurableYet() {
+        // Codex 019e87bc iter-1 must_fix #4: V25 boolean columns are NOT NULL
+        // (fail-closed evidence: supported=false persisted). CASE-guard so
+        // the grid projects NULL for no-snapshot / unsupported / probe-incomplete
+        // — false would silently hide the difference between "evidence: RDP
+        // off" and "not measurable yet".
+        GridColumn rdp = DeviceGridColumns.byId("startup_rdp_enabled");
+        assertThat(rdp).isNotNull();
+        assertThat(rdp.type()).isEqualTo(ColumnType.BOOLEAN);
+        assertThat(rdp.sqlExpr())
+                .contains("WHEN sx.id IS NULL")
+                .contains("OR sx.supported = false")
+                .contains("OR sx.probe_complete = false")
+                .contains("THEN NULL")
+                .contains("ELSE sx.rdp_enabled");
+
+        GridColumn fw = DeviceGridColumns.byId("startup_windows_firewall_event_log_enabled");
+        assertThat(fw).isNotNull();
+        assertThat(fw.type()).isEqualTo(ColumnType.BOOLEAN);
+        assertThat(fw.sqlExpr())
+                .contains("WHEN sx.id IS NULL")
+                .contains("ELSE sx.windows_firewall_event_log_enabled");
+    }
+
+    @Test
+    void servicesCriticalStoppedCountReadsPrecomputedSeColumn() {
+        // Codex 019e87bc iter-1 must_fix #5: only "stopped" count surfaces
+        // (allowlist enforced server-side at ingest; ServicesPayloadPolicy).
+        // CASE guard mirrors startup sentinels (NULL for not-measurable-yet,
+        // never 0 — Codex iter-1 must_fix #4).
+        GridColumn c = DeviceGridColumns.byId("services_critical_stopped_count");
+        assertThat(c).isNotNull();
+        assertThat(c.type()).isEqualTo(ColumnType.NUMBER);
+        assertThat(c.sqlExpr())
+                .contains("WHEN se.id IS NULL")
+                .contains("OR se.supported = false")
+                .contains("OR se.probe_complete = false")
+                .contains("THEN NULL")
+                .contains("ELSE se.critical_stopped_count");
     }
 
     @Test

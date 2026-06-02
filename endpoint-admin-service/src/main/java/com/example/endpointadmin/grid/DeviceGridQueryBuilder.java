@@ -684,6 +684,82 @@ public class DeviceGridQueryBuilder {
                 + "   WHERE acs.tenant_id = d.tenant_id AND acs.device_id = d.id"
                 + "   ORDER BY acs.collected_at DESC, acs.created_at DESC, acs.id DESC"
                 + "   LIMIT 1"
-                + " ) ac ON true";
+                + " ) ac ON true"
+                // WEB-015 v2-b (schema v4) AG-038 latest diagnostics snapshot.
+                // Codex 019e87bc iter-1 must_fix #2: error code is NOT a closed
+                // ENUM — backend emits e.g. NEXT_COMMAND_TIMEOUT / DNS_TIMEOUT /
+                // UNSUPPORTED_PLATFORM constrained only by
+                // `^[A-Z][A-Z0-9_]{2,64}$`. must_fix #3: DB scalar is
+                // last_error_occurred_at (UI surface "last_error_at" is
+                // intentional but SQL source name MUST match the V23 column).
+                + " LEFT JOIN LATERAL ("
+                + "   SELECT ds.id,"
+                + "          ds.last_poll_latency_ms,"
+                + "          ds.last_error_code,"
+                + "          ds.last_error_occurred_at"
+                + "   FROM " + qualified("endpoint_diagnostics_snapshots") + " ds"
+                + "   WHERE ds.tenant_id = d.tenant_id AND ds.device_id = d.id"
+                // Codex 019e87bc iter-2 must_fix: canonical latest contract is
+                // `collected_at DESC, created_at DESC, id DESC` (the V23 index
+                // shape + the repository order — see EndpointDiagnosticsSnapshotRepository).
+                // Missing the created_at tiebreaker would let drawer /latest
+                // and grid render different snapshots when two share collected_at.
+                + "   ORDER BY ds.collected_at DESC, ds.created_at DESC, ds.id DESC"
+                + "   LIMIT 1"
+                + " ) dx ON true"
+                // WEB-015 v2-b (schema v4) AG-040 latest startup-exposure
+                // snapshot. Codex 019e87bc iter-1 must_fix #4: V25 boolean
+                // columns are NOT NULL (fail-closed evidence), so the grid
+                // CASE guards on supported/probe_complete to project NULL
+                // for "no measurable evidence yet" — registry expressions
+                // reference sx.{supported,probe_complete,rdp_enabled,
+                // windows_firewall_event_log_enabled}.
+                + " LEFT JOIN LATERAL ("
+                + "   SELECT ses.id,"
+                + "          ses.supported,"
+                + "          ses.probe_complete,"
+                + "          ses.rdp_enabled,"
+                + "          ses.windows_firewall_event_log_enabled"
+                + "   FROM " + qualified("endpoint_startup_exposure_snapshots") + " ses"
+                + "   WHERE ses.tenant_id = d.tenant_id AND ses.device_id = d.id"
+                // Codex 019e87bc iter-2 must_fix: canonical latest contract +
+                // V25 index shape + EndpointStartupExposureSnapshotRepository.
+                + "   ORDER BY ses.collected_at DESC, ses.created_at DESC, ses.id DESC"
+                + "   LIMIT 1"
+                + " ) sx ON true"
+                // WEB-015 v2-b (schema v4) AG-039 latest services snapshot.
+                // Codex 019e87bc iter-1 must_fix #5: surface just one
+                // operational sentinel (critical_stopped_count from the
+                // backend-canonical 6-allowlist running OR STOPPED). The
+                // count is precomputed in this LATERAL row so the registry
+                // expression can stay schema-agnostic (subquery against
+                // endpoint_services_entries needs the runtime schema name).
+                // The allowlist is enforced server-side at ingest time
+                // (ServicesPayloadPolicy SERVICE_NAME_ALLOWLIST), so a
+                // snapshot row can never carry an entry outside the 6
+                // canonical names — counting state=STOPPED + present=true
+                // is equivalent to counting "critical service down".
+                // CASE guard on supported/probe_complete is applied at the
+                // registry layer (NULL when not measurable yet).
+                + " LEFT JOIN LATERAL ("
+                + "   SELECT s.id,"
+                + "          s.tenant_id,"
+                + "          s.supported,"
+                + "          s.probe_complete,"
+                + "          ("
+                + "            SELECT COUNT(*)::int"
+                + "            FROM " + qualified("endpoint_services_entries") + " ent"
+                + "            WHERE ent.tenant_id = s.tenant_id"
+                + "              AND ent.snapshot_id = s.id"
+                + "              AND ent.present = true"
+                + "              AND ent.state = 'STOPPED'"
+                + "          ) AS critical_stopped_count"
+                + "   FROM " + qualified("endpoint_services_snapshots") + " s"
+                + "   WHERE s.tenant_id = d.tenant_id AND s.device_id = d.id"
+                // Codex 019e87bc iter-2 must_fix: canonical latest contract +
+                // V24 index shape + EndpointServicesSnapshotRepository.
+                + "   ORDER BY s.collected_at DESC, s.created_at DESC, s.id DESC"
+                + "   LIMIT 1"
+                + " ) se ON true";
     }
 }

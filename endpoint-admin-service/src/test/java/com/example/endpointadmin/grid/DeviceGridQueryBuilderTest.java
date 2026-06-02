@@ -58,6 +58,44 @@ class DeviceGridQueryBuilderTest {
     }
 
     @Test
+    void v2bLateralsPinCanonicalLatestTiebreaker() {
+        // Codex 019e87bc iter-2 must_fix: every "latest snapshot" LATERAL
+        // MUST sort by collected_at DESC, created_at DESC, id DESC — the
+        // canonical contract the repository/index pair already enforces:
+        //   * EndpointDiagnosticsSnapshotRepository (V23 idx_diag_snap_…)
+        //   * EndpointStartupExposureSnapshotRepository (V25 idx_se_…)
+        //   * EndpointServicesSnapshotRepository (V24 idx_svcs_snap_…)
+        // Missing the created_at tiebreaker lets drawer /latest and the
+        // grid render different snapshots when two share collected_at.
+        String sql = builder().buildPageQuery(TENANT, req(null, null, null)).sql();
+        assertThat(sql).contains("ORDER BY ds.collected_at DESC, ds.created_at DESC, ds.id DESC");
+        assertThat(sql).contains("ORDER BY ses.collected_at DESC, ses.created_at DESC, ses.id DESC");
+        assertThat(sql).contains("ORDER BY s.collected_at DESC, s.created_at DESC, s.id DESC");
+        // Negative drift detector — neither the missing-tiebreaker form
+        // nor the wrong-order created_at-first form may survive a refactor.
+        assertThat(sql).doesNotContain("ORDER BY ds.collected_at DESC, ds.id DESC");
+        assertThat(sql).doesNotContain("ORDER BY ses.collected_at DESC, ses.id DESC");
+        // (services uses `s` alias which is short — the bare "s.id DESC"
+        // substring would over-match; the positive contains above is the
+        // pin and the negative form here covers the diagnostics/startup pair.)
+    }
+
+    @Test
+    void v2bLateralsAreSchemaQualified() {
+        // Codex 019e87bc iter-1 must_fix (composite): the three new v2-b
+        // LATERAL FROM clauses must all qualify with the runtime schema —
+        // unqualified tables would 500 under the live non-public schema
+        // (#342 regression class).
+        String sql = builder().buildPageQuery(TENANT, req(null, null, null)).sql();
+        assertThat(sql).contains("endpoint_admin_service.endpoint_diagnostics_snapshots ds");
+        assertThat(sql).contains("endpoint_admin_service.endpoint_startup_exposure_snapshots ses");
+        assertThat(sql).contains("endpoint_admin_service.endpoint_services_snapshots s");
+        // The precomputed critical_stopped_count subquery also addresses
+        // endpoint_services_entries through the same qualified() helper.
+        assertThat(sql).contains("endpoint_admin_service.endpoint_services_entries ent");
+    }
+
+    @Test
     void projectionExposesEveryRegistryColumnAsItsColId() {
         String sql = builder().buildPageQuery(TENANT, req(null, null, null)).sql();
         for (String colId : DeviceGridColumns.allColumnIds()) {
