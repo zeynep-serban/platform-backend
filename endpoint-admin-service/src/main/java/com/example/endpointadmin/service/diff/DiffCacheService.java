@@ -146,25 +146,31 @@ public class DiffCacheService {
         validateSoftwareShape(summary);
 
         String table = qualified("endpoint_software_diff_cache");
-        // Codex 019e8964 iter-2 absorb: source-freshness ordering is the
-        // CALLER's contract, NOT this writer's. A `computed_at <=
-        // EXCLUDED.computed_at` predicate was added in iter-1 but Codex
-        // iter-2 correctly pointed out that it only orders wall-clock
-        // writes, NOT source-pair freshness — a stale ingest tx that reads
-        // an older history pair and calls upsert later (Instant.now() at
-        // call time) would still pass the guard and regress the cache to
-        // an older state. The correct guard is source-pair ordering
-        // (captured_at, created_at, id tuple comparison on the FK source
-        // table), but that's a non-trivial subquery that belongs in the
-        // ingest hook PR (v2-c-pre-2-B) where the source-pair freshness
-        // contract is wired up end-to-end with PG IT proof. For this
-        // dormant write primitive PR, the WHERE filter is back to
-        // "anything differs" — race-safe at row level (concurrent UPSERT
-        // for the same (tenant, device) cannot UNIQUE-collision), with
-        // the caller-side freshness contract documented at the class
-        // level and pinned by PG IT in v2-c-pre-2-B.
+        String historyTable = qualified("endpoint_software_inventory_state_history");
+        // Codex 019e8964 iter-4 AGREE: source-pair ordering guard wired
+        // into the UPSERT WHERE so stale refresh listeners cannot regress
+        // the cache row to an older source pair. Existing
+        // {@code to_history_id IS NULL} (NO_HISTORY) treats any incoming
+        // source-pair as progression; existing source-pair vs incoming
+        // {@code NO_HISTORY/INSUFFICIENT_HISTORY} (incoming
+        // {@code to_history_id IS NULL}) is rejected as downgrade.
+        // When both source-pair rows exist, the incoming
+        // {@code to_history_id}'s {@code (captured_at, created_at, id)}
+        // tuple is compared to the stored row's via subquery on the
+        // history table — {@code device_id} equality is asserted explicitly
+        // (Codex iter-4 guardrail #3) so a cross-device row in the
+        // history table can never accidentally satisfy the guard.
+        // {@code from_history_id} downgrade
+        // ({@code OK/NO_CHANGE} -> {@code INSUFFICIENT_HISTORY}) is also
+        // blocked (Codex iter-4 guardrail #4): same {@code to_history_id}
+        // with non-null -> null {@code from_history_id} would otherwise
+        // walk a more informative row back to a less informative one.
+        // Insert path (no conflict) bypasses the guard; initial row
+        // source integrity is owned by the caller (listener summarize
+        // against latest committed state) and DB FK tenant integrity
+        // (Codex iter-4 guardrail #5).
         String sql = """
-                INSERT INTO %s (
+                INSERT INTO %s AS c (
                     id, tenant_id, device_id,
                     from_history_id, to_history_id,
                     status,
@@ -185,19 +191,44 @@ public class DiffCacheService {
                     removed_count = EXCLUDED.removed_count,
                     version_changed_count = EXCLUDED.version_changed_count,
                     computed_at = EXCLUDED.computed_at
-                WHERE %s.status
-                          IS DISTINCT FROM EXCLUDED.status
-                   OR %s.from_history_id
-                          IS DISTINCT FROM EXCLUDED.from_history_id
-                   OR %s.to_history_id
-                          IS DISTINCT FROM EXCLUDED.to_history_id
-                   OR %s.added_count
-                          <> EXCLUDED.added_count
-                   OR %s.removed_count
-                          <> EXCLUDED.removed_count
-                   OR %s.version_changed_count
-                          <> EXCLUDED.version_changed_count
-                """.formatted(table, table, table, table, table, table, table);
+                WHERE
+                    (  -- source-pair ordering guard (Codex iter-4 #3 + #4)
+                       c.to_history_id IS NULL
+                       OR (
+                           EXCLUDED.to_history_id IS NOT NULL
+                           AND NOT (c.from_history_id IS NOT NULL
+                                    AND EXCLUDED.from_history_id IS NULL)
+                           AND EXISTS (
+                               SELECT 1
+                               FROM %s existing_h
+                               JOIN %s incoming_h
+                                 ON incoming_h.tenant_id = existing_h.tenant_id
+                                AND incoming_h.device_id = existing_h.device_id
+                               WHERE existing_h.id = c.to_history_id
+                                 AND existing_h.tenant_id = c.tenant_id
+                                 AND existing_h.device_id = c.device_id
+                                 AND incoming_h.id = EXCLUDED.to_history_id
+                                 AND (
+                                     incoming_h.captured_at > existing_h.captured_at
+                                     OR (incoming_h.captured_at = existing_h.captured_at
+                                         AND incoming_h.created_at > existing_h.created_at)
+                                     OR (incoming_h.captured_at = existing_h.captured_at
+                                         AND incoming_h.created_at = existing_h.created_at
+                                         AND incoming_h.id >= existing_h.id)
+                                 )
+                           )
+                       )
+                    )
+                AND
+                    (  -- any column differs (identical-payload no-op)
+                       c.status IS DISTINCT FROM EXCLUDED.status
+                       OR c.from_history_id IS DISTINCT FROM EXCLUDED.from_history_id
+                       OR c.to_history_id IS DISTINCT FROM EXCLUDED.to_history_id
+                       OR c.added_count <> EXCLUDED.added_count
+                       OR c.removed_count <> EXCLUDED.removed_count
+                       OR c.version_changed_count <> EXCLUDED.version_changed_count
+                    )
+                """.formatted(table, historyTable, historyTable);
 
         Query q = em.createNativeQuery(sql);
         q.setParameter("id", UUID.randomUUID());
@@ -234,11 +265,12 @@ public class DiffCacheService {
         validateOutdatedShape(summary);
 
         String table = qualified("endpoint_outdated_software_diff_cache");
-        // Codex 019e8964 iter-2 absorb: see software UPSERT for the
-        // rationale on why source-freshness ordering belongs to the
-        // caller (v2-c-pre-2-B ingest hook) and not this writer.
+        String snapshotTable = qualified("endpoint_outdated_software_snapshots");
+        // Codex 019e8964 iter-4 AGREE: source-pair ordering guard mirror
+        // for outdated cache. See software case for rationale; tuple is
+        // (collected_at, created_at, id) on the outdated snapshot table.
         String sql = """
-                INSERT INTO %s (
+                INSERT INTO %s AS c (
                     id, tenant_id, device_id,
                     from_snapshot_id, to_snapshot_id,
                     status,
@@ -262,21 +294,45 @@ public class DiffCacheService {
                     version_changed_count = EXCLUDED.version_changed_count,
                     available_version_bumped_count = EXCLUDED.available_version_bumped_count,
                     computed_at = EXCLUDED.computed_at
-                WHERE %s.status
-                          IS DISTINCT FROM EXCLUDED.status
-                   OR %s.from_snapshot_id
-                          IS DISTINCT FROM EXCLUDED.from_snapshot_id
-                   OR %s.to_snapshot_id
-                          IS DISTINCT FROM EXCLUDED.to_snapshot_id
-                   OR %s.added_count
-                          <> EXCLUDED.added_count
-                   OR %s.removed_count
-                          <> EXCLUDED.removed_count
-                   OR %s.version_changed_count
-                          <> EXCLUDED.version_changed_count
-                   OR %s.available_version_bumped_count
-                          <> EXCLUDED.available_version_bumped_count
-                """.formatted(table, table, table, table, table, table, table, table);
+                WHERE
+                    (
+                       c.to_snapshot_id IS NULL
+                       OR (
+                           EXCLUDED.to_snapshot_id IS NOT NULL
+                           AND NOT (c.from_snapshot_id IS NOT NULL
+                                    AND EXCLUDED.from_snapshot_id IS NULL)
+                           AND EXISTS (
+                               SELECT 1
+                               FROM %s existing_s
+                               JOIN %s incoming_s
+                                 ON incoming_s.tenant_id = existing_s.tenant_id
+                                AND incoming_s.device_id = existing_s.device_id
+                               WHERE existing_s.id = c.to_snapshot_id
+                                 AND existing_s.tenant_id = c.tenant_id
+                                 AND existing_s.device_id = c.device_id
+                                 AND incoming_s.id = EXCLUDED.to_snapshot_id
+                                 AND (
+                                     incoming_s.collected_at > existing_s.collected_at
+                                     OR (incoming_s.collected_at = existing_s.collected_at
+                                         AND incoming_s.created_at > existing_s.created_at)
+                                     OR (incoming_s.collected_at = existing_s.collected_at
+                                         AND incoming_s.created_at = existing_s.created_at
+                                         AND incoming_s.id >= existing_s.id)
+                                 )
+                           )
+                       )
+                    )
+                AND
+                    (
+                       c.status IS DISTINCT FROM EXCLUDED.status
+                       OR c.from_snapshot_id IS DISTINCT FROM EXCLUDED.from_snapshot_id
+                       OR c.to_snapshot_id IS DISTINCT FROM EXCLUDED.to_snapshot_id
+                       OR c.added_count <> EXCLUDED.added_count
+                       OR c.removed_count <> EXCLUDED.removed_count
+                       OR c.version_changed_count <> EXCLUDED.version_changed_count
+                       OR c.available_version_bumped_count <> EXCLUDED.available_version_bumped_count
+                    )
+                """.formatted(table, snapshotTable, snapshotTable);
 
         Query q = em.createNativeQuery(sql);
         q.setParameter("id", UUID.randomUUID());
