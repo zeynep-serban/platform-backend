@@ -44,10 +44,29 @@ class DeviceGridColumnsTest {
             "startup_windows_firewall_event_log_enabled",
             "services_critical_stopped_count");
 
+    /**
+     * WEB-015 v2-d (schema v5, Codex 019e8a39 iter-1 plan AGREE) — BE-024c
+     * DiffCache 9 cache-fed colIds appended after services_critical_stopped_count.
+     */
+    private static final List<String> EXPECTED_V2D_COL_IDS = List.of(
+            "software_diff_status",
+            "software_diff_added_count",
+            "software_diff_removed_count",
+            "software_diff_version_changed_count",
+            "outdated_diff_status",
+            "outdated_diff_added_count",
+            "outdated_diff_removed_count",
+            "outdated_diff_version_changed_count",
+            "outdated_diff_available_version_bumped_count");
+
     @Test
-    void schemaVersionIsFour() {
-        // WEB-015 v2-b (Codex 019e87bc iter-1 AGREE) — bump 3 to 4.
-        assertThat(DeviceGridColumns.SCHEMA_VERSION).isEqualTo(4);
+    void schemaVersionIsFive() {
+        // Codex 019e8a39 iter-2 must-fix #P1 absorb: bump 4→5 was missed in
+        // the runtime constant but this stale test was still pinning 4. The
+        // service runtime emits DeviceGridColumns.SCHEMA_VERSION into the
+        // audit metadata so a stale test here would have shipped a v4-labelled
+        // payload (web mfe would mis-detect drift).
+        assertThat(DeviceGridColumns.SCHEMA_VERSION).isEqualTo(5);
     }
 
     @Test
@@ -66,6 +85,34 @@ class DeviceGridColumnsTest {
         assertThat(appCtlSvcIdx).isPositive();
         assertThat(ids.subList(appCtlSvcIdx + 1, appCtlSvcIdx + 1 + 6))
                 .containsExactlyElementsOf(EXPECTED_V2B_COL_IDS);
+    }
+
+    @Test
+    void registryAppendsV2dCacheColumnsAfterServicesColumn() {
+        // Codex 019e8a39 iter-2 ask: pin v5 colId order. The 9 cache-fed
+        // columns must immediately follow services_critical_stopped_count
+        // so the canonical (raw-export) order stays stable.
+        List<String> ids = DeviceGridColumns.allColumnIds();
+        int servicesIdx = ids.indexOf("services_critical_stopped_count");
+        assertThat(servicesIdx).isPositive();
+        assertThat(ids.subList(servicesIdx + 1, servicesIdx + 1 + 9))
+                .containsExactlyElementsOf(EXPECTED_V2D_COL_IDS);
+    }
+
+    @Test
+    void v5_softwareDiffStatus_isEnumOnSdcStatus() {
+        GridColumn c = DeviceGridColumns.byId("software_diff_status");
+        assertThat(c).isNotNull();
+        assertThat(c.type()).isEqualTo(ColumnType.ENUM);
+        assertThat(c.sqlExpr()).isEqualTo("sdc.status");
+    }
+
+    @Test
+    void v5_outdatedDiffAvailableVersionBumpedCount_isNumberOnOdcAlias() {
+        GridColumn c = DeviceGridColumns.byId("outdated_diff_available_version_bumped_count");
+        assertThat(c).isNotNull();
+        assertThat(c.type()).isEqualTo(ColumnType.NUMBER);
+        assertThat(c.sqlExpr()).isEqualTo("odc.available_version_bumped_count");
     }
 
     @Test

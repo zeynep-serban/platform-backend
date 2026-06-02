@@ -69,9 +69,9 @@ class DeviceGridExportAuditServiceTest {
     }
 
     @Test
-    void schemaVersionIsExactlyFour() {
-        // WEB-015 v2-b (Codex 019e87bc iter-1 AGREE) — bump 3 to 4 (AG-038
-        // diagnostics + AG-040 startup sentinels + AG-039 services count).
+    void schemaVersionIsExactlyFive() {
+        // WEB-015 v2-d (Codex 019e8a39 iter-1 plan AGREE + iter-2 must-fix #P1
+        // absorb) — bump 4 to 5 (BE-024c DiffCache 9 cache-fed colIds).
         EndpointAuditService auditService = mock(EndpointAuditService.class);
         DeviceGridExportAuditService service = new DeviceGridExportAuditService(auditService);
 
@@ -83,16 +83,16 @@ class DeviceGridExportAuditServiceTest {
         verify(auditService).record(
                 any(), any(), any(), any(), any(), any(), any(),
                 captor.capture(), any(), any());
-        assertThat(captor.getValue()).containsEntry("schemaVersion", 4);
+        assertThat(captor.getValue()).containsEntry("schemaVersion", 5);
     }
 
     @Test
-    void legacySchemaVersionRegression_NotThreeAnymore() {
-        // Drift detector: a silent revert from v4 to v3 must fail this test
-        // immediately. The audit's `columnIdsHash` already changes with every
-        // SCHEMA_VERSION bump (5+ new colIds in v3, 6 in v4), but pinning the
-        // integer here catches a partial revert where someone bumps back the
-        // constant without touching the registry.
+    void legacySchemaVersionRegression_NotFourThreeOrTwoAnymore() {
+        // Drift detector: a silent revert from v5 to v2/v3/v4 must fail this
+        // test immediately. The audit's `columnIdsHash` already changes with
+        // every SCHEMA_VERSION bump (5+ new colIds in v3, 6 in v4, 9 in v5),
+        // but pinning the integer here catches a partial revert where someone
+        // bumps back the constant without touching the registry.
         EndpointAuditService auditService = mock(EndpointAuditService.class);
         DeviceGridExportAuditService service = new DeviceGridExportAuditService(auditService);
 
@@ -104,6 +104,7 @@ class DeviceGridExportAuditServiceTest {
         verify(auditService).record(
                 any(), any(), any(), any(), any(), any(), any(),
                 captor.capture(), any(), any());
+        assertThat(captor.getValue()).doesNotContainEntry("schemaVersion", 4);
         assertThat(captor.getValue()).doesNotContainEntry("schemaVersion", 3);
         assertThat(captor.getValue()).doesNotContainEntry("schemaVersion", 2);
     }

@@ -53,9 +53,20 @@ public final class DeviceGridColumns {
      *       AG-040 startup-exposure sentinels (rdp_enabled +
      *       windows_firewall_event_log_enabled) +
      *       AG-039 services_critical_stopped_count.</li>
+     *   <li>v5 — WEB-015 v2-d (Codex 019e8a39 iter-1 plan AGREE conditional
+     *       on must-fix #1 qualified() helper + must-fix #2 DESC NULLS LAST
+     *       for cache columns): BE-024c DiffCache 9 cache-fed colIds —
+     *       4 software_diff_* + 5 outdated_diff_* from
+     *       endpoint_software_diff_cache + endpoint_outdated_software_diff_cache
+     *       (plain LEFT JOIN; cache UNIQUE per (tenant_id, device_id)). Cache-
+     *       absent device returns NULL for the 9 colIds; cache-present row
+     *       with status=NO_HISTORY returns 'NO_HISTORY' + counts=0. Grid
+     *       stays read-only — no auto-backfill on query (canonical drawer
+     *       endpoint is the live truth; the AFTER_COMMIT listener + the
+     *       10-min DiffCacheBackfillWorker close the catch-up lag).</li>
      * </ul>
      */
-    public static final int SCHEMA_VERSION = 4;
+    public static final int SCHEMA_VERSION = 5;
 
     /** Cached SHA-256 over the canonical, comma-joined column id list. */
     private static volatile String CACHED_COLUMN_IDS_HASH;
@@ -224,7 +235,42 @@ public final class DeviceGridColumns {
                             + " THEN NULL"
                             + " ELSE se.critical_stopped_count"
                             + " END",
-                    ColumnType.NUMBER, false, "Kritik Durdurulmuş Servis Sayısı")
+                    ColumnType.NUMBER, false, "Kritik Durdurulmuş Servis Sayısı"),
+
+            // ────────────────────────── v5 — BE-024c DiffCache 9 cache-fed columns ─────────────────────────
+            //
+            // SCHEMA v5 (Codex 019e8a39 iter-1 plan AGREE): cache columns from
+            // endpoint_software_diff_cache (alias sdc) and
+            // endpoint_outdated_software_diff_cache (alias odc), plain LEFT
+            // JOIN'd by DeviceGridQueryBuilder.buildFromAndJoins via the
+            // UNIQUE(tenant_id, device_id) index.
+            //
+            // Cache-absent device → status / counts return NULL (read-model
+            // "not yet computed" — distinct from 'NO_HISTORY' which is a real
+            // cache row state meaning "device has 0 history rows"). Grid stays
+            // read-only; canonical drawer endpoint is the live truth + the
+            // AFTER_COMMIT listener + 10-min worker close the catch-up lag.
+
+            new GridColumn("software_diff_status", "sdc.status", ColumnType.ENUM, false,
+                    "Yazılım Diff Durumu"),
+            new GridColumn("software_diff_added_count", "sdc.added_count", ColumnType.NUMBER, false,
+                    "Yazılım Eklenen Sayısı"),
+            new GridColumn("software_diff_removed_count", "sdc.removed_count", ColumnType.NUMBER, false,
+                    "Yazılım Kaldırılan Sayısı"),
+            new GridColumn("software_diff_version_changed_count", "sdc.version_changed_count",
+                    ColumnType.NUMBER, false, "Yazılım Sürüm Değişen Sayısı"),
+
+            new GridColumn("outdated_diff_status", "odc.status", ColumnType.ENUM, false,
+                    "Güncel Olmayan Diff Durumu"),
+            new GridColumn("outdated_diff_added_count", "odc.added_count", ColumnType.NUMBER, false,
+                    "Güncel Olmayan Eklenen Sayısı"),
+            new GridColumn("outdated_diff_removed_count", "odc.removed_count", ColumnType.NUMBER, false,
+                    "Güncel Olmayan Kaldırılan Sayısı"),
+            new GridColumn("outdated_diff_version_changed_count", "odc.version_changed_count",
+                    ColumnType.NUMBER, false, "Güncel Olmayan Sürüm Değişen Sayısı"),
+            new GridColumn("outdated_diff_available_version_bumped_count",
+                    "odc.available_version_bumped_count",
+                    ColumnType.NUMBER, false, "Güncel Olmayan Erişilebilir Sürüm Değişen Sayısı")
     );
 
     private static final Map<String, GridColumn> BY_ID;

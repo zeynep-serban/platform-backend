@@ -366,4 +366,105 @@ class DeviceGridQueryBuilderTest {
                 .isInstanceOf(GridQueryValidationException.class)
                 .satisfies(t -> assertThat(((GridQueryValidationException) t).getCode()).isEqualTo(expectedCode));
     }
+
+    // ───────────────────────── v2-d SCHEMA v5 — BE-024c cache cols ─────────────────────────
+
+    @Test
+    void schemaVersion_isFive_v2d() {
+        // Codex 019e8a39 iter-1 plan AGREE: SCHEMA_VERSION bump 4→5 for the
+        // 9 new cache-fed colIds. The export-audit metadata writes this so a
+        // web mfe with GRID_SCHEMA_VERSION=4 detects state drift on its
+        // first response.
+        assertThat(DeviceGridColumns.SCHEMA_VERSION).isEqualTo(5);
+    }
+
+    @Test
+    void v5_cacheCols_areRegistered_andTyped_correctly() {
+        // All 9 v5 cache colIds must be in the registry. Status colIds are
+        // ENUM (set filter); count colIds are NUMBER (number filter).
+        List<String> cacheCols = List.of(
+                "software_diff_status",
+                "software_diff_added_count",
+                "software_diff_removed_count",
+                "software_diff_version_changed_count",
+                "outdated_diff_status",
+                "outdated_diff_added_count",
+                "outdated_diff_removed_count",
+                "outdated_diff_version_changed_count",
+                "outdated_diff_available_version_bumped_count");
+        for (String colId : cacheCols) {
+            assertThat(DeviceGridColumns.byId(colId))
+                    .as("colId %s must be registered", colId).isNotNull();
+        }
+        assertThat(DeviceGridColumns.byId("software_diff_status").type())
+                .isEqualTo(DeviceGridColumns.ColumnType.ENUM);
+        assertThat(DeviceGridColumns.byId("outdated_diff_status").type())
+                .isEqualTo(DeviceGridColumns.ColumnType.ENUM);
+        assertThat(DeviceGridColumns.byId("software_diff_added_count").type())
+                .isEqualTo(DeviceGridColumns.ColumnType.NUMBER);
+        assertThat(DeviceGridColumns.byId("outdated_diff_available_version_bumped_count").type())
+                .isEqualTo(DeviceGridColumns.ColumnType.NUMBER);
+    }
+
+    @Test
+    void v5_cacheJoins_useQualifiedHelper_notHardcodedSchema() {
+        // Codex 019e8a39 iter-1 must-fix #1 absorb: cache joins must route
+        // through the existing qualified() helper, NOT hardcode
+        // "endpoint_admin_service". A custom-schema builder must emit the
+        // join clauses with the custom schema name.
+        DeviceGridQueryBuilder custom =
+                new DeviceGridQueryBuilder("ea_custom_schema", 200, 200, 200);
+        BuiltGridQuery q = custom.buildPageQuery(TENANT, req(null, null, null));
+        assertThat(q.sql())
+                .as("software cache LEFT JOIN uses qualified() schema")
+                .contains("LEFT JOIN ea_custom_schema.endpoint_software_diff_cache sdc")
+                .contains("LEFT JOIN ea_custom_schema.endpoint_outdated_software_diff_cache odc")
+                // Hard-coded schema literal would have shipped exactly this
+                // string — guard against accidental regression by asserting
+                // its absence under the custom schema instance.
+                .doesNotContain("endpoint_admin_service.endpoint_software_diff_cache sdc")
+                .doesNotContain("endpoint_admin_service.endpoint_outdated_software_diff_cache odc");
+    }
+
+    @Test
+    void v5_cacheCol_descSort_pinsNullsLast() {
+        // Codex 019e8a39 iter-1 must-fix #2 absorb: PG default for DESC is
+        // NULLS FIRST. Cache-absent devices (the v5 colIds return NULL) must
+        // NOT surface at the top of a "top N most changed" DESC sort. Pin
+        // NULLS LAST on the 9 cache columns; verify here.
+        List<Map<String, Object>> sortDesc = List.of(
+                Map.of("colId", "software_diff_added_count", "sort", "desc"));
+        BuiltGridQuery q = builder().buildPageQuery(TENANT, req(null, sortDesc, null));
+        assertThat(q.sql())
+                .as("DESC sort on cache count column must explicitly pin NULLS LAST")
+                .contains("sdc.added_count DESC NULLS LAST");
+    }
+
+    @Test
+    void v5_cacheCol_ascSort_doesNotAddNullsLast() {
+        // ASC default in PG is NULLS LAST, so adding it explicitly would be
+        // noise. Pin: no redundant NULLS LAST clause on ASC sort.
+        List<Map<String, Object>> sortAsc = List.of(
+                Map.of("colId", "software_diff_added_count", "sort", "asc"));
+        BuiltGridQuery q = builder().buildPageQuery(TENANT, req(null, sortAsc, null));
+        assertThat(q.sql())
+                .contains("sdc.added_count ASC")
+                .doesNotContain("sdc.added_count ASC NULLS");
+    }
+
+    @Test
+    void v5_nonCacheCol_descSort_doesNotAddNullsLast() {
+        // The NULLS LAST pin is targeted: only the 9 cache columns get it.
+        // Other nullable columns (e.g. health.health_memory_used_percent) keep PG
+        // default behavior to avoid surprising the existing operator habits.
+        List<Map<String, Object>> sortDesc = List.of(
+                Map.of("colId", "health_memory_used_percent", "sort", "desc"));
+        BuiltGridQuery q = builder().buildPageQuery(TENANT, req(null, sortDesc, null));
+        // The non-cache column appears in the SQL without NULLS LAST.
+        // Find the sort segment and verify NULLS LAST is NOT next to it.
+        assertThat(q.sql()).contains("DESC");
+        assertThat(q.sql())
+                .as("non-cache column DESC should not have NULLS LAST")
+                .doesNotContain("health_memory_used_percent DESC NULLS LAST");
+    }
 }

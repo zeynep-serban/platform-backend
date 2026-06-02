@@ -493,6 +493,18 @@ public class DeviceGridQueryBuilder {
                     order.append(", ");
                 }
                 order.append(col.sqlExpr()).append(" ").append(sortDir.toUpperCase(java.util.Locale.ROOT));
+                // WEB-015 v2-d (Codex 019e8a39 iter-1 must-fix #2 absorb):
+                // PostgreSQL's default for DESC is NULLS FIRST. Cache-absent
+                // devices (the 9 v5 colIds return NULL) would otherwise
+                // surface at the TOP of a DESC sort — "most changed devices"
+                // would be polluted by "devices the cache hasn't computed
+                // yet". Pin NULLS LAST on the v5 cache columns so the
+                // operator-visible "top N" is the actually-computed
+                // top N. ASC default is NULLS LAST in PG so no special
+                // handling needed there.
+                if ("desc".equalsIgnoreCase(sortDir) && isCacheColumn(col.colId())) {
+                    order.append(" NULLS LAST");
+                }
                 if ("device_id".equals(col.colId())) {
                     sortedByDeviceId = true;
                 }
@@ -507,6 +519,29 @@ public class DeviceGridQueryBuilder {
             order.append("d.id ASC");
         }
         return order.toString();
+    }
+
+    /**
+     * WEB-015 v2-d (Codex 019e8a39 iter-1 must-fix #2 absorb): the SCHEMA v5
+     * cache-fed colIds whose DESC sort needs an explicit {@code NULLS LAST}
+     * because PG's DESC default places NULL at the top. Hardcoded set match
+     * mirrors the static-constant pattern of the rest of this class — no
+     * dynamic registry annotation lookup, no risk of a registry add silently
+     * dropping the guard.
+     */
+    private static boolean isCacheColumn(String colId) {
+        return switch (colId) {
+            case "software_diff_status",
+                 "software_diff_added_count",
+                 "software_diff_removed_count",
+                 "software_diff_version_changed_count",
+                 "outdated_diff_status",
+                 "outdated_diff_added_count",
+                 "outdated_diff_removed_count",
+                 "outdated_diff_version_changed_count",
+                 "outdated_diff_available_version_bumped_count" -> true;
+            default -> false;
+        };
     }
 
     // ───────────────────────── quick filter ─────────────────────────
@@ -707,6 +742,25 @@ public class DeviceGridQueryBuilder {
                 + "   ORDER BY ds.collected_at DESC, ds.created_at DESC, ds.id DESC"
                 + "   LIMIT 1"
                 + " ) dx ON true"
+                // WEB-015 v2-d (schema v5) BE-024c DiffCache summary cache
+                // tables. Plain LEFT JOIN (not LATERAL) — cache UNIQUE per
+                // (tenant_id, device_id) already guarantees one row per
+                // device. Cache-absent device → 9 cache colIds return NULL
+                // (read-model "not yet computed"; distinct from 'NO_HISTORY'
+                // which is a real cache row state meaning "device has 0
+                // history rows"). Grid stays read-only — the canonical
+                // drawer endpoint is the live truth; the AFTER_COMMIT
+                // listener + 10-min DiffCacheBackfillWorker close the
+                // catch-up lag.
+                //
+                // Codex 019e8a39 iter-1 must-fix #1 absorb: schema name is
+                // routed through the existing qualified() helper, NOT
+                // hardcoded; the DeviceGridQueryBuilderTest pins this with
+                // a custom-schema instance.
+                + " LEFT JOIN " + qualified("endpoint_software_diff_cache") + " sdc"
+                + "   ON sdc.tenant_id = d.tenant_id AND sdc.device_id = d.id"
+                + " LEFT JOIN " + qualified("endpoint_outdated_software_diff_cache") + " odc"
+                + "   ON odc.tenant_id = d.tenant_id AND odc.device_id = d.id"
                 // WEB-015 v2-b (schema v4) AG-040 latest startup-exposure
                 // snapshot. Codex 019e87bc iter-1 must_fix #4: V25 boolean
                 // columns are NOT NULL (fail-closed evidence), so the grid
