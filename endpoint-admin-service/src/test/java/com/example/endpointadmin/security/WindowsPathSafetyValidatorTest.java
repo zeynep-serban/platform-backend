@@ -87,4 +87,38 @@ class WindowsPathSafetyValidatorTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("required");
     }
+
+    // ── Path C2 (Codex 019e893a iter-4) agent C1 mirror guards ─────────
+
+    @Test
+    void rejectsAlternateDataStream() {
+        assertThatThrownBy(() -> WindowsPathSafetyValidator.validate(
+                "C:\\Program Files\\7-Zip\\7z.exe:hiddenstream"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Alternate Data Stream");
+    }
+
+    @Test
+    void rejectsExplicitAdsDataStream() {
+        assertThatThrownBy(() -> WindowsPathSafetyValidator.validate(
+                "C:\\Program Files\\7-Zip\\7z.exe::$DATA"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Alternate Data Stream");
+    }
+
+    @Test
+    void rejectsCurrentDirSegment() {
+        assertThatThrownBy(() -> WindowsPathSafetyValidator.validate(
+                "C:\\Program Files\\.\\7-Zip\\7z.exe"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("current-directory");
+    }
+
+    @Test
+    void rejectsControlCharacter() {
+        assertThatThrownBy(() -> WindowsPathSafetyValidator.validate(
+                "C:\\Program Files\\7-Zip\r\\7z.exe"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("control characters");
+    }
 }

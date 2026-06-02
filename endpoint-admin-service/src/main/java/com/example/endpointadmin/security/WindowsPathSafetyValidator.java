@@ -68,6 +68,30 @@ public final class WindowsPathSafetyValidator {
                     "Detection rule path must not contain parent traversal "
                             + "segments ('..').");
         }
+        // Path C2 (Codex 019e893a iter-4 P1): mirror agent C1 guards —
+        // current-directory `.` segment, control chars, alternate data
+        // stream colon-after-drive-letter.
+        for (String segment : trimmed.split("\\\\")) {
+            if (".".equals(segment)) {
+                throw new IllegalArgumentException(
+                        "Detection rule path must not contain current-directory "
+                                + "segments ('.').");
+            }
+        }
+        for (int i = 0; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            if (c < 0x20) {
+                throw new IllegalArgumentException(
+                        "Detection rule path must not contain control characters.");
+            }
+        }
+        // Drive-colon-only check: any colon after index 1 indicates NTFS
+        // Alternate Data Stream syntax (`C:\foo.exe:bar`, `C:\foo.exe::$DATA`).
+        if (trimmed.length() > 2 && trimmed.substring(2).indexOf(':') >= 0) {
+            throw new IllegalArgumentException(
+                    "Detection rule path must not contain Alternate Data Stream "
+                            + "syntax (extra colon after the drive letter).");
+        }
         if (containsShortNameAlias(trimmed)) {
             throw new IllegalArgumentException(
                     "Detection rule path must not contain 8.3 short-name "

@@ -282,12 +282,17 @@ class EndpointAdminCommandServiceInstallTest {
         assertThat(dto.payload()).containsEntry("argsPolicyPreset", "VENDOR_RECOMMENDED_WINGET_NO_UPGRADE");
     }
 
+    // Path C2 (Codex 019e893a): FILE_EXISTS, FILE_SHA256, FILE_VERSION are
+    // now agent-installable. The pre-C2 fail-closed-on-FILE_* test has been
+    // replaced with positive forward tests that assert the wire payload
+    // includes the agent's canonical `path` field (renamed from the catalog
+    // `absolutePath`) + the per-type extras.
+
     @Test
-    void createInstallFailsClosedOnFileDetectionRuleNotYetAgentInstallable() {
+    void createInstallForwardsFileExistsDetectionRule() {
         EndpointDevice device = testDevice(DEVICE_ID);
         EndpointSoftwareCatalogItem catalog = testCatalog();
         Map<String, Object> rule = new LinkedHashMap<>();
-        // FILE_EXISTS is a valid catalog rule but not yet agent-installable.
         rule.put("type", "FILE_EXISTS");
         rule.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
         catalog.setDetectionRule(rule);
@@ -299,14 +304,120 @@ class EndpointAdminCommandServiceInstallTest {
                 .thenReturn(Optional.empty());
         when(preflightService.evaluate(TENANT, DEVICE_ID, CATALOG_SLUG))
                 .thenReturn(preflightOf(InstallPreflightDecision.PASS));
+        when(commandRepository.saveAndFlush(any(EndpointCommand.class)))
+                .thenAnswer(inv -> {
+                    EndpointCommand cmd = inv.getArgument(0);
+                    setField(cmd, "id", UUID.randomUUID());
+                    setField(cmd, "createdAt", Instant.now());
+                    return cmd;
+                });
 
-        // Fail-closed: a not-yet-agent-installable rule must NOT be silently
-        // converted into a fabricated WINGET_PACKAGE rule and queued.
-        assertThatThrownBy(() -> service.createInstall(
-                TENANT, DEVICE_ID, new CreateInstallRequest(CATALOG_SLUG, CALLER_KEY, null)))
-                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class)
-                .hasMessageContaining("detection_rule_type_not_supported_by_agent");
-        verify(commandRepository, org.mockito.Mockito.never()).saveAndFlush(any(EndpointCommand.class));
+        service.createInstall(TENANT, DEVICE_ID,
+                new CreateInstallRequest(CATALOG_SLUG, CALLER_KEY, null));
+
+        org.mockito.ArgumentCaptor<EndpointCommand> captor =
+                org.mockito.ArgumentCaptor.forClass(EndpointCommand.class);
+        verify(commandRepository).saveAndFlush(captor.capture());
+        EndpointCommand saved = captor.getValue();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payload = saved.getPayload();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> wireRule = (Map<String, Object>) payload.get("detectionRule");
+        assertThat(wireRule).containsEntry("type", "FILE_EXISTS");
+        // Agent contract: `path` (not catalog `absolutePath`).
+        assertThat(wireRule).containsEntry("path", "C:\\Program Files\\7-Zip\\7z.exe");
+        assertThat(wireRule).doesNotContainKey("absolutePath");
+    }
+
+    @Test
+    void createInstallForwardsFileSha256DetectionRule() {
+        EndpointDevice device = testDevice(DEVICE_ID);
+        EndpointSoftwareCatalogItem catalog = testCatalog();
+        Map<String, Object> rule = new LinkedHashMap<>();
+        rule.put("type", "FILE_SHA256");
+        rule.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        rule.put("expectedSha256", "a".repeat(64));
+        rule.put("maxHashBytes", 256 * 1024L);
+        catalog.setDetectionRule(rule);
+        when(deviceRepository.findByTenantIdAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(catalogRepository.findByTenantIdAndCatalogItemId(TENANT_ID, CATALOG_SLUG))
+                .thenReturn(Optional.of(catalog));
+        when(commandRepository.findByTenantIdAndIdempotencyKey(TENANT_ID,
+                "admin-install:" + DEVICE_ID + ":" + CATALOG_UUID + ":" + CALLER_KEY))
+                .thenReturn(Optional.empty());
+        when(preflightService.evaluate(TENANT, DEVICE_ID, CATALOG_SLUG))
+                .thenReturn(preflightOf(InstallPreflightDecision.PASS));
+        when(commandRepository.saveAndFlush(any(EndpointCommand.class)))
+                .thenAnswer(inv -> {
+                    EndpointCommand cmd = inv.getArgument(0);
+                    setField(cmd, "id", UUID.randomUUID());
+                    setField(cmd, "createdAt", Instant.now());
+                    return cmd;
+                });
+
+        service.createInstall(TENANT, DEVICE_ID,
+                new CreateInstallRequest(CATALOG_SLUG, CALLER_KEY, null));
+
+        org.mockito.ArgumentCaptor<EndpointCommand> captor =
+                org.mockito.ArgumentCaptor.forClass(EndpointCommand.class);
+        verify(commandRepository).saveAndFlush(captor.capture());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payload = captor.getValue().getPayload();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> wireRule = (Map<String, Object>) payload.get("detectionRule");
+        assertThat(wireRule).containsEntry("type", "FILE_SHA256")
+                .containsEntry("path", "C:\\Program Files\\7-Zip\\7z.exe")
+                .containsEntry("expectedSha256", "a".repeat(64))
+                .containsEntry("maxHashBytes", 256 * 1024L);
+        assertThat(wireRule).doesNotContainKey("absolutePath");
+    }
+
+    @Test
+    void createInstallForwardsFileVersionDetectionRule() {
+        EndpointDevice device = testDevice(DEVICE_ID);
+        EndpointSoftwareCatalogItem catalog = testCatalog();
+        Map<String, Object> rule = new LinkedHashMap<>();
+        rule.put("type", "FILE_VERSION");
+        rule.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        Map<String, Object> predicate = new LinkedHashMap<>();
+        predicate.put("type", "EXACT");
+        predicate.put("spec", "24.07");
+        rule.put("versionPredicate", predicate);
+        rule.put("fileVersionField", "PRODUCT_VERSION");
+        catalog.setDetectionRule(rule);
+        when(deviceRepository.findByTenantIdAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(catalogRepository.findByTenantIdAndCatalogItemId(TENANT_ID, CATALOG_SLUG))
+                .thenReturn(Optional.of(catalog));
+        when(commandRepository.findByTenantIdAndIdempotencyKey(TENANT_ID,
+                "admin-install:" + DEVICE_ID + ":" + CATALOG_UUID + ":" + CALLER_KEY))
+                .thenReturn(Optional.empty());
+        when(preflightService.evaluate(TENANT, DEVICE_ID, CATALOG_SLUG))
+                .thenReturn(preflightOf(InstallPreflightDecision.PASS));
+        when(commandRepository.saveAndFlush(any(EndpointCommand.class)))
+                .thenAnswer(inv -> {
+                    EndpointCommand cmd = inv.getArgument(0);
+                    setField(cmd, "id", UUID.randomUUID());
+                    setField(cmd, "createdAt", Instant.now());
+                    return cmd;
+                });
+
+        service.createInstall(TENANT, DEVICE_ID,
+                new CreateInstallRequest(CATALOG_SLUG, CALLER_KEY, null));
+
+        org.mockito.ArgumentCaptor<EndpointCommand> captor =
+                org.mockito.ArgumentCaptor.forClass(EndpointCommand.class);
+        verify(commandRepository).saveAndFlush(captor.capture());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payload = captor.getValue().getPayload();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> wireRule = (Map<String, Object>) payload.get("detectionRule");
+        assertThat(wireRule).containsEntry("type", "FILE_VERSION")
+                .containsEntry("path", "C:\\Program Files\\7-Zip\\7z.exe")
+                .containsEntry("fileVersionField", "PRODUCT_VERSION");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> p = (Map<String, Object>) wireRule.get("versionPredicate");
+        assertThat(p).containsEntry("type", "EXACT").containsEntry("spec", "24.07");
+        assertThat(wireRule).doesNotContainKey("absolutePath");
     }
 
     @Test

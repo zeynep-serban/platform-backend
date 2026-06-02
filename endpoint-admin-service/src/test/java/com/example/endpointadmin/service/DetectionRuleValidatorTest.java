@@ -344,6 +344,213 @@ class DetectionRuleValidatorTest {
                 .hasMessageContaining("64-character");
     }
 
+    // ── Path C2 FILE_SHA256 maxHashBytes (Codex 019e893a) ─────────────
+
+    @Test
+    void acceptsFileSha256WithMaxHashBytesUnderCap() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_SHA256");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        raw.put("expectedSha256", "a".repeat(64));
+        raw.put("maxHashBytes", 1024L * 1024); // 1 MiB
+
+        Map<String, Object> normalized = validator.validateAndNormalize(raw);
+        assertThat(normalized).containsEntry("maxHashBytes", 1024L * 1024);
+    }
+
+    @Test
+    void rejectsFileSha256MaxHashBytesAboveAgentCap() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_SHA256");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        raw.put("expectedSha256", "a".repeat(64));
+        raw.put("maxHashBytes", DetectionRuleValidator.FILE_MAX_HASH_BYTES_AGENT + 1);
+
+        assertThatThrownBy(() -> validator.validateAndNormalize(raw))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("agent hard cap");
+    }
+
+    @Test
+    void rejectsFileSha256MaxHashBytesNegative() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_SHA256");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        raw.put("expectedSha256", "a".repeat(64));
+        raw.put("maxHashBytes", -1L);
+
+        assertThatThrownBy(() -> validator.validateAndNormalize(raw))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(">= 0");
+    }
+
+    // Codex 019e893a iter-4 P1: maxHashBytes must reject fractional values.
+
+    @Test
+    void rejectsFileSha256MaxHashBytesFractional() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_SHA256");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        raw.put("expectedSha256", "a".repeat(64));
+        raw.put("maxHashBytes", 1.5d); // fractional
+
+        assertThatThrownBy(() -> validator.validateAndNormalize(raw))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must be an integer");
+    }
+
+    @Test
+    void rejectsFileSha256MaxHashBytesNonNumericString() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_SHA256");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        raw.put("expectedSha256", "a".repeat(64));
+        raw.put("maxHashBytes", "1.5"); // numeric string but fractional
+
+        assertThatThrownBy(() -> validator.validateAndNormalize(raw))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must be an integer");
+    }
+
+    // ── Path C2 FILE_VERSION (Codex 019e893a Opsiyon C) ───────────────
+
+    @Test
+    void acceptsFileVersionWithLatestPredicate() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_VERSION");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        Map<String, Object> predicate = new LinkedHashMap<>();
+        predicate.put("type", "LATEST");
+        raw.put("versionPredicate", predicate);
+
+        Map<String, Object> normalized = validator.validateAndNormalize(raw);
+        assertThat(normalized).containsEntry("type", "FILE_VERSION");
+        assertThat(normalized).containsEntry("absolutePath",
+                "C:\\Program Files\\7-Zip\\7z.exe");
+        assertThat(normalized).containsEntry("fileVersionField", "FILE_VERSION");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> normalizedPredicate = (Map<String, Object>) normalized.get("versionPredicate");
+        assertThat(normalizedPredicate).containsEntry("type", "LATEST");
+        // spec dropped for LATEST
+        assertThat(normalizedPredicate).doesNotContainKey("spec");
+    }
+
+    @Test
+    void acceptsFileVersionWithExactPredicateAndProductVersion() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_VERSION");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        Map<String, Object> predicate = new LinkedHashMap<>();
+        predicate.put("type", "EXACT");
+        predicate.put("spec", "24.07");
+        raw.put("versionPredicate", predicate);
+        raw.put("fileVersionField", "PRODUCT_VERSION");
+
+        Map<String, Object> normalized = validator.validateAndNormalize(raw);
+        assertThat(normalized).containsEntry("fileVersionField", "PRODUCT_VERSION");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> p = (Map<String, Object>) normalized.get("versionPredicate");
+        assertThat(p).containsEntry("type", "EXACT").containsEntry("spec", "24.07");
+    }
+
+    @Test
+    void acceptsFileVersionWithRangePredicate() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_VERSION");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        Map<String, Object> predicate = new LinkedHashMap<>();
+        predicate.put("type", "RANGE");
+        predicate.put("spec", "[24.06,24.08)");
+        raw.put("versionPredicate", predicate);
+
+        Map<String, Object> normalized = validator.validateAndNormalize(raw);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> p = (Map<String, Object>) normalized.get("versionPredicate");
+        assertThat(p).containsEntry("type", "RANGE").containsEntry("spec", "[24.06,24.08)");
+    }
+
+    @Test
+    void rejectsFileVersionWithoutPredicate() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_VERSION");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+
+        assertThatThrownBy(() -> validator.validateAndNormalize(raw))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("versionPredicate");
+    }
+
+    @Test
+    void rejectsFileVersionExactMissingSpec() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_VERSION");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        Map<String, Object> predicate = new LinkedHashMap<>();
+        predicate.put("type", "EXACT");
+        raw.put("versionPredicate", predicate);
+
+        assertThatThrownBy(() -> validator.validateAndNormalize(raw))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("EXACT requires a non-blank 'spec'");
+    }
+
+    @Test
+    void rejectsFileVersionRangeMalformedSpec() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_VERSION");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        Map<String, Object> predicate = new LinkedHashMap<>();
+        predicate.put("type", "RANGE");
+        predicate.put("spec", "24.07-24.08"); // not bracket form
+        raw.put("versionPredicate", predicate);
+
+        assertThatThrownBy(() -> validator.validateAndNormalize(raw))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("bracket form");
+    }
+
+    @Test
+    void rejectsFileVersionUnknownPredicateType() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_VERSION");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        Map<String, Object> predicate = new LinkedHashMap<>();
+        predicate.put("type", "REGEX");
+        predicate.put("spec", ".*");
+        raw.put("versionPredicate", predicate);
+
+        assertThatThrownBy(() -> validator.validateAndNormalize(raw))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not in the allowlist");
+    }
+
+    @Test
+    void rejectsFileVersionInvalidFileVersionField() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_VERSION");
+        raw.put("absolutePath", "C:\\Program Files\\7-Zip\\7z.exe");
+        Map<String, Object> predicate = new LinkedHashMap<>();
+        predicate.put("type", "LATEST");
+        raw.put("versionPredicate", predicate);
+        raw.put("fileVersionField", "Description");
+
+        assertThatThrownBy(() -> validator.validateAndNormalize(raw))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("FILE_VERSION or PRODUCT_VERSION");
+    }
+
+    @Test
+    void rejectsFileVersionRequiresAbsolutePath() {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("type", "FILE_VERSION");
+        Map<String, Object> predicate = new LinkedHashMap<>();
+        predicate.put("type", "LATEST");
+        raw.put("versionPredicate", predicate);
+
+        assertThatThrownBy(() -> validator.validateAndNormalize(raw))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
     // ── raw-command boundary (BE-020 RED) ─────────────────────────────
 
     @Test
