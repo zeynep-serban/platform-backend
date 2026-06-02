@@ -6,6 +6,7 @@ import com.example.endpointadmin.model.EndpointOutdatedSoftwarePackage;
 import com.example.endpointadmin.model.EndpointOutdatedSoftwareSnapshot;
 import com.example.endpointadmin.repository.EndpointOutdatedSoftwareSnapshotRepository;
 import com.example.endpointadmin.security.AdminTenantContext;
+import com.example.endpointadmin.service.diff.OutdatedDiffSummary;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -37,6 +38,76 @@ public class EndpointOutdatedSoftwareDiffService {
     public EndpointOutdatedSoftwareDiffService(
             EndpointOutdatedSoftwareSnapshotRepository repository) {
         this.repository = repository;
+    }
+
+    /**
+     * BE-024c (Codex 019e88b5 iter-5 AGREE) — count-only summary for the
+     * BE-024b outdated-software diff. Same algorithm as
+     * {@link #diffLatest(AdminTenantContext, UUID)} but never materializes the
+     * added/removed/versionChanged/availableVersionBumped DTO lists; intended
+     * for the diff cache write path (hot ingest hook + operator-triggered
+     * backfill).
+     *
+     * <p>Tenant-scoped signature — Codex 019e88b5 iter-3 must_fix #1: cache
+     * write path is service-internal; tenant id arrives from the ingest hook
+     * or backfill worker.
+     */
+    @Transactional(readOnly = true)
+    public OutdatedDiffSummary summarize(UUID tenantId, UUID deviceId) {
+        List<EndpointOutdatedSoftwareSnapshot> latestTwo = repository
+                .findByTenantIdAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
+                        tenantId, deviceId, PageRequest.of(0, 2))
+                .getContent();
+
+        if (latestTwo.isEmpty()) {
+            return OutdatedDiffSummary.noHistory();
+        }
+        EndpointOutdatedSoftwareSnapshot to = latestTwo.get(0);
+        if (latestTwo.size() == 1) {
+            return OutdatedDiffSummary.insufficientHistory(to.getId());
+        }
+        EndpointOutdatedSoftwareSnapshot from = latestTwo.get(1);
+
+        Map<String, EndpointOutdatedSoftwarePackage> fromMap = indexByCanonicalKey(
+                from.getPackages(), from.getId());
+        Map<String, EndpointOutdatedSoftwarePackage> toMap = indexByCanonicalKey(
+                to.getPackages(), to.getId());
+
+        int addedCount = 0;
+        int removedCount = 0;
+        int versionChangedCount = 0;
+        int availableVersionBumpedCount = 0;
+
+        for (Map.Entry<String, EndpointOutdatedSoftwarePackage> e : toMap.entrySet()) {
+            EndpointOutdatedSoftwarePackage toPkg = e.getValue();
+            EndpointOutdatedSoftwarePackage fromPkg = fromMap.get(e.getKey());
+            if (fromPkg == null) {
+                addedCount++;
+                continue;
+            }
+            boolean installedDelta = !Objects.equals(
+                    fromPkg.getInstalledVersion(), toPkg.getInstalledVersion());
+            boolean availableDelta = !Objects.equals(
+                    fromPkg.getAvailableVersion(), toPkg.getAvailableVersion());
+            if (installedDelta) {
+                versionChangedCount++;
+            } else if (availableDelta) {
+                availableVersionBumpedCount++;
+            }
+        }
+        for (String key : fromMap.keySet()) {
+            if (!toMap.containsKey(key)) {
+                removedCount++;
+            }
+        }
+
+        int totalDelta = addedCount + removedCount + versionChangedCount + availableVersionBumpedCount;
+        if (totalDelta == 0) {
+            return OutdatedDiffSummary.noChange(from.getId(), to.getId());
+        }
+        return OutdatedDiffSummary.ok(
+                from.getId(), to.getId(),
+                addedCount, removedCount, versionChangedCount, availableVersionBumpedCount);
     }
 
     @Transactional(readOnly = true)

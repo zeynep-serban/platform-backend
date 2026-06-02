@@ -5,6 +5,7 @@ import com.example.endpointadmin.dto.v1.admin.AdminSoftwareInventoryDiffResponse
 import com.example.endpointadmin.model.EndpointSoftwareInventoryStateHistory;
 import com.example.endpointadmin.repository.EndpointSoftwareInventoryStateHistoryRepository;
 import com.example.endpointadmin.security.AdminTenantContext;
+import com.example.endpointadmin.service.diff.SoftwareDiffSummary;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -80,6 +81,76 @@ public class EndpointSoftwareInventoryDiffService {
         }
         EndpointSoftwareInventoryStateHistory previous = latestTwo.get(1);
         return computeDiff(deviceId, previous, latest);
+    }
+
+    /**
+     * BE-024c (Codex 019e88b5 iter-5 AGREE) — count-only summary for the
+     * BE-024 software diff. Reads the latest two history captures + computes
+     * delta counts WITHOUT materializing the added/removed/versionChanged
+     * lists; intended for the diff cache write path (hot ingest hook +
+     * operator-triggered backfill) where the grid only needs counts and
+     * the full lists stay drawer-canonical.
+     *
+     * <p>Tenant-scoped signature — Codex 019e88b5 iter-3 must_fix #1: cache
+     * write path is service-internal so the canonical
+     * {@code AdminTenantContext} variant is not needed here; the tenant id
+     * arrives from the ingest hook or backfill worker (both already
+     * tenant-validated upstream).
+     */
+    @Transactional(readOnly = true)
+    public SoftwareDiffSummary summarize(UUID tenantId, UUID deviceId) {
+        List<EndpointSoftwareInventoryStateHistory> latestTwo = historyRepository
+                .findByTenantIdAndDeviceIdOrderByCapturedAtDescCreatedAtDescIdDesc(
+                        tenantId, deviceId, PageRequest.of(0, 2));
+
+        if (latestTwo.isEmpty()) {
+            return SoftwareDiffSummary.noHistory();
+        }
+        EndpointSoftwareInventoryStateHistory latest = latestTwo.get(0);
+        if (latestTwo.size() == 1) {
+            return SoftwareDiffSummary.insufficientHistory(latest.getId());
+        }
+        EndpointSoftwareInventoryStateHistory previous = latestTwo.get(1);
+
+        // Fast path: byte-identical re-collect.
+        if (previous.getAppsDigestHash() != null
+                && previous.getAppsDigestHash().equals(latest.getAppsDigestHash())) {
+            return SoftwareDiffSummary.noChange(previous.getId(), latest.getId());
+        }
+
+        // Count-only walk — same algorithm as computeDiff() but never
+        // materialize the per-app DTOs. The cache row only carries counts;
+        // the drawer endpoint keeps the full list path.
+        Map<String, Map<String, Object>> prevByKey = indexByAppKey(previous.getAppsDigest());
+        Map<String, Map<String, Object>> latestByKey = indexByAppKey(latest.getAppsDigest());
+
+        int addedCount = 0;
+        int removedCount = 0;
+        int versionChangedCount = 0;
+        for (Map.Entry<String, Map<String, Object>> e : latestByKey.entrySet()) {
+            Map<String, Object> prevEntry = prevByKey.get(e.getKey());
+            if (prevEntry == null) {
+                addedCount++;
+            } else if (!Objects.equals(
+                    str(prevEntry, SoftwareInventoryDigest.KEY_VERSION),
+                    str(e.getValue(), SoftwareInventoryDigest.KEY_VERSION))) {
+                versionChangedCount++;
+            }
+        }
+        for (String key : prevByKey.keySet()) {
+            if (!latestByKey.containsKey(key)) {
+                removedCount++;
+            }
+        }
+        // Codex 019e88b5 iter-6 must_fix #1 — drawer parity. The canonical
+        // computeDiff() always returns OK once the digest-hash fast path is
+        // skipped, even when the per-key walk yields empty lists (e.g. only
+        // display_name re-titled — KEY_VERSION unchanged). The summary MUST
+        // match that semantics so a future v2-d grid cannot show NO_CHANGE
+        // while the drawer endpoint shows OK for the same source pair.
+        return SoftwareDiffSummary.ok(
+                previous.getId(), latest.getId(),
+                addedCount, removedCount, versionChangedCount);
     }
 
     /**
