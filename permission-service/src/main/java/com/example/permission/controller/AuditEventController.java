@@ -4,8 +4,10 @@ import com.example.commonauth.openfga.RequireModule;
 import com.example.permission.audit.AuditReadScope;
 import com.example.permission.audit.ImpersonationActionPredicate;
 import com.example.permission.dto.AuditEventPageResponse;
+import com.example.permission.dto.audit.AuditWeeklyDigestResponse;
 import com.example.permission.dto.v1.AuditExportJobCreateRequestDto;
 import com.example.permission.dto.v1.AuditExportJobResponseDto;
+import com.example.permission.service.AuditEventDigestService;
 import com.example.permission.service.AuditEventService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpHeaders;
@@ -23,6 +25,8 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -31,9 +35,79 @@ import java.util.Map;
 public class AuditEventController {
 
     private final AuditEventService auditEventService;
+    private final AuditEventDigestService digestService;
 
-    public AuditEventController(AuditEventService auditEventService) {
+    public AuditEventController(AuditEventService auditEventService,
+                                AuditEventDigestService digestService) {
         this.auditEventService = auditEventService;
+        this.digestService = digestService;
+    }
+
+    /**
+     * PR-D2.5a (Codex 019e8708 AGREE option A constrained): Source-owned
+     * weekly audit event digest.
+     *
+     * <p>Returns ISO-week-bucketed aggregates: per-week totalEventCount,
+     * distinctUserCount, actionBreakdown (action → count map),
+     * serviceBreakdown (service → count map), and topUsers (top-K by event
+     * count with deterministic tie-break).
+     *
+     * <p>Required query params:
+     * <ul>
+     *   <li>{@code dateFrom} (ISO-8601 instant)</li>
+     *   <li>{@code dateTo} (ISO-8601 instant, strictly > dateFrom, max 366d range)</li>
+     * </ul>
+     *
+     * <p>Optional filters:
+     * <ul>
+     *   <li>{@code action} / {@code service} / {@code level} / {@code user} (email or numeric userId) / {@code search}</li>
+     *   <li>{@code topK} (default 5, max 20)</li>
+     * </ul>
+     *
+     * <p>Authorized by {@code AUDIT.can_view} — same scope as generic
+     * {@code GET /api/audit/events}. Tenant boundary preserved via
+     * existing {@code @RequireModule} OpenFGA propagation.
+     */
+    @GetMapping("/digest")
+    @RequireModule(value = "AUDIT", relation = "can_view")
+    public ResponseEntity<AuditWeeklyDigestResponse> weeklyDigest(
+            @RequestParam(name = "dateFrom") String dateFromRaw,
+            @RequestParam(name = "dateTo") String dateToRaw,
+            @RequestParam(required = false) String action,
+            @RequestParam(required = false) String service,
+            @RequestParam(required = false) String level,
+            // Codex 019e8721 P1 absorb: sprint contract param name is `user`
+            // (email or userId). Repository binds via OR predicate on
+            // performed_by::text + user_email; numeric values match userId,
+            // non-numeric match email.
+            @RequestParam(required = false, name = "user") String userIdentity,
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false) Integer topK) {
+
+        Instant dateFrom = parseInstantOrBadRequest(dateFromRaw, "dateFrom");
+        Instant dateTo = parseInstantOrBadRequest(dateToRaw, "dateTo");
+
+        // P1 absorb: scope defaults to GENERIC_AUDIT — endpoint gated by
+        // @RequireModule(AUDIT, can_view). IMPERSONATION_AUDIT digest would
+        // be a separate endpoint @RequireModule(IMPERSONATION_AUDIT,
+        // can_view) (PR-D2.5a-followup if/when needed).
+        AuditWeeklyDigestResponse response = digestService.aggregate(
+                dateFrom, dateTo, action, service, level, userIdentity, search, topK,
+                com.example.permission.audit.AuditReadScope.GENERIC_AUDIT);
+        return ResponseEntity.ok(response);
+    }
+
+    private static Instant parseInstantOrBadRequest(String raw, String fieldName) {
+        if (raw == null || raw.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    fieldName + " required (ISO-8601 instant)");
+        }
+        try {
+            return Instant.parse(raw);
+        } catch (DateTimeParseException ex) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    fieldName + " must be ISO-8601 instant (e.g. 2026-05-26T00:00:00Z)");
+        }
     }
 
     @GetMapping

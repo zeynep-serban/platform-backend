@@ -61,11 +61,13 @@ class AuditEventControllerRequireModuleTest {
         authzService = mock(OpenFgaAuthzService.class);
         userLookupService = mock(AuthenticatedUserLookupService.class);
         auditEventService = mock(AuditEventService.class);
+        com.example.permission.service.AuditEventDigestService digestService =
+                mock(com.example.permission.service.AuditEventDigestService.class);
 
         when(authzService.isEnabled()).thenReturn(true);
 
         mockMvc = MockMvcBuilders
-                .standaloneSetup(new AuditEventController(auditEventService))
+                .standaloneSetup(new AuditEventController(auditEventService, digestService))
                 .addInterceptors(new RequireModuleInterceptor(authzService, userLookupService))
                 .build();
     }

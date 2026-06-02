@@ -5,6 +5,7 @@ import com.example.permission.audit.ImpersonationAuditEventTypes;
 import com.example.permission.dto.AuditEventPageResponse;
 import com.example.permission.dto.AuditEventResponse;
 import com.example.permission.dto.v1.AuditExportJobResponseDto;
+import com.example.permission.service.AuditEventDigestService;
 import com.example.permission.service.AuditEventService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -42,6 +43,9 @@ class AuditEventControllerTest {
 
     @MockitoBean
     private AuditEventService auditEventService;
+
+    @MockitoBean
+    private AuditEventDigestService digestService;
 
     // PR-D2: PR-B Step 1 (commit a918534) introduced the
     // ImpersonationContextFilter @Component which is auto-picked up by
