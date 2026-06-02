@@ -10,6 +10,8 @@ import org.springframework.web.server.ResponseStatusException;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
@@ -183,5 +185,97 @@ class EndpointComplianceGapServiceTest {
 
         DeviceComplianceGap item = response.items().get(0);
         assertThat(item.deviceName()).isEqualTo("HOST-A");
+    }
+
+    /**
+     * Faz 22.7 D2.1 hotfix LIVE regression guard.
+     *
+     * <p>Hibernate 6 + PG JDBC return TIMESTAMPTZ columns as
+     * {@link OffsetDateTime} by default; the original implementation
+     * blindly cast to {@link Timestamp}, throwing ClassCastException at
+     * runtime on testai (verified browser-smoke 2026-06-02). The unit
+     * suite previously fed {@code Timestamp} fixtures only — so the bug
+     * shipped green. This case pins the OffsetDateTime path explicitly.
+     */
+    @Test
+    void handlesOffsetDateTimeFromHibernate6PgDriver() {
+        OffsetDateTime startupOdt =
+                OffsetDateTime.parse("2026-06-02T08:00:00Z");
+        OffsetDateTime hotfixOdt =
+                OffsetDateTime.parse("2026-06-02T09:00:00Z");
+
+        when(repository.findGapDevices(any(), any(), any(), anyInt(), anyInt()))
+                .thenReturn(List.<Object[]>of(new Object[]{
+                        DEVICE_1, "HOST-1", "Display 1",
+                        Boolean.TRUE, startupOdt,
+                        7, hotfixOdt
+                }));
+        when(repository.countGapDevices(any(), any(), any()))
+                .thenReturn(1L);
+
+        ComplianceGapResponse response = service.findGaps(
+                TENANT, null, null, 1, 50);
+
+        DeviceComplianceGap item = response.items().get(0);
+        assertThat(item.gaps()).hasSize(2);
+        assertThat(item.lastSeen())
+                .isEqualTo(Instant.parse("2026-06-02T09:00:00Z"));
+        assertThat(item.gaps().get(0).sourceSnapshotCollectedAt())
+                .isEqualTo(Instant.parse("2026-06-02T08:00:00Z"));
+    }
+
+    /**
+     * Faz 22.7 D2.1 hotfix: defensive coercion also accepts raw
+     * {@link Instant} (some PG driver/Hibernate combinations return this
+     * directly without OffsetDateTime).
+     */
+    @Test
+    void handlesInstantFromAlternateDriver() {
+        Instant startupInst = Instant.parse("2026-06-02T08:00:00Z");
+
+        when(repository.findGapDevices(any(), any(), any(), anyInt(), anyInt()))
+                .thenReturn(List.<Object[]>of(new Object[]{
+                        DEVICE_1, "HOST-1", null,
+                        Boolean.TRUE, startupInst,
+                        null, null
+                }));
+        when(repository.countGapDevices(any(), any(), any()))
+                .thenReturn(1L);
+
+        ComplianceGapResponse response = service.findGaps(
+                TENANT, null, null, 1, 50);
+
+        DeviceComplianceGap item = response.items().get(0);
+        assertThat(item.gaps()).hasSize(1);
+        assertThat(item.lastSeen())
+                .isEqualTo(Instant.parse("2026-06-02T08:00:00Z"));
+    }
+
+    /**
+     * Helper unit tests — Timestamp, OffsetDateTime, Instant, LocalDateTime,
+     * null. Unknown type should fail loudly so future driver regressions are
+     * caught instead of silently producing null.
+     */
+    @Test
+    void toInstantHandlesAllDocumentedVariants() {
+        Instant expected = Instant.parse("2026-06-02T08:00:00Z");
+
+        assertThat(EndpointComplianceGapService.toInstant(Timestamp.from(expected)))
+                .isEqualTo(expected);
+        assertThat(EndpointComplianceGapService.toInstant(expected.atOffset(ZoneOffset.UTC)))
+                .isEqualTo(expected);
+        assertThat(EndpointComplianceGapService.toInstant(expected))
+                .isEqualTo(expected);
+        assertThat(EndpointComplianceGapService.toInstant(
+                java.time.LocalDateTime.ofInstant(expected, ZoneOffset.UTC)))
+                .isEqualTo(expected);
+        assertThat(EndpointComplianceGapService.toInstant(null)).isNull();
+    }
+
+    @Test
+    void toInstantRejectsUnknownType() {
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class,
+                () -> EndpointComplianceGapService.toInstant("2026-06-02"));
     }
 }

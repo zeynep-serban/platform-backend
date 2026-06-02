@@ -13,6 +13,8 @@ import org.springframework.web.server.ResponseStatusException;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -108,12 +110,17 @@ public class EndpointComplianceGapService {
             String hostname = (String) r[1];
             String displayName = (String) r[2];
             Boolean rdpEnabled = (Boolean) r[3];
-            Timestamp startupCollectedTs = (Timestamp) r[4];
             Integer pendingTotalCount = r[5] == null ? null : ((Number) r[5]).intValue();
-            Timestamp hotfixCollectedTs = (Timestamp) r[6];
 
-            Instant startupCollected = startupCollectedTs == null ? null : startupCollectedTs.toInstant();
-            Instant hotfixCollected = hotfixCollectedTs == null ? null : hotfixCollectedTs.toInstant();
+            // Faz 22.7 D2.1 hotfix (LIVE smoke 2026-06-02): TIMESTAMPTZ columns
+            // come back as java.time.OffsetDateTime under Hibernate 6 + PG JDBC,
+            // NOT java.sql.Timestamp. A blind `(Timestamp) r[N]` cast threw
+            // ClassCastException at runtime ("class java.time.Instant cannot be
+            // cast to class java.sql.Timestamp"). Defensive coercion handles all
+            // three documented variants — Timestamp (legacy), OffsetDateTime
+            // (current Hibernate 6 default), Instant (driver fallback).
+            Instant startupCollected = toInstant(r[4]);
+            Instant hotfixCollected = toInstant(r[6]);
 
             List<GapDetail> gaps = new ArrayList<>();
             List<String> staleComponents = new ArrayList<>();
@@ -174,5 +181,35 @@ public class EndpointComplianceGapService {
 
         return new ComplianceGapResponse(items, total, safePage, safePageSize,
                 filterEcho, Instant.now());
+    }
+
+    /**
+     * Faz 22.7 D2.1 hotfix: coerce a JDBC timestamp-shaped value to
+     * {@link Instant}. Hibernate 6 + the current PG driver return
+     * {@link OffsetDateTime} for TIMESTAMPTZ columns by default; older
+     * stacks returned {@link Timestamp}; some drivers return raw
+     * {@link Instant}. This helper handles all three documented variants
+     * and rejects unknown types so future regressions fail loudly instead
+     * of silently producing null.
+     */
+    static Instant toInstant(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Instant inst) {
+            return inst;
+        }
+        if (value instanceof OffsetDateTime odt) {
+            return odt.toInstant();
+        }
+        if (value instanceof Timestamp ts) {
+            return ts.toInstant();
+        }
+        if (value instanceof java.time.LocalDateTime ldt) {
+            // Defensive fallback for TIMESTAMP (no zone) columns; treat as UTC.
+            return ldt.toInstant(ZoneOffset.UTC);
+        }
+        throw new IllegalStateException(
+                "Unsupported JDBC timestamp type: " + value.getClass().getName());
     }
 }
