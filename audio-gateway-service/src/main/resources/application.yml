@@ -1,0 +1,65 @@
+# audio-gateway-service — Faz 24 Meeting Intelligence
+# 3-AI mutabakat Codex 019e879c + Mavis msg 78 AGREE.
+
+spring:
+  application:
+    name: audio-gateway-service
+  threads:
+    virtual:
+      enabled: true
+  cloud:
+    discovery:
+      enabled: false
+    gateway:
+      discovery:
+        locator:
+          enabled: false
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Overlay env var: AUDIO_GATEWAY_JWT_ISSUER_URI
+          issuer-uri: ${AUDIO_GATEWAY_JWT_ISSUER_URI:http://localhost:8080/realms/dev-local}
+
+server:
+  port: 8210
+  shutdown: graceful
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+
+# Audio Gateway contract limits (Codex 019e879c bounds + 019e8846 iter-1 absorb)
+audio:
+  gateway:
+    contract:
+      version: "1.0"
+    bounds:
+      max-chunk-bytes: 1048576       # 1 MB per chunk
+      max-buffered-seconds: 30
+      max-session-minutes: 120       # 2 saat max session
+      admission-queue-capacity: 1000
+    stt:
+      dispatch-mode: noop            # noop | redis | http (PR-queue-01)
+    jwt:
+      # 3-AI mutabakat Codex 019e8846 iter-1: tenant/user claim adı configurable;
+      # backend canonical pattern (common-auth/AuthenticatedUserLookupService) "companyId" + "userId".
+      # Absent claim → fail-closed 403 (sessiz "unknown" YASAK).
+      tenant-claim: companyId
+      user-claim: userId
+
+logging:
+  level:
+    com.example.audiogateway: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} %-5level [%X{correlationId:-}] %logger{36} - %msg%n"

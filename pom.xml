@@ -26,5 +26,6 @@
         <module>endpoint-admin-service</module>
         <module>report-service</module>
         <module>notification-orchestrator</module>
+        <module>audio-gateway-service</module>
     </modules>
 </project>
