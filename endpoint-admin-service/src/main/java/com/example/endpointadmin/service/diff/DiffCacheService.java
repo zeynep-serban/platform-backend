@@ -81,6 +81,21 @@ public class DiffCacheService {
     private EntityManager em;
 
     /**
+     * Schema-qualifies a table name with fail-closed identifier validation
+     * (Codex 019e8964 iter-1 Low #2 absorb — single-source qualifier helper
+     * mirroring {@code ComplianceGapRepository.qualified()} and
+     * {@code DeviceGridQueryBuilder.qualified()}).
+     */
+    private String qualified(String tableName) {
+        String resolvedSchema = schema == null ? "" : schema.trim();
+        if (resolvedSchema.isBlank()) return tableName;
+        if (!resolvedSchema.matches("[A-Za-z0-9_]+")) {
+            throw new IllegalStateException("Invalid endpoint admin schema name.");
+        }
+        return resolvedSchema + "." + tableName;
+    }
+
+    /**
      * Upserts the BE-024 software diff cache row for {@code (tenantId,
      * deviceId)} using the supplied summary. The conflict branch only writes
      * when at least one of {status, fromHistoryId, toHistoryId, addedCount,
@@ -107,7 +122,16 @@ public class DiffCacheService {
 
         validateSoftwareShape(summary);
 
-        String table = schema + ".endpoint_software_diff_cache";
+        String table = qualified("endpoint_software_diff_cache");
+        // Codex 019e8964 iter-1 Medium #1 absorb: monotonic stale-overwrite
+        // guard. WHERE predicate combines (a) "incoming computed_at >=
+        // stored" and (b) "at least one column differs". Stale ingest tx
+        // that lands after a newer one cannot regress cache to an older
+        // state; writer is now cache-correctness safe in addition to
+        // row-level race-safe. Identical-payload no-op preserved: same
+        // timestamp + identical columns → (a) TRUE + (b) FALSE → DO
+        // NOTHING. (a) alone would burn WAL on every same-timestamp ingest
+        // even for truly no-delta updates.
         String sql = """
                 INSERT INTO %s (
                     id, tenant_id, device_id,
@@ -130,19 +154,20 @@ public class DiffCacheService {
                     removed_count = EXCLUDED.removed_count,
                     version_changed_count = EXCLUDED.version_changed_count,
                     computed_at = EXCLUDED.computed_at
-                WHERE %s.status
-                          IS DISTINCT FROM EXCLUDED.status
-                   OR %s.from_history_id
-                          IS DISTINCT FROM EXCLUDED.from_history_id
-                   OR %s.to_history_id
-                          IS DISTINCT FROM EXCLUDED.to_history_id
-                   OR %s.added_count
-                          <> EXCLUDED.added_count
-                   OR %s.removed_count
-                          <> EXCLUDED.removed_count
-                   OR %s.version_changed_count
-                          <> EXCLUDED.version_changed_count
-                """.formatted(table, table, table, table, table, table, table);
+                WHERE %s.computed_at <= EXCLUDED.computed_at
+                  AND ( %s.status
+                            IS DISTINCT FROM EXCLUDED.status
+                     OR %s.from_history_id
+                            IS DISTINCT FROM EXCLUDED.from_history_id
+                     OR %s.to_history_id
+                            IS DISTINCT FROM EXCLUDED.to_history_id
+                     OR %s.added_count
+                            <> EXCLUDED.added_count
+                     OR %s.removed_count
+                            <> EXCLUDED.removed_count
+                     OR %s.version_changed_count
+                            <> EXCLUDED.version_changed_count )
+                """.formatted(table, table, table, table, table, table, table, table);
 
         Query q = em.createNativeQuery(sql);
         q.setParameter("id", UUID.randomUUID());
@@ -178,7 +203,10 @@ public class DiffCacheService {
 
         validateOutdatedShape(summary);
 
-        String table = schema + ".endpoint_outdated_software_diff_cache";
+        String table = qualified("endpoint_outdated_software_diff_cache");
+        // Codex 019e8964 iter-1 Medium #1 absorb: monotonic stale-overwrite
+        // guard (mirror of software UPSERT). See software case for full
+        // rationale.
         String sql = """
                 INSERT INTO %s (
                     id, tenant_id, device_id,
@@ -204,21 +232,22 @@ public class DiffCacheService {
                     version_changed_count = EXCLUDED.version_changed_count,
                     available_version_bumped_count = EXCLUDED.available_version_bumped_count,
                     computed_at = EXCLUDED.computed_at
-                WHERE %s.status
-                          IS DISTINCT FROM EXCLUDED.status
-                   OR %s.from_snapshot_id
-                          IS DISTINCT FROM EXCLUDED.from_snapshot_id
-                   OR %s.to_snapshot_id
-                          IS DISTINCT FROM EXCLUDED.to_snapshot_id
-                   OR %s.added_count
-                          <> EXCLUDED.added_count
-                   OR %s.removed_count
-                          <> EXCLUDED.removed_count
-                   OR %s.version_changed_count
-                          <> EXCLUDED.version_changed_count
-                   OR %s.available_version_bumped_count
-                          <> EXCLUDED.available_version_bumped_count
-                """.formatted(table, table, table, table, table, table, table, table);
+                WHERE %s.computed_at <= EXCLUDED.computed_at
+                  AND ( %s.status
+                            IS DISTINCT FROM EXCLUDED.status
+                     OR %s.from_snapshot_id
+                            IS DISTINCT FROM EXCLUDED.from_snapshot_id
+                     OR %s.to_snapshot_id
+                            IS DISTINCT FROM EXCLUDED.to_snapshot_id
+                     OR %s.added_count
+                            <> EXCLUDED.added_count
+                     OR %s.removed_count
+                            <> EXCLUDED.removed_count
+                     OR %s.version_changed_count
+                            <> EXCLUDED.version_changed_count
+                     OR %s.available_version_bumped_count
+                            <> EXCLUDED.available_version_bumped_count )
+                """.formatted(table, table, table, table, table, table, table, table, table);
 
         Query q = em.createNativeQuery(sql);
         q.setParameter("id", UUID.randomUUID());
