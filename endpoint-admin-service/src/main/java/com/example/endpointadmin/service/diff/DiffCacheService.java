@@ -27,12 +27,14 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <h2>Scope of THIS PR (v2-c-pre-2-A)</h2>
  *
- * <p>Write API + PG IT idempotency only. Ingest hooks
+ * <p>Dormant write primitive + PG IT idempotency only — no production
+ * caller fires this writer yet. Ingest hooks
  * ({@link com.example.endpointadmin.service.EndpointSoftwareInventoryService#ingest}
  * and {@link com.example.endpointadmin.service.EndpointOutdatedSoftwareService#ingest})
  * + backfill worker + admin endpoint deliberately deferred to
  * v2-c-pre-2-B / -C so each PR stays inside one Codex review window and
  * one branch lifetime (parallel-session collision guard, R-CONTRACT-2).
+ * Source-freshness ordering ships with the ingest hook PR.
  *
  * <h2>Why native ON CONFLICT UPSERT, not JPA save()</h2>
  *
@@ -59,6 +61,27 @@ import org.springframework.transaction.annotation.Transactional;
  * {@code computed_at} is also updated only when something else changes —
  * otherwise a cold row would drift its timestamp on every ingest, defeating
  * staleness signals.
+ *
+ * <h2>Caller contract (source-freshness ordering)</h2>
+ *
+ * <p>Codex 019e8964 iter-2 absorb: this writer is row-level race-safe but
+ * NOT cache-correctness safe on its own. A {@code computed_at} wall-clock
+ * guard was tried in iter-1 but Codex correctly pointed out that it only
+ * orders write-time, not source-pair freshness — a stale tx that read an
+ * older history pair earlier and called upsert later (with a fresher
+ * {@code Instant.now()}) would still regress the cache to an older state.
+ * The correct cache-correctness guard is source-pair ordering on the FK
+ * side (compare {@code captured_at, created_at, id} tuple of incoming
+ * {@code to_history_id} against the stored row's), which is a non-trivial
+ * subquery best wired up in the ingest hook PR (v2-c-pre-2-B) where the
+ * caller-side contract is end-to-end with PG IT proof.
+ *
+ * <p>Until then, the caller (ingest hook / backfill worker) MUST call
+ * {@code summarize()} against the latest captured source pair INSIDE the
+ * same transaction that just persisted it, so an older summary cannot
+ * reach this writer ahead of a newer one. Callers that do not respect
+ * this contract MAY regress the cache row to a stale state under
+ * concurrent ingest.
  *
  * <h2>Schema-qualified SQL</h2>
  *
@@ -123,15 +146,23 @@ public class DiffCacheService {
         validateSoftwareShape(summary);
 
         String table = qualified("endpoint_software_diff_cache");
-        // Codex 019e8964 iter-1 Medium #1 absorb: monotonic stale-overwrite
-        // guard. WHERE predicate combines (a) "incoming computed_at >=
-        // stored" and (b) "at least one column differs". Stale ingest tx
-        // that lands after a newer one cannot regress cache to an older
-        // state; writer is now cache-correctness safe in addition to
-        // row-level race-safe. Identical-payload no-op preserved: same
-        // timestamp + identical columns → (a) TRUE + (b) FALSE → DO
-        // NOTHING. (a) alone would burn WAL on every same-timestamp ingest
-        // even for truly no-delta updates.
+        // Codex 019e8964 iter-2 absorb: source-freshness ordering is the
+        // CALLER's contract, NOT this writer's. A `computed_at <=
+        // EXCLUDED.computed_at` predicate was added in iter-1 but Codex
+        // iter-2 correctly pointed out that it only orders wall-clock
+        // writes, NOT source-pair freshness — a stale ingest tx that reads
+        // an older history pair and calls upsert later (Instant.now() at
+        // call time) would still pass the guard and regress the cache to
+        // an older state. The correct guard is source-pair ordering
+        // (captured_at, created_at, id tuple comparison on the FK source
+        // table), but that's a non-trivial subquery that belongs in the
+        // ingest hook PR (v2-c-pre-2-B) where the source-pair freshness
+        // contract is wired up end-to-end with PG IT proof. For this
+        // dormant write primitive PR, the WHERE filter is back to
+        // "anything differs" — race-safe at row level (concurrent UPSERT
+        // for the same (tenant, device) cannot UNIQUE-collision), with
+        // the caller-side freshness contract documented at the class
+        // level and pinned by PG IT in v2-c-pre-2-B.
         String sql = """
                 INSERT INTO %s (
                     id, tenant_id, device_id,
@@ -154,20 +185,19 @@ public class DiffCacheService {
                     removed_count = EXCLUDED.removed_count,
                     version_changed_count = EXCLUDED.version_changed_count,
                     computed_at = EXCLUDED.computed_at
-                WHERE %s.computed_at <= EXCLUDED.computed_at
-                  AND ( %s.status
-                            IS DISTINCT FROM EXCLUDED.status
-                     OR %s.from_history_id
-                            IS DISTINCT FROM EXCLUDED.from_history_id
-                     OR %s.to_history_id
-                            IS DISTINCT FROM EXCLUDED.to_history_id
-                     OR %s.added_count
-                            <> EXCLUDED.added_count
-                     OR %s.removed_count
-                            <> EXCLUDED.removed_count
-                     OR %s.version_changed_count
-                            <> EXCLUDED.version_changed_count )
-                """.formatted(table, table, table, table, table, table, table, table);
+                WHERE %s.status
+                          IS DISTINCT FROM EXCLUDED.status
+                   OR %s.from_history_id
+                          IS DISTINCT FROM EXCLUDED.from_history_id
+                   OR %s.to_history_id
+                          IS DISTINCT FROM EXCLUDED.to_history_id
+                   OR %s.added_count
+                          <> EXCLUDED.added_count
+                   OR %s.removed_count
+                          <> EXCLUDED.removed_count
+                   OR %s.version_changed_count
+                          <> EXCLUDED.version_changed_count
+                """.formatted(table, table, table, table, table, table, table);
 
         Query q = em.createNativeQuery(sql);
         q.setParameter("id", UUID.randomUUID());
@@ -204,9 +234,9 @@ public class DiffCacheService {
         validateOutdatedShape(summary);
 
         String table = qualified("endpoint_outdated_software_diff_cache");
-        // Codex 019e8964 iter-1 Medium #1 absorb: monotonic stale-overwrite
-        // guard (mirror of software UPSERT). See software case for full
-        // rationale.
+        // Codex 019e8964 iter-2 absorb: see software UPSERT for the
+        // rationale on why source-freshness ordering belongs to the
+        // caller (v2-c-pre-2-B ingest hook) and not this writer.
         String sql = """
                 INSERT INTO %s (
                     id, tenant_id, device_id,
@@ -232,22 +262,21 @@ public class DiffCacheService {
                     version_changed_count = EXCLUDED.version_changed_count,
                     available_version_bumped_count = EXCLUDED.available_version_bumped_count,
                     computed_at = EXCLUDED.computed_at
-                WHERE %s.computed_at <= EXCLUDED.computed_at
-                  AND ( %s.status
-                            IS DISTINCT FROM EXCLUDED.status
-                     OR %s.from_snapshot_id
-                            IS DISTINCT FROM EXCLUDED.from_snapshot_id
-                     OR %s.to_snapshot_id
-                            IS DISTINCT FROM EXCLUDED.to_snapshot_id
-                     OR %s.added_count
-                            <> EXCLUDED.added_count
-                     OR %s.removed_count
-                            <> EXCLUDED.removed_count
-                     OR %s.version_changed_count
-                            <> EXCLUDED.version_changed_count
-                     OR %s.available_version_bumped_count
-                            <> EXCLUDED.available_version_bumped_count )
-                """.formatted(table, table, table, table, table, table, table, table, table);
+                WHERE %s.status
+                          IS DISTINCT FROM EXCLUDED.status
+                   OR %s.from_snapshot_id
+                          IS DISTINCT FROM EXCLUDED.from_snapshot_id
+                   OR %s.to_snapshot_id
+                          IS DISTINCT FROM EXCLUDED.to_snapshot_id
+                   OR %s.added_count
+                          <> EXCLUDED.added_count
+                   OR %s.removed_count
+                          <> EXCLUDED.removed_count
+                   OR %s.version_changed_count
+                          <> EXCLUDED.version_changed_count
+                   OR %s.available_version_bumped_count
+                          <> EXCLUDED.available_version_bumped_count
+                """.formatted(table, table, table, table, table, table, table, table);
 
         Query q = em.createNativeQuery(sql);
         q.setParameter("id", UUID.randomUUID());

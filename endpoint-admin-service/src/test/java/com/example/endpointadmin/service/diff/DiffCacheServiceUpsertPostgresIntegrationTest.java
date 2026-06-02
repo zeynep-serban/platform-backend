@@ -35,8 +35,12 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *       WHERE} predicate and writes nothing — returns {@code false}
  *       (no WAL churn, no autovacuum bloat, no {@code computed_at} drift).</li>
  *   <li>Changed payload re-upsert UPDATEs and returns {@code true}.</li>
- *   <li>Different tenant + same device id → separate rows
- *       (UNIQUE per tenant+device, not per device alone).</li>
+ *   <li>Two independent (tenant, device) pairs → separate rows
+ *       (UNIQUE per tenant+device). NB: V2 schema declares
+ *       {@code endpoint_devices.id} as a global PRIMARY KEY, so the
+ *       "same device id across tenants" scenario is not representable
+ *       in this DB and is not what this test asserts — it asserts that
+ *       two distinct (tenant, device) inserts produce two cache rows.</li>
  *   <li>Software 3-count + outdated 4-count delta detection (each count
  *       must independently trigger the WHERE predicate so a regression
  *       that drops one column from the UPDATE WHERE is caught).</li>
@@ -184,41 +188,6 @@ class DiffCacheServiceUpsertPostgresIntegrationTest {
     }
 
     @Test
-    void software_staleIngest_olderComputedAt_isNoOpAndPreservesNewerState() {
-        // Codex 019e8964 iter-1 Medium #1 absorb: monotonic stale-overwrite
-        // guard. Simulate a stale ingest tx finishing AFTER a fresher one
-        // — without the guard, the writer would regress the cache row to
-        // an older state. The writer captures Instant.now() at upsert time
-        // so we fast-forward the cache row's computed_at via JDBC to make
-        // a subsequent upsert appear stale relative to it.
-        UUID tenant = UUID.randomUUID();
-        UUID device = insertDevice(tenant);
-        UUID h1 = insertSoftwareHistory(tenant, device, Instant.parse("2026-06-02T10:00:00Z"));
-        UUID h2 = insertSoftwareHistory(tenant, device, Instant.parse("2026-06-02T10:01:00Z"));
-
-        diffCacheService.upsertSoftwareDiffCache(tenant, device,
-                SoftwareDiffSummary.ok(h1, h2, 5, 4, 3));
-        Instant newerComputedAt = readSoftwareCacheComputedAt(tenant, device);
-
-        // Fast-forward stored computed_at 1 hour into the future.
-        Instant farFuture = newerComputedAt.plusSeconds(3600);
-        jdbc.update("UPDATE " + SCHEMA + ".endpoint_software_diff_cache "
-                        + "SET computed_at = ? WHERE tenant_id = ? AND device_id = ?",
-                Timestamp.from(farFuture), tenant, device);
-
-        // This upsert's Instant.now() < farFuture → stale. Different counts
-        // would have written without the guard.
-        boolean wrote = diffCacheService.upsertSoftwareDiffCache(tenant, device,
-                SoftwareDiffSummary.ok(h1, h2, 0, 0, 0));
-
-        assertThat(wrote).as("stale ingest must be a no-op").isFalse();
-        Map<String, Object> row = readSoftwareCacheRow(tenant, device);
-        assertThat(row.get("added_count")).as("newer state preserved").isEqualTo(5);
-        assertThat(row.get("removed_count")).isEqualTo(4);
-        assertThat(row.get("version_changed_count")).isEqualTo(3);
-    }
-
-    @Test
     void software_noHistory_zeroCountsAndNullIds_isValid() {
         UUID tenant = UUID.randomUUID();
         UUID device = insertDevice(tenant);
@@ -335,35 +304,6 @@ class DiffCacheServiceUpsertPostgresIntegrationTest {
         assertThatThrownBy(() -> diffCacheService.upsertOutdatedDiffCache(tenant, device, bad))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("OK requires both ids set");
-    }
-
-    @Test
-    void outdated_staleIngest_olderComputedAt_isNoOpAndPreservesNewerState() {
-        // Codex 019e8964 iter-1 Medium #1 absorb: monotonic guard mirror
-        // for outdated cache (see software case for full rationale).
-        UUID tenant = UUID.randomUUID();
-        UUID device = insertDevice(tenant);
-        UUID s1 = insertOutdatedSnapshot(tenant, device, Instant.parse("2026-06-02T10:00:00Z"));
-        UUID s2 = insertOutdatedSnapshot(tenant, device, Instant.parse("2026-06-02T10:01:00Z"));
-
-        diffCacheService.upsertOutdatedDiffCache(tenant, device,
-                OutdatedDiffSummary.ok(s1, s2, 7, 6, 5, 4));
-        Instant newerComputedAt = readOutdatedCacheComputedAt(tenant, device);
-
-        Instant farFuture = newerComputedAt.plusSeconds(3600);
-        jdbc.update("UPDATE " + SCHEMA + ".endpoint_outdated_software_diff_cache "
-                        + "SET computed_at = ? WHERE tenant_id = ? AND device_id = ?",
-                Timestamp.from(farFuture), tenant, device);
-
-        boolean wrote = diffCacheService.upsertOutdatedDiffCache(tenant, device,
-                OutdatedDiffSummary.ok(s1, s2, 0, 0, 0, 0));
-
-        assertThat(wrote).as("stale outdated ingest must be a no-op").isFalse();
-        Map<String, Object> row = readOutdatedCacheRow(tenant, device);
-        assertThat(row.get("added_count")).as("newer state preserved").isEqualTo(7);
-        assertThat(row.get("removed_count")).isEqualTo(6);
-        assertThat(row.get("version_changed_count")).isEqualTo(5);
-        assertThat(row.get("available_version_bumped_count")).isEqualTo(4);
     }
 
     // ───────────────────────── seed helpers (mirror SummarizePostgresIntegrationTest) ─────────────────────────
