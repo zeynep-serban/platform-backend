@@ -49,10 +49,17 @@ import java.util.UUID;
  * the partial UNIQUE index on {@code source_command_result_id} guarantees
  * per-result uniqueness independent of tenant/org scope.
  *
- * <p>{@code findByTenantDeviceAndPayloadHash} and
- * {@code findLatestPerDeviceForTenant} remain on the original
- * {@code tenantId} signature in this slice; they are migrated in B-D-B
- * (separate PR — Codex 019e8dc7 sub-slice split).
+ * <p>Faz 21.1 PR2b-iv.d-B — payload-hash dedupe probe + fleet-wide
+ * latest-per-device methods migrated to the same effective-org form
+ * (Codex 019e8dc7 + 019e8dd6 B-D-B sub-slice AGREE). The fleet
+ * correlated NOT EXISTS subquery's INNER side intentionally keeps
+ * only the {@code (newer.tenant_id = s.tenant_id AND newer.device_id
+ * = s.device_id)} correlation: under V30, fixed {@code tenant_id = X}
+ * already pins the inner candidates to the same effective-org bucket
+ * (canonical {@code org_id = X} or legacy {@code org_id IS NULL}).
+ * Adding an inner {@code org_id} branch would falsely miss the
+ * "newer canonical row supersedes older legacy NULL row" case for
+ * the same (org, device).
  */
 @Repository
 public interface EndpointOutdatedSoftwareSnapshotRepository
@@ -195,13 +202,14 @@ public interface EndpointOutdatedSoftwareSnapshotRepository
     @Query("""
             select s
             from EndpointOutdatedSoftwareSnapshot s
-            where s.tenantId = :tenantId
+            where s.tenantId = :orgId
+              and (s.orgId = :orgId or s.orgId is null)
               and s.deviceId = :deviceId
               and s.payloadHashSha256 = cast(:payloadHash as string)
             order by s.collectedAt desc, s.createdAt desc, s.id desc
             """)
-    List<EndpointOutdatedSoftwareSnapshot> findByTenantDeviceAndPayloadHash(
-            @Param("tenantId") UUID tenantId,
+    List<EndpointOutdatedSoftwareSnapshot> findByOrgAndDeviceAndPayloadHash(
+            @Param("orgId") UUID orgId,
             @Param("deviceId") UUID deviceId,
             @Param("payloadHash") String payloadHash,
             Pageable pageable);
@@ -234,7 +242,8 @@ public interface EndpointOutdatedSoftwareSnapshotRepository
     @Query("""
             select s
             from EndpointOutdatedSoftwareSnapshot s
-            where s.tenantId = :tenantId
+            where s.tenantId = :orgId
+              and (s.orgId = :orgId or s.orgId is null)
               and not exists (
                 select newer.id
                 from EndpointOutdatedSoftwareSnapshot newer
@@ -249,6 +258,6 @@ public interface EndpointOutdatedSoftwareSnapshotRepository
               )
             order by s.id
             """)
-    List<EndpointOutdatedSoftwareSnapshot> findLatestPerDeviceForTenant(
-            @Param("tenantId") UUID tenantId, Pageable pageable);
+    List<EndpointOutdatedSoftwareSnapshot> findLatestPerDeviceForOrg(
+            @Param("orgId") UUID orgId, Pageable pageable);
 }

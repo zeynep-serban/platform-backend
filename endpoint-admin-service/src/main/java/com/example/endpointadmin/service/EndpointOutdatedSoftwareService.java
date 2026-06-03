@@ -159,7 +159,10 @@ public class EndpointOutdatedSoftwareService {
         String payloadHash = sha256Hex(outdated);
         Optional<EndpointOutdatedSoftwareSnapshot> identical =
                 repository
-                        .findByTenantDeviceAndPayloadHash(
+                        // Faz 21.1 PR2b-iv.d-B — effective-org payload-hash
+                        // dedupe; device.getTenantId() is the canonical org
+                        // id (PR2b-ii canonical write at source).
+                        .findByOrgAndDeviceAndPayloadHash(
                                 device.getTenantId(), device.getId(), payloadHash,
                                 PageRequest.of(0, 1))
                         .stream()
@@ -250,8 +253,15 @@ public class EndpointOutdatedSoftwareService {
     @Transactional(readOnly = true)
     public BulkLatestSnapshots<EndpointOutdatedSoftwareSnapshot> findLatestPerDevice(
             UUID tenantId, int cap) {
+        // Faz 21.1 PR2b-iv.d-B — effective-org fleet read; tenantId
+        // here is the canonical org id (PR2b-ii canonical write at
+        // source). Inner correlated NOT EXISTS subquery does NOT add
+        // an inner orgId branch — under V30, fixed tenant_id = X
+        // already pins the inner candidates to the same effective-org
+        // bucket and an inner branch would falsely miss the
+        // newer-canonical-supersedes-older-legacy-NULL case.
         List<EndpointOutdatedSoftwareSnapshot> snapshots =
-                repository.findLatestPerDeviceForTenant(tenantId, PageRequest.of(0, cap + 1));
+                repository.findLatestPerDeviceForOrg(tenantId, PageRequest.of(0, cap + 1));
         if (snapshots.size() > cap) {
             return BulkLatestSnapshots.overCap();
         }

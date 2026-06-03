@@ -343,7 +343,7 @@ class EndpointOutdatedSoftwarePostgresIntegrationTest {
 
         assertThatCode(() -> {
             List<EndpointOutdatedSoftwareSnapshot> found =
-                    snapshotRepository.findByTenantDeviceAndPayloadHash(
+                    snapshotRepository.findByOrgAndDeviceAndPayloadHash(
                             tenant, device, "b".repeat(64), PageRequest.of(0, 1));
             assertThat(found).isEmpty();
         }).doesNotThrowAnyException();
@@ -357,7 +357,7 @@ class EndpointOutdatedSoftwarePostgresIntegrationTest {
         UUID snapshotId = insertSnapshotWithHash(tenant, device, hash);
 
         List<EndpointOutdatedSoftwareSnapshot> found =
-                snapshotRepository.findByTenantDeviceAndPayloadHash(
+                snapshotRepository.findByOrgAndDeviceAndPayloadHash(
                         tenant, device, hash, PageRequest.of(0, 1));
 
         assertThat(found).hasSize(1);
@@ -377,7 +377,7 @@ class EndpointOutdatedSoftwarePostgresIntegrationTest {
         UUID newest = insertSnapshotWithHashAt(tenant, device, hash, newer);
 
         List<EndpointOutdatedSoftwareSnapshot> found =
-                snapshotRepository.findByTenantDeviceAndPayloadHash(
+                snapshotRepository.findByOrgAndDeviceAndPayloadHash(
                         tenant, device, hash, PageRequest.of(0, 1));
 
         assertThat(found).hasSize(1);
@@ -391,9 +391,9 @@ class EndpointOutdatedSoftwarePostgresIntegrationTest {
         String hash = "f".repeat(64);
         insertSnapshotWithHash(tenant, device, hash);
 
-        assertThat(snapshotRepository.findByTenantDeviceAndPayloadHash(
+        assertThat(snapshotRepository.findByOrgAndDeviceAndPayloadHash(
                 UUID.randomUUID(), device, hash, PageRequest.of(0, 1))).isEmpty();
-        assertThat(snapshotRepository.findByTenantDeviceAndPayloadHash(
+        assertThat(snapshotRepository.findByOrgAndDeviceAndPayloadHash(
                 tenant, UUID.randomUUID(), hash, PageRequest.of(0, 1))).isEmpty();
     }
 
