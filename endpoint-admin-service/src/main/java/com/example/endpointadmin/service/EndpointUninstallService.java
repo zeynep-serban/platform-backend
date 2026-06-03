@@ -41,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -101,6 +102,30 @@ public class EndpointUninstallService {
      * treated as "capability unknown" → fail-closed 422.
      */
     private static final String HEARTBEAT_CAPABILITIES_KEY = "capabilities";
+
+    /**
+     * AG-028 Phase 1b follow-up (Codex Phase 2 plan-time iter-1 absorb,
+     * thread `019e8de2`) — closed allow-list of catalog detection rule
+     * types whose absence is AUTHORITATIVE post-uninstall.
+     *
+     * <p>The agent reuses the catalog detection rule for its post-uninstall
+     * absence probe. {@code WINGET_PACKAGE} is CONFIRM_ONLY tier (positive
+     * match informative, negative match unreliable under Session-0 with
+     * winget list cache lag) and CANNOT certify {@code ABSENT_VERIFIED} —
+     * so the agent fails closed at probe time. Rejecting the request at
+     * the backend gate gives operators an actionable error BEFORE the
+     * agent declines, with a clear path: re-author the catalog detection
+     * rule to {@code REGISTRY_UNINSTALL} or {@code FILE_*}.
+     *
+     * <p>Applied in both {@code propose(...)} (early operator feedback)
+     * and {@code approve(...)} (dispatch-time revalidation against
+     * propose→approve catalog drift).
+     */
+    private static final Set<String> AUTHORITATIVE_UNINSTALL_RULES = Set.of(
+            "REGISTRY_UNINSTALL",
+            "FILE_EXISTS",
+            "FILE_SHA256",
+            "FILE_VERSION");
 
     private final EndpointUninstallRequestRepository requestRepository;
     private final EndpointUninstallAuditRepository auditRepository;
@@ -215,6 +240,13 @@ public class EndpointUninstallService {
                     "Catalog item does not have uninstall_supported set; opt in via "
                             + "the Phase 0 change-request flow first.");
         }
+        // (2b) Detection-rule authority gate — Codex Phase 2 plan-time iter-1
+        // absorb (thread `019e8de2`). WINGET_PACKAGE post-uninstall verification
+        // is CONFIRM_ONLY tier (Session-0 winget list cache lag); the agent
+        // cannot certify ABSENT_VERIFIED on a miss. Reject at propose-time so
+        // operators get an actionable signal BEFORE the agent fails closed
+        // downstream.
+        assertAuthoritativeUninstallDetectionRule(catalogItem);
 
         // (3) Provenance gate — 422 NO_PROVENANCE if the platform never
         // observed a SUCCEEDED + SATISFIED install for this (device, catalog).
@@ -363,6 +395,12 @@ public class EndpointUninstallService {
                             + "(status / uninstall_supported / uninstall_protected drifted). "
                             + "Re-propose after Phase 0 flag-flip flow.");
         }
+        // Detection-rule authority gate revalidation — Codex Phase 2 plan iter
+        // (thread `019e8de2`) absorb. If the catalog detection rule was
+        // re-authored to WINGET_PACKAGE between propose and approve, reject
+        // here so we never dispatch a command the agent cannot authoritatively
+        // verify post-uninstall.
+        assertAuthoritativeUninstallDetectionRule(catalogItem);
 
         // (5) Capability + heartbeat guard — Codex post-impl iter-1 absorb
         // (thread `019e8dcd` must-fix #3). Both freshness AND capability are
@@ -608,6 +646,34 @@ public class EndpointUninstallService {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
                     "AG-028 managed uninstall surface is disabled "
                             + "(endpoint-admin.uninstall.enabled=false).");
+        }
+    }
+
+    /**
+     * Reject the request if the catalog detection rule is not in
+     * {@link #AUTHORITATIVE_UNINSTALL_RULES}.
+     *
+     * <p>Codex Phase 2 plan-time iter (thread `019e8de2`) absorb — applied
+     * in both {@code propose(...)} and {@code approve(...)} to catch
+     * catalog detection-rule drift between the two phases. The 422 carries
+     * an actionable message pointing the operator at the catalog re-author
+     * path.
+     */
+    private static void assertAuthoritativeUninstallDetectionRule(
+            EndpointSoftwareCatalogItem catalogItem) {
+        Map<String, Object> rule = catalogItem.getDetectionRule();
+        Object typeNode = rule == null ? null : rule.get("type");
+        String type = typeNode == null ? null : typeNode.toString();
+        if (!AUTHORITATIVE_UNINSTALL_RULES.contains(type)) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    "Catalog detection rule type '" + type
+                            + "' is not supported for AG-028 managed uninstall. "
+                            + "WINGET_PACKAGE post-uninstall verification is "
+                            + "CONFIRM_ONLY tier (winget list cache lag) and cannot "
+                            + "authoritatively certify ABSENT_VERIFIED. Re-author "
+                            + "the catalog detection rule to REGISTRY_UNINSTALL or "
+                            + "FILE_EXISTS / FILE_SHA256 / FILE_VERSION before "
+                            + "requesting AG-028 managed uninstall.");
         }
     }
 

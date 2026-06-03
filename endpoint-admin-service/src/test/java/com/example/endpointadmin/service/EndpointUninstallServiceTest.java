@@ -381,6 +381,62 @@ class EndpointUninstallServiceTest {
                 .hasMessageContaining("UNINSTALL_SOFTWARE");
     }
 
+    // ─────────────────────────────────────────────────────────────────
+    // Detection-rule authority gate (Codex Phase 2 plan iter `019e8de2`)
+
+    @Test
+    void propose_wingetPackageDetectionRule_throws422() {
+        // Default catalog row carries WINGET_PACKAGE detection rule (CONFIRM_ONLY
+        // tier). The agent cannot authoritatively certify ABSENT_VERIFIED on a
+        // miss; propose rejects with 422 + actionable re-author message.
+        UUID deviceId = seedDevice(TENANT, "winget-detect-rule");
+        UUID catalogUuid = seedApprovedUninstallableCatalog(TENANT, "winget-detect-rule-7zip",
+                /*authoritativeDetection*/ false);
+        seedProvenance(TENANT, deviceId, catalogUuid);
+        seedFreshHeartbeatWithCapability(TENANT, deviceId);
+
+        assertThatThrownBy(() -> uninstallService.propose(
+                new AdminTenantContext(TENANT, SUBJECT_ALICE),
+                deviceId,
+                new AdminUninstallRequestCreate("winget-detect-rule-7zip", null, "test")))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasFieldOrPropertyWithValue("statusCode", HttpStatus.UNPROCESSABLE_ENTITY)
+                .hasMessageContaining("WINGET_PACKAGE")
+                .hasMessageContaining("REGISTRY_UNINSTALL");
+    }
+
+    @Test
+    void approve_detectionRuleDriftedToWingetPackage_throws422() {
+        // Propose succeeds (catalog has REGISTRY_UNINSTALL); between propose and
+        // approve an operator re-authors the catalog detection rule to
+        // WINGET_PACKAGE. Approve must reject with 422 instead of dispatching
+        // a command the agent cannot authoritatively verify post-uninstall.
+        Fixture f = setupFullFixture(TENANT, SUBJECT_ALICE, "drift-to-winget");
+
+        AdminUninstallRequestResponse proposed = uninstallService.propose(
+                new AdminTenantContext(TENANT, SUBJECT_ALICE),
+                f.deviceId(),
+                new AdminUninstallRequestCreate(f.catalogSlug(), null, "propose"));
+
+        // Simulate catalog re-author: detection rule flipped to WINGET_PACKAGE.
+        EndpointSoftwareCatalogItem item = catalogRepository
+                .findByTenantIdAndId(TENANT, f.catalogUuid()).orElseThrow();
+        Map<String, Object> wingetRule = new HashMap<>();
+        wingetRule.put("type", "WINGET_PACKAGE");
+        wingetRule.put("packageId", "7zip.7zip");
+        item.setDetectionRule(wingetRule);
+        catalogRepository.saveAndFlush(item);
+
+        assertThatThrownBy(() -> uninstallService.approve(
+                new AdminTenantContext(TENANT, SUBJECT_BOB),
+                f.deviceId(),
+                proposed.requestId(),
+                new AdminUninstallRequestApproval("approve")))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasFieldOrPropertyWithValue("statusCode", HttpStatus.UNPROCESSABLE_ENTITY)
+                .hasMessageContaining("WINGET_PACKAGE");
+    }
+
     @Test
     void approve_staleHeartbeat_throws424_retryable() {
         // Codex post-impl iter-1 absorb (thread `019e8dcd` must-fix #3):
@@ -446,6 +502,11 @@ class EndpointUninstallServiceTest {
     }
 
     private UUID seedApprovedUninstallableCatalog(UUID tenantId, String slug) {
+        return seedApprovedUninstallableCatalog(tenantId, slug, /*authoritativeDetection*/ true);
+    }
+
+    private UUID seedApprovedUninstallableCatalog(UUID tenantId, String slug,
+                                                   boolean authoritativeDetection) {
         AdminCatalogItemRequest req = sevenZipCatalogRequest(slug);
         catalogService.createCatalogItem(new AdminTenantContext(tenantId, SUBJECT_ALICE), req);
         EndpointSoftwareCatalogItem approved = mapCatalogToEntity(
@@ -454,6 +515,26 @@ class EndpointUninstallServiceTest {
                 tenantId);
         approved.setUninstallSupported(true);
         approved.setUninstallProtected(false);
+        if (authoritativeDetection) {
+            // Phase 1b-follow-up (Codex Phase 2 plan iter `019e8de2`): default
+            // catalog created with WINGET_PACKAGE detection rule (CONFIRM_ONLY
+            // tier) — propose path rejects with 422 since it cannot
+            // authoritatively certify ABSENT_VERIFIED post-uninstall. Re-author
+            // to authoritative REGISTRY_UNINSTALL rule for the happy-path
+            // fixture.
+            // Codex post-impl iter-1 nit (thread `019e8de2`): canonical shape
+            // for the validator-normalized REGISTRY_UNINSTALL rule. Without
+            // `publisher` the validator requires `allowPublisherMissing=true`;
+            // add the canonical publisher pair so the fixture mirrors a
+            // production-authored row exactly.
+            Map<String, Object> authoritativeRule = new HashMap<>();
+            authoritativeRule.put("type", "REGISTRY_UNINSTALL");
+            authoritativeRule.put("displayName", "7-Zip");
+            authoritativeRule.put("displayNameMatch", "EXACT");
+            authoritativeRule.put("publisher", "Igor Pavlov");
+            authoritativeRule.put("publisherMatch", "EXACT");
+            approved.setDetectionRule(authoritativeRule);
+        }
         catalogRepository.saveAndFlush(approved);
         return approved.getId();
     }
