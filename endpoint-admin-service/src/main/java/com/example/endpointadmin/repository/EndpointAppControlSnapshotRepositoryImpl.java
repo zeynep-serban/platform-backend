@@ -68,9 +68,16 @@ public class EndpointAppControlSnapshotRepositoryImpl
         snapshot.setCreatedAt(createdAt);
 
         String table = qualified(SNAPSHOT_TABLE);
+        // Faz 21.1 PR2b-iv AppControl native insert canonical org_id
+        // write (Codex 019e8dec slice f non-blocker absorb): set
+        // org_id = tenant_id explicitly at the source. V29 trigger
+        // would still back-fill if omitted, but PR2b-ii Option A inline
+        // direction is to land the canonical shape at INSERT time so
+        // the write contract matches what the dual-read COALESCE path
+        // expects post-cleanup.
         String sql = """
                 INSERT INTO %s
-                    (id, tenant_id, device_id, source_command_result_id,
+                    (id, tenant_id, org_id, device_id, source_command_result_id,
                      schema_version, supported, probe_complete,
                      wdac_queryable, app_locker_queryable, wdac_mode,
                      wdac_boot_enforcement_present, wdac_active_cip_policy_count,
@@ -82,7 +89,7 @@ public class EndpointAppControlSnapshotRepositoryImpl
                      probe_duration_ms, payload_hash_sha256,
                      collected_at, created_at)
                 VALUES
-                    (:id, :tenantId, :deviceId, :sourceCommandResultId,
+                    (:id, :tenantId, :tenantId, :deviceId, :sourceCommandResultId,
                      :schemaVersion, :supported, :probeComplete,
                      :wdacQueryable, :appLockerQueryable, :wdacMode,
                      :wdacBoot, :wdacCipCount,
