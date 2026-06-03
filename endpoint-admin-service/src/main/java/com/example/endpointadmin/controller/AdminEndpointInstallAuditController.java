@@ -76,8 +76,11 @@ public class AdminEndpointInstallAuditController {
         }
         AdminTenantContext context = tenantContextResolver.resolveRequired();
         PageRequest pageRequest = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "reportedAt"));
+        // Faz 21.1 PR2b-iv.e-A — effective-org page read. orgId ==
+        // tenantId for canonical rows (PR2b-ii write path); legacy NULL
+        // rows still visible via OR-fallback inside the @Query.
         Page<EndpointInstallAudit> rows = installAuditRepository
-                .findByTenantIdAndDeviceIdOrderByReportedAtDesc(
+                .findVisibleToOrgAndDeviceIdOrderByReportedAtDesc(
                         context.tenantId(), deviceId, pageRequest);
         Map<UUID, String> slugByUuid = lookupCatalogSlugs(context, rows.getContent());
         return rows.map(audit -> toDto(audit, slugByUuid.get(audit.getCatalogItemId())));
@@ -87,8 +90,9 @@ public class AdminEndpointInstallAuditController {
     @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.VIEWER)
     public EndpointInstallAuditDto getInstallAudit(@PathVariable UUID auditId) {
         AdminTenantContext context = tenantContextResolver.resolveRequired();
+        // Faz 21.1 PR2b-iv.e-A — effective-org audit ownership gate.
         EndpointInstallAudit audit = installAuditRepository
-                .findByTenantIdAndId(context.tenantId(), auditId)
+                .findVisibleToOrgAndId(context.tenantId(), auditId)
                 .orElseThrow(() -> new ResponseStatusException(
                         HttpStatus.NOT_FOUND, "Install audit not found."));
         String slug = catalogRepository

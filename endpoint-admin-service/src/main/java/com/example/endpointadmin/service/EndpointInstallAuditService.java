@@ -395,6 +395,7 @@ public class EndpointInstallAuditService {
 
     @Transactional(readOnly = true)
     public Optional<EndpointInstallAudit> findById(UUID tenantId, UUID auditId) {
-        return installAuditRepository.findByTenantIdAndId(tenantId, auditId);
+        // Faz 21.1 PR2b-iv.e-A — effective-org audit ownership gate.
+        return installAuditRepository.findVisibleToOrgAndId(tenantId, auditId);
     }
 }
