@@ -7,8 +7,6 @@ import com.example.endpointadmin.model.EndpointOutdatedSoftwareSnapshot;
 import com.example.endpointadmin.repository.EndpointOutdatedSoftwareSnapshotRepository;
 import com.example.endpointadmin.security.AdminTenantContext;
 import org.junit.jupiter.api.Test;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 
 import java.time.Instant;
@@ -196,15 +194,16 @@ class EndpointOutdatedSoftwareDiffServiceTest {
     // ─── helpers ────────────────────────────────────────────────
 
     private void mockRepoReturnsEmpty() {
-        Page<EndpointOutdatedSoftwareSnapshot> page = new PageImpl<>(List.of());
-        when(repository.findByTenantIdAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
-                eq(TENANT), eq(DEVICE), any(Pageable.class))).thenReturn(page);
+        // Faz 21.1 PR2b-iv.d-A — DiffService now reads via the
+        // List-returning canonical method (Codex 019e8dc7 AGREE — portable
+        // LIMIT idiom). The mock signature shifts from Page to List.
+        when(repository.findVisibleToOrgAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
+                eq(TENANT), eq(DEVICE), any(Pageable.class))).thenReturn(List.of());
     }
 
     private void mockRepoReturnsList(List<EndpointOutdatedSoftwareSnapshot> list) {
-        Page<EndpointOutdatedSoftwareSnapshot> page = new PageImpl<>(list);
-        when(repository.findByTenantIdAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
-                eq(TENANT), eq(DEVICE), any(Pageable.class))).thenReturn(page);
+        when(repository.findVisibleToOrgAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
+                eq(TENANT), eq(DEVICE), any(Pageable.class))).thenReturn(list);
     }
 
     private EndpointOutdatedSoftwareSnapshot snapshot(
@@ -212,6 +211,12 @@ class EndpointOutdatedSoftwareDiffServiceTest {
         EndpointOutdatedSoftwareSnapshot s = new EndpointOutdatedSoftwareSnapshot();
         s.setId(UUID.fromString("33333333-0000-0000-0000-00000000000" + seq));
         s.setTenantId(TENANT);
+        // Faz 21.1 PR2b-iv.d-A — canonical write parity (PR2b-ii Option A
+        // inline). Repository is mocked here so the field never reaches a
+        // real query, but keeping the fixture canonical avoids future
+        // reader drift when this file is read alongside the PG IT
+        // alternatives.
+        s.setOrgId(TENANT);
         s.setDeviceId(DEVICE);
         s.setCollectedAt(Instant.parse("2026-06-01T10:0" + seq + ":00Z"));
         s.setCreatedAt(Instant.parse("2026-06-01T10:0" + seq + ":01Z"));

@@ -16,6 +16,7 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -86,6 +87,16 @@ import java.util.UUID;
 public class EndpointOutdatedSoftwareService {
 
     private static final Logger log = LoggerFactory.getLogger(EndpointOutdatedSoftwareService.class);
+
+    // Faz 21.1 PR2b-iv.d-A — canonical history sort applied when the
+    // controller passes an unsorted Pageable. Matches the composite
+    // index (tenant_id, device_id, collected_at, created_at, id) tail so
+    // the top-N scan stays index-only (Codex 019e8dbb slice c iter-1
+    // lesson — index-friendly query shape preserved).
+    private static final Sort HISTORY_SORT = Sort.by(
+            Sort.Order.desc("collectedAt"),
+            Sort.Order.desc("createdAt"),
+            Sort.Order.desc("id"));
 
     private final EndpointOutdatedSoftwareSnapshotRepository repository;
     private final ApplicationEventPublisher events;
@@ -204,14 +215,25 @@ public class EndpointOutdatedSoftwareService {
     }
 
     public Optional<EndpointOutdatedSoftwareSnapshot> findLatest(UUID tenantId, UUID deviceId) {
-        return repository.findFirstByTenantIdAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
+        // Faz 21.1 PR2b-iv.d-A — effective-org read via portable LIMIT 1
+        // default wrapper (no derived findFirst@Query Optional trap);
+        // orgId == tenantId for canonical rows (PR2b-ii write path).
+        return repository.findFirstVisibleToOrgAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
                 tenantId, deviceId);
     }
 
     public Page<EndpointOutdatedSoftwareSnapshot> findHistory(
             UUID tenantId, UUID deviceId, Pageable pageable) {
-        return repository.findByTenantIdAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
-                tenantId, deviceId, pageable);
+        // Faz 21.1 PR2b-iv.d-A — effective-org Page read. The new
+        // repository method takes caller Pageable Sort (no inline
+        // OrderBy) so we pin the canonical
+        // (collected_at DESC, created_at DESC, id DESC) order here when
+        // the controller passes an unsorted Pageable — same observable
+        // behavior the inline-OrderBy derived method provided before.
+        Pageable sortedPageable = pageable.getSort().isSorted()
+                ? pageable
+                : PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), HISTORY_SORT);
+        return repository.findVisibleToOrgAndDeviceId(tenantId, deviceId, sortedPageable);
     }
 
     /**

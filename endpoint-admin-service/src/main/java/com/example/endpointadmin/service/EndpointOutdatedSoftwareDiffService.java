@@ -54,10 +54,12 @@ public class EndpointOutdatedSoftwareDiffService {
      */
     @Transactional(readOnly = true)
     public OutdatedDiffSummary summarize(UUID tenantId, UUID deviceId) {
+        // Faz 21.1 PR2b-iv.d-A — effective-org read; cache write path
+        // already validates tenant scope upstream so {@code tenantId}
+        // here is the canonical org id (= legacy tenant id).
         List<EndpointOutdatedSoftwareSnapshot> latestTwo = repository
-                .findByTenantIdAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
-                        tenantId, deviceId, PageRequest.of(0, 2))
-                .getContent();
+                .findVisibleToOrgAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
+                        tenantId, deviceId, PageRequest.of(0, 2));
 
         if (latestTwo.isEmpty()) {
             return OutdatedDiffSummary.noHistory();
@@ -120,10 +122,11 @@ public class EndpointOutdatedSoftwareDiffService {
     public AdminOutdatedSoftwareDiffResponse diffLatest(
             AdminTenantContext context, UUID deviceId) {
         UUID tenantId = context.tenantId();
+        // Faz 21.1 PR2b-iv.d-A — effective-org read; orgId == tenantId
+        // for canonical rows (PR2b-ii write path).
         List<EndpointOutdatedSoftwareSnapshot> latestTwo = repository
-                .findByTenantIdAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
-                        tenantId, deviceId, PageRequest.of(0, 2))
-                .getContent();
+                .findVisibleToOrgAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
+                        tenantId, deviceId, PageRequest.of(0, 2));
 
         if (latestTwo.isEmpty()) {
             return AdminOutdatedSoftwareDiffResponse.noHistory(deviceId);

@@ -162,7 +162,7 @@ class EndpointOutdatedSoftwareAtomicityPostgresIntegrationTest {
                 repository.findBySourceCommandResultId(resultId).isPresent());
         assertThat(present).isTrue();
         long forDevice = tx.execute(s -> repository
-                .findByTenantIdAndDeviceId(TENANT, f.deviceId, PageRequest.of(0, 10))
+                .findVisibleToOrgAndDeviceId(TENANT, f.deviceId, PageRequest.of(0, 10))
                 .getTotalElements());
         assertThat(forDevice).as("no-op duplicate must not add a second row")
                 .isEqualTo(1L);
@@ -192,7 +192,7 @@ class EndpointOutdatedSoftwareAtomicityPostgresIntegrationTest {
                 reload(f.deviceId), command(f.commandId), result(f.resultId), details));
 
         long rows = tx.execute(s -> repository
-                .findByTenantIdAndDeviceId(TENANT, f.deviceId, PageRequest.of(0, 10))
+                .findVisibleToOrgAndDeviceId(TENANT, f.deviceId, PageRequest.of(0, 10))
                 .getTotalElements());
         assertThat(rows).as("idempotent re-ingest must not double-write").isEqualTo(1L);
         long pkgCount = tx.execute(s -> countPackagesForDevice(f.deviceId));
@@ -327,7 +327,7 @@ class EndpointOutdatedSoftwareAtomicityPostgresIntegrationTest {
         // tests, so scope by device).
         long total = 0;
         for (EndpointOutdatedSoftwareSnapshot snap : repository
-                .findByTenantIdAndDeviceId(TENANT, deviceId, PageRequest.of(0, 50))) {
+                .findVisibleToOrgAndDeviceId(TENANT, deviceId, PageRequest.of(0, 50))) {
             total += snap.getPackages().size();
         }
         return total;
