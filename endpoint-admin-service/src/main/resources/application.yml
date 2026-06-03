@@ -63,6 +63,23 @@ endpoint-admin:
     nonce-cleanup-initial-delay-ms: ${ENDPOINT_ADMIN_AGENT_AUTH_NONCE_CLEANUP_INITIAL_DELAY_MS:600000}
   commands:
     claim-ttl-seconds: ${ENDPOINT_ADMIN_COMMAND_CLAIM_TTL_SECONDS:300}
+  uninstall:
+    # AG-028 Phase 1b (Faz 22.5.6) — feature flag for the managed uninstall
+    # surface. Default FALSE so the routes return 503 in dark mode and ship
+    # off-by-default. Flip TRUE per overlay once Phase 2 (agent
+    # UNINSTALL_SOFTWARE adapter + ProbeState) lands and the LIVE acceptance
+    # smoke is green.
+    enabled: ${ENDPOINT_ADMIN_UNINSTALL_ENABLED:false}
+    # ISO-8601 duration. Agent heartbeat fresher than this TTL is required at
+    # approve time; older → 424 FAILED_DEPENDENCY (retryable, non-terminal).
+    heartbeat-freshness-ttl: ${ENDPOINT_ADMIN_UNINSTALL_HEARTBEAT_FRESHNESS_TTL:PT5M}
+    # The capability the agent must advertise in its latest heartbeat
+    # payload's `capabilities` array (Phase 2 lands the agent-side write).
+    # Missing → 422 retryable.
+    required-capability: ${ENDPOINT_ADMIN_UNINSTALL_REQUIRED_CAPABILITY:UNINSTALL_SOFTWARE}
+  uninstalls:
+    max-redacted-bytes: ${ENDPOINT_ADMIN_UNINSTALLS_MAX_REDACTED_BYTES:8192}
+    max-summary-bytes: ${ENDPOINT_ADMIN_UNINSTALLS_MAX_SUMMARY_BYTES:2048}
   tenant:
     local-default-tenant-id: ${ENDPOINT_ADMIN_LOCAL_DEFAULT_TENANT_ID:00000000-0000-0000-0000-000000000001}
 

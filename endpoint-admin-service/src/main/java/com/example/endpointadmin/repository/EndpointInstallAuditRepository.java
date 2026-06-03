@@ -35,6 +35,34 @@ public interface EndpointInstallAuditRepository extends JpaRepository<EndpointIn
     Page<EndpointInstallAudit> findByTenantIdOrderByReportedAtDesc(
             UUID tenantId, Pageable pageable);
 
+    /**
+     * AG-028 Phase 1b — destructive-side existence gate. Returns {@code true}
+     * if at least one prior SUCCEEDED + SATISFIED install audit row exists for
+     * the given {@code (tenant, device, catalog)}. Used by
+     * {@code EndpointUninstallService.propose} to enforce the "platform only
+     * uninstalls what the platform installed" provenance invariant.
+     *
+     * <p>Codex post-impl iter-1 absorb (thread `019e8dcd`): the prior
+     * `findLatestSucceededSatisfiedByTenantDeviceCatalogBefore(Instant.MAX)`
+     * is unsafe — {@code Instant.MAX} (year 1000000000) is outside the Postgres
+     * {@code timestamptz} range and risks Hibernate/JDBC bind-time overflow or
+     * a DB range error. A dedicated existence query is the right shape (no
+     * deterministic-selector window, no upper bound, no select-list overhead).
+     */
+    @Query("""
+            select case when count(audit) > 0 then true else false end
+            from EndpointInstallAudit audit
+            where audit.tenantId = :tenantId
+              and audit.deviceId = :deviceId
+              and audit.catalogItemId = :catalogItemId
+              and audit.resultStatus = com.example.endpointadmin.model.CommandResultStatus.SUCCEEDED
+              and audit.postVerification = com.example.endpointadmin.model.InstallPostVerification.SATISFIED
+            """)
+    boolean existsSucceededSatisfiedByTenantDeviceCatalog(
+            @Param("tenantId") UUID tenantId,
+            @Param("deviceId") UUID deviceId,
+            @Param("catalogItemId") UUID catalogItemId);
+
     @Query("""
             select audit
             from EndpointInstallAudit audit

@@ -20,6 +20,7 @@ import com.example.endpointadmin.security.AdminTenantContext;
 import com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.context.annotation.Import;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -196,10 +197,12 @@ class EndpointAdminCommandServiceTest {
 
     @Test
     void createCommandRejectsInstallSoftwareOnGenericEndpoint() {
-        // BE-021 (Codex 019e6dfb iter-3 P0-1): INSTALL_SOFTWARE cannot
-        // be created via the generic /commands surface — that would
-        // bypass the preflight recompute. The dedicated /installs path
-        // is the only legal route.
+        // BE-021 (Codex 019e6dfb iter-3 P0-1) + AG-028 Phase 1 (Codex plan-time
+        // iter-2 absorb): INSTALL_SOFTWARE cannot be created via the generic
+        // /commands surface — that would bypass the preflight recompute. The
+        // dedicated /installs path is the only legal route. Phase 1 migrates
+        // the rejection from 409 to 422 (DEDICATED_PATH_ONLY set; INSTALL +
+        // UNINSTALL).
         EndpointDevice device = deviceRepository.saveAndFlush(device(TENANT_ID, "PC-INSTALL"));
         CreateEndpointCommandRequest request = new CreateEndpointCommandRequest(
                 CommandType.INSTALL_SOFTWARE,
@@ -215,7 +218,35 @@ class EndpointAdminCommandServiceTest {
 
         assertThatThrownBy(() -> commandService.createCommand(adminContext(), device.getId(), request))
                 .isInstanceOf(ResponseStatusException.class)
+                .hasFieldOrPropertyWithValue("statusCode", HttpStatus.UNPROCESSABLE_ENTITY)
                 .hasMessageContaining("INSTALL_SOFTWARE must be created via");
+    }
+
+    @Test
+    void createCommandRejectsUninstallSoftwareOnGenericEndpoint() {
+        // AG-028 Phase 1 (Codex plan-time iter-2 absorb): UNINSTALL_SOFTWARE
+        // also belongs to the DEDICATED_PATH_ONLY set — generic /commands
+        // surface rejects it with 422 so callers must use the dedicated
+        // POST /api/v1/admin/endpoint-devices/{deviceId}/uninstalls path
+        // (where the propose/approve maker-checker + capability +
+        // provenance gates live).
+        EndpointDevice device = deviceRepository.saveAndFlush(device(TENANT_ID, "PC-UNINSTALL"));
+        CreateEndpointCommandRequest request = new CreateEndpointCommandRequest(
+                CommandType.UNINSTALL_SOFTWARE,
+                "uninstall-generic-001",
+                "should be rejected",
+                Map.of("catalogItemUuid", UUID.randomUUID().toString()),
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+
+        assertThatThrownBy(() -> commandService.createCommand(adminContext(), device.getId(), request))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasFieldOrPropertyWithValue("statusCode", HttpStatus.UNPROCESSABLE_ENTITY)
+                .hasMessageContaining("UNINSTALL_SOFTWARE must be created via");
     }
 
     @Test

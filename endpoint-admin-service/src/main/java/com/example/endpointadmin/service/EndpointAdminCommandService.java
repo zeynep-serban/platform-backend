@@ -59,6 +59,32 @@ public class EndpointAdminCommandService {
             CommandType.SMB_UPLOAD_FILE,
             CommandType.ROTATE_CREDENTIAL);
 
+    /**
+     * AG-028 Phase 1 (Codex plan-time iter-2 absorb) — command types that
+     * are reserved for their dedicated REST surfaces and MUST NOT be
+     * created via the generic admin command surface.
+     *
+     * <ul>
+     *   <li>{@link CommandType#INSTALL_SOFTWARE} — dedicated path:
+     *       {@code POST /api/v1/admin/endpoint-devices/{deviceId}/installs}
+     *       (BE-021). The generic path would bypass the preflight recompute.</li>
+     *   <li>{@link CommandType#UNINSTALL_SOFTWARE} — dedicated path:
+     *       {@code POST /api/v1/admin/endpoint-devices/{deviceId}/uninstalls}
+     *       (AG-028 Phase 1b). The generic path would bypass the propose/approve
+     *       maker-checker + capability/provenance gates.</li>
+     * </ul>
+     *
+     * <p>Migrates the prior INSTALL_SOFTWARE 409 to 422 — semantically the
+     * client request is not a "conflict with current resource state" but a
+     * request the server refuses to process on this URI (RFC 4918 §11.2 spirit
+     * of 422: server understands the request but cannot process it; the right
+     * URI is the dedicated path). Existing INSTALL_SOFTWARE 409 regression
+     * tests need to be updated to 422 in the same PR.
+     */
+    private static final Set<CommandType> DEDICATED_PATH_ONLY = EnumSet.of(
+            CommandType.INSTALL_SOFTWARE,
+            CommandType.UNINSTALL_SOFTWARE);
+
     private final EndpointCommandRepository commandRepository;
     private final EndpointCommandResultRepository resultRepository;
     private final EndpointCommandApprovalRepository approvalRepository;
@@ -332,15 +358,24 @@ public class EndpointAdminCommandService {
         if (type == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Command type is required.");
         }
-        // BE-021 (Codex 019e6dfb iter-3 P0-1): INSTALL_SOFTWARE cannot
-        // be created via the generic command surface — the preflight
-        // recompute would be bypassed. The dedicated
-        // POST .../endpoint-devices/{deviceId}/installs path is the
-        // only legal install creation route.
-        if (type == CommandType.INSTALL_SOFTWARE) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "INSTALL_SOFTWARE must be created via "
-                            + "POST /api/v1/admin/endpoint-devices/{deviceId}/installs.");
+        // AG-028 Phase 1 (Codex plan-time iter-2 absorb): types in the
+        // DEDICATED_PATH_ONLY set MUST go through their dedicated REST
+        // surfaces. The generic path would bypass the preflight recompute
+        // (INSTALL) / propose-approve maker-checker + capability+provenance
+        // gates (UNINSTALL). 422 is the right status (RFC 4918 §11.2 spirit —
+        // server understands the request but refuses to process it on this URI;
+        // the right URI is the dedicated path). This migrates BE-021's prior
+        // 409 to 422.
+        if (DEDICATED_PATH_ONLY.contains(type)) {
+            String surface = switch (type) {
+                case INSTALL_SOFTWARE ->
+                        "POST /api/v1/admin/endpoint-devices/{deviceId}/installs";
+                case UNINSTALL_SOFTWARE ->
+                        "POST /api/v1/admin/endpoint-devices/{deviceId}/uninstalls";
+                default -> "(its dedicated REST surface)";
+            };
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    type.name() + " must be created via " + surface + ".");
         }
         if (!adminCreatableTypes.contains(type)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Command type is not enabled for admin creation.");
@@ -573,8 +608,17 @@ public class EndpointAdminCommandService {
      * </ul>
      * Fail-closed otherwise: a missing / unknown / legacy-shape rule is
      * rejected, never silently coerced.
+     *
+     * <p>AG-028 Phase 1b (Codex post-impl iter-1 absorb, thread `019e8dcd`
+     * must-fix #5) — visibility widened to {@code public static} so the
+     * dedicated uninstall dispatch ({@code EndpointUninstallService}) can
+     * reuse the SAME catalog-shape → agent-wire-shape translation. The
+     * uninstall agent uses identical detection-rule semantics for the
+     * authoritative absence check; forwarding raw catalog rules would skip
+     * the {@code absolutePath → path} translation for FILE_* and the WINGET
+     * identity invariant.
      */
-    private static Map<String, Object> buildAgentDetectionRule(EndpointSoftwareCatalogItem catalogItem,
+    public static Map<String, Object> buildAgentDetectionRule(EndpointSoftwareCatalogItem catalogItem,
                                                                String agentPackageId) {
         Map<String, Object> catalogRule = catalogItem.getDetectionRule();
         Object typeObj = catalogRule == null ? null : catalogRule.get("type");
