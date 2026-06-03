@@ -78,3 +78,16 @@ d5660f410920ffab1525e11985724a6f32c2b28b:endpoint-admin-service/src/test/java/co
 
 # Self-suppression of the BE-022 narrative above (mirrors b91a2410 BE-021 pattern).
 1185f3cd4b642ad92dfa999a1eb7ac728544d46a:.gitleaksignore:generic-api-key:72
+
+# PR-gw-01A audio-gateway-service — historical commit suppression (Codex `019e8c26`
+# iter-3 absorb). Original commit `3ea6fe8d...` used variable names `VALID_KEY` and
+# `finishKey` which gitleaks generic-api-key regex matches via the "(?i)key|api|..."
+# keyword pattern. Subsequent commit `26d414c2...` renamed variables to
+# `VALID_IDEMP`/`finishIdemp` + low-entropy fixture strings; the fix is real. These
+# fingerprints cover only the historical PR commit that no longer exists post-squash.
+# Squash-merge will produce a single commit on main with the RENAMED version, so
+# post-merge gitleaks (run on main push) will PASS naturally — no SHA-bound entry
+# needed for the squashed commit. Test fixture values are deterministic idempotency
+# strings used in WebTestClient HTTP header sends, not real secrets.
+3ea6fe8da3a4e4260b7c1f6d730235f4bbd21bd9:audio-gateway-service/src/test/java/com/example/audiogateway/contract/StartSessionContractTest.java:generic-api-key:40
+3ea6fe8da3a4e4260b7c1f6d730235f4bbd21bd9:audio-gateway-service/src/test/java/com/example/audiogateway/contract/SessionLifecycleContractTest.java:generic-api-key:148

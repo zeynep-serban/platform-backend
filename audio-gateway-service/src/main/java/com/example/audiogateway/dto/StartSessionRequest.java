@@ -6,10 +6,14 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 /**
- * Start a recording session — POST /api/meeting-audio/sessions client→Gateway request.
+ * Start a recording session — POST /api/v1/audio-gateway/sessions client→Gateway request.
  *
  * <p>Audit, tenant, user fields are NEVER trusted from client; the Gateway derives them
- * from the JWT after validation. This DTO is the bare-minimum public surface.
+ * from the JWT after validation. Idempotency key is now a HEADER (Codex {@code 019e8c26}
+ * iter-2 AGREE) — body field removed to prevent dual-source ambiguity.
+ *
+ * <p>ADR-0031 §D2 — path canonical {@code /api/v1/audio-gateway}, {@code /api/meeting-audio}
+ * removed (pre-prod scope correction, no backward-compat alias).
  */
 public record StartSessionRequest(
 
@@ -39,10 +43,7 @@ public record StartSessionRequest(
         Integer sampleRateHz,
 
         @NotNull
-        Integer channels,
-
-        @Size(max = 64)
-        String idempotencyKey
+        Integer channels
 ) {
 
     /** Allowed sample rates (Hz) — Codex {@code 019e879c} fixed enum. */
