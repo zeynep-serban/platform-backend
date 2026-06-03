@@ -79,7 +79,9 @@ Mobile/Web hiçbir zaman platform-ai'a doğrudan bağlanmaz (Codex/Mavis RED).
 | Variable | Default |
 |---|---|
 | `AUDIO_GATEWAY_JWT_ISSUER_URI` | `http://platform-keycloak:8080/realms/platform` |
-| `AUDIO_GATEWAY_STT_DISPATCH_MODE` | `noop` |
+| `AUDIO_GATEWAY_DISPATCHER_MODE` | `noop` (PR-gw-01C: `redis`) |
+| `AUDIO_GATEWAY_DISPATCHER_QUEUE_FULL_RETRY_AFTER_SECONDS` | `5` |
+| `AUDIO_GATEWAY_DISPATCHER_UNAVAILABLE_RETRY_AFTER_SECONDS` | `30` |
 | `AUDIO_GATEWAY_BOUNDS_MAX_CHUNK_BYTES` | `262144` (256 KB) — **ADR-0031 update** |
 | `AUDIO_GATEWAY_BOUNDS_MAX_BUFFERED_SECONDS` | `30` |
 | `AUDIO_GATEWAY_BOUNDS_MAX_SESSION_MINUTES` | `60` — **ADR-0031 update** |

@@ -250,11 +250,17 @@ Binary frame protocol — chunk-by-chunk. Frame header:
 | 413 | `AUDIO_GATEWAY_OVERSIZE` | Declared veya actual > maxChunkBytes |
 | 415 | `AUDIO_GATEWAY_FORMAT_REJECTED` | Format/sample/channels mismatch |
 
-**Out of scope (PR-gw-01B3 sonraki)**:
-- `AudioChunkDispatcher` interface + `NoOpAudioChunkDispatcher` (Codex iter-2: dispatcher abstraction B3)
-- 429 `AUDIO_GATEWAY_QUEUE_FULL` + 503 `AUDIO_GATEWAY_STT_UNAVAILABLE` + `Retry-After` header
-- `AudioGatewayAuditSink` + `audio_chunk.admission_rejected` audit event
-- Cross-server transit (PR-gw-01C Redis Streams + WireGuard/mTLS)
+**PR-gw-01B3 LIVE** (Codex `019e8df2` 2-iter AGREE):
+- `AudioChunkDispatcher` interface + `NoOpAudioChunkDispatcher` (canonical port; eski `SttDispatchService` retire)
+- 429 `AUDIO_GATEWAY_QUEUE_FULL` + 503 `AUDIO_GATEWAY_STT_UNAVAILABLE` + `Retry-After` header (config + outcome propagation)
+- `AudioGatewayAuditSink` + `audio_chunk.admission_rejected` audit event (safeEmit Exception catch)
+- **Atomic admission gate**: dispatcher reject → registry state ilerletmez (veri kaybı kapısı kapalı; PR-gw-01C C için temel hazır)
+- Replay path dispatcher tekrar ÇAĞIRMAZ (idempotent semantics)
+
+**Out of scope (PR-gw-01C sonraki)**:
+- Redis Streams producer (bucketed 32-partition + consumer group `live-stt-v1`)
+- Cross-server transit (WireGuard/mTLS PKI + audit event `audio_chunk_forwarded_to_platform_ai`)
+- Audit persistence (KVKK Madde 12 7yr immutable retention)
 
 ### 1.6 WS `/api/v1/audio-gateway/sessions/{sessionId}/stream` — Audio Stream (**PR-gw-01D planned**)
 
@@ -422,8 +428,8 @@ Client-facing breaking change YASAK v1 lifetime'da.
 | Slice | Scope | Status |
 |---|---|---|
 | **PR-gw-01A** | Path normalize + module/POM + Idempotency-Key header + AudioSessionRegistry interface + InMemory impl + start/status/finish skeleton + canonical error envelope + contract doc revision | ✅ **MERGED** (PR #390) |
-| **PR-gw-01B-core (B1+B2)** | REST chunk admission (`POST /chunks`, binary body + X-Audio-* headers, max 256 KB, format/sample/channels session match, declared/actual byte length check, bounded body aggregation, SHA-256 payload hash, atomic `admitChunk` via registry domain method, strict contiguous chunkSeq, idempotent replay, status real chunkCount/lastChunkSeq, SessionState.STREAMING) | 🟡 **bu PR** |
-| PR-gw-01B3 | `AudioChunkDispatcher` + `NoOpAudioChunkDispatcher` + 429 QueueFull + 503 STT_UNAVAILABLE + `Retry-After` + `AudioGatewayAuditSink` + `audio_chunk.admission_rejected` audit event | ⏳ planned |
+| **PR-gw-01B-core (B1+B2)** | REST chunk admission (`POST /chunks`, binary body + X-Audio-* headers, max 256 KB, format/sample/channels session match, declared/actual byte length check, bounded body aggregation, SHA-256 payload hash, atomic `admitChunk` via registry domain method, strict contiguous chunkSeq, idempotent replay, status real chunkCount/lastChunkSeq, SessionState.STREAMING) | ✅ **MERGED** (PR #403) |
+| **PR-gw-01B3** | `AudioChunkDispatcher` canonical port + `NoOpAudioChunkDispatcher` + atomic admission gate (dispatcher reject → no registry mutation) + 429 `QueueFull` + 503 `STT_UNAVAILABLE` + `Retry-After` header (config + outcome) + `AudioGatewayAuditSink` + `audio_chunk.admission_rejected` safeEmit + eski `SttDispatchService`/`NoOpSttDispatch` retire | 🟡 **bu PR** |
 | PR-gw-01C | Redis Streams producer (bucketed 32-partition `audio:chunks:p00..p31` + consumer group `live-stt-v1` + XADD fields + bounds + idempotency `(sessionId, chunkSeq)`) | ⏳ planned |
 | PR-gw-01D | WebSocket stream (binary + JSON metadata frames + unauthorized handshake + unknown session close + Redis Stream trim) | ⏳ planned |
 | PR-gw-01E | Contract hardening (client X-* strip code assert + PII guard error payload + detailed transition matrix + duplicate/out-of-order edge cases) | ⏳ planned |

@@ -2,6 +2,8 @@ package com.example.audiogateway.service;
 
 import com.example.audiogateway.config.AudioGatewayProperties;
 import com.example.audiogateway.dto.ChunkAdmissionResponse;
+import com.example.audiogateway.service.AudioChunkDispatcher.ChunkDispatchCommand;
+import com.example.audiogateway.service.AudioChunkDispatcher.DispatchOutcome;
 import com.example.audiogateway.service.AudioSessionRegistry.ChunkOutcome;
 import com.example.audiogateway.service.AudioSessionRegistry.ChunkRecordCommand;
 import com.example.audiogateway.service.AudioSessionRegistry.CreateOutcome;
@@ -22,19 +24,14 @@ import org.springframework.stereotype.Service;
 /**
  * Bounded in-memory implementation of {@link AudioSessionRegistry}.
  *
- * <p>PR-gw-01A + PR-gw-01B-core scope (Codex {@code 019e8c26} + {@code 019e8d78}
- * iter-2 AGREE): no Redis, no persistence; restart loses all sessions. Durability sonraki
- * slice'da Redis Streams (PR-gw-01C) ile gelir. Slice PR-gw-01B-core migrates state
- * machine + chunk admission domain method.
+ * <p>PR-gw-01A + PR-gw-01B-core + PR-gw-01B3 scope (Codex {@code 019e8c26} +
+ * {@code 019e8d78} + {@code 019e8df2} iter-2 AGREE): no Redis, no persistence;
+ * restart loses all sessions. Durability sonraki slice'da Redis Streams (PR-gw-01C).
  *
- * <p><b>Concurrency contract:</b> {@code create(...)} and {@code admitChunk(...)} are
- * fully {@code synchronized} on the same monitor — concurrent calls cannot produce two
- * distinct sessions OR two distinct admitted chunks at the same seq. Capacity check is
- * in the same critical section. Finish path uses CAS ({@code sessions.replace}).
- *
- * <p>Idempotency replay (start): key = {@code tenantId|userId|"POST"|"/sessions"|key};
- * Idempotency replay (chunk): key = {@code tenantId|userId|"POST"|"/chunks"|sessionId|
- * chunkSeq|idempotencyKey}. Replay only if same payload SHA-256.
+ * <p><b>Concurrency contract:</b> {@code create}, {@code admitChunk} (with dispatcher),
+ * {@code finish} are fully {@code synchronized} on the same monitor — atomic state
+ * transitions guaranteed. Dispatcher.dispatch() called inside synchronized region —
+ * B3 NoOp/PoC OK; Redis (C) async pattern refactor borç notu.
  */
 @Service
 public class InMemoryAudioSessionRegistry implements AudioSessionRegistry {
@@ -77,7 +74,6 @@ public class InMemoryAudioSessionRegistry implements AudioSessionRegistry {
         }
 
         final String sessionId = "SES-" + UUID.randomUUID();
-        // PR-gw-01B-core: chunk admission state init (lastAcceptedChunkSeq=-1, chunkCount=0)
         final SessionRecord rec = new SessionRecord(
                 sessionId, cmd.tenantId(), cmd.userId(), cmd.meetingId(), cmd.deviceId(),
                 cmd.language(), cmd.audioFormat(), cmd.sampleRateHz(), cmd.channels(),
@@ -97,8 +93,14 @@ public class InMemoryAudioSessionRegistry implements AudioSessionRegistry {
         return Optional.ofNullable(sessions.get(sessionId));
     }
 
+    /**
+     * Atomic admit-chunk + dispatch (Codex {@code 019e8df2} iter-2 AGREE B3 atomicity gate).
+     * Synchronized monitor; dispatcher called inside but only AFTER replay/conflict
+     * checks pass. State mutation ONLY after dispatcher Accepted.
+     */
     @Override
-    public synchronized ChunkOutcome admitChunk(final ChunkRecordCommand cmd) {
+    public synchronized ChunkOutcome admitChunk(final ChunkRecordCommand cmd,
+                                                 final AudioChunkDispatcher dispatcher) {
         final SessionRecord existing = sessions.get(cmd.sessionId());
         if (existing == null) {
             return new ChunkOutcome.NotFound();
@@ -111,35 +113,51 @@ public class InMemoryAudioSessionRegistry implements AudioSessionRegistry {
             return new ChunkOutcome.InvalidState(existing.state());
         }
 
-        // Replay: same chunkSeq AS last accepted + same idempotency-Key + same payload SHA-256
+        // Replay path: same chunkSeq as last accepted + same key + same payload SHA-256.
+        // Dispatcher NOT called again (Codex iter-2: cache set only after dispatch-accepted).
         if (cmd.chunkSeq() == existing.lastAcceptedChunkSeq()) {
             if (Objects.equals(cmd.idempotencyKey(), existing.lastChunkIdempotencyKey())
-                    && Objects.equals(cmd.payloadSha256(), existing.lastChunkPayloadSha256())) {
+                    && Objects.equals(cmd.payload().sha256(), existing.lastChunkPayloadSha256())) {
                 final ChunkAdmissionResponse resp = new ChunkAdmissionResponse(
                         existing.sessionId(), null,
                         existing.lastAcceptedChunkSeq(), existing.chunkCount(),
                         existing.lastChunkAtMs(), true);
                 return new ChunkOutcome.Replayed(resp);
             }
-            // Same chunkSeq but different key OR payload → conflict
             return new ChunkOutcome.IdempotencyConflict();
         }
 
-        // Strict contiguous: expected = lastAccepted + 1 (init -1 → first chunk 0)
+        // Strict contiguous (init -1 → first chunk 0; sonraki last+1)
         final long expected = existing.lastAcceptedChunkSeq() + 1L;
         if (cmd.chunkSeq() != expected) {
             return new ChunkOutcome.OutOfOrder(expected, cmd.chunkSeq());
         }
 
-        final SessionRecord updated = existing.withAcceptedChunk(
-                cmd.chunkSeq(), cmd.nowMs(), cmd.idempotencyKey(), cmd.payloadSha256());
-        sessions.put(cmd.sessionId(), updated);
+        // Atomicity gate (Codex `019e8df2` iter-1 P1 absorb): dispatcher called AFTER all
+        // admission validations pass; state mutated ONLY on Accepted. QueueFull/Unavailable
+        // → NO mutation; client retry path falls through to fresh attempt next time.
+        final ChunkDispatchCommand dispatchCmd = new ChunkDispatchCommand(
+                cmd.sessionId(), existing.tenantId(), existing.userId(),
+                existing.meetingId(), existing.deviceId(), existing.language(),
+                existing.audioFormat(), existing.sampleRateHz(), existing.channels(),
+                cmd.chunkSeq(), cmd.chunkStartedAtMs(), cmd.correlationId(),
+                cmd.payload());
 
-        final ChunkAdmissionResponse resp = new ChunkAdmissionResponse(
-                updated.sessionId(), null,
-                updated.lastAcceptedChunkSeq(), updated.chunkCount(),
-                updated.lastChunkAtMs(), false);
-        return new ChunkOutcome.Accepted(updated, resp);
+        final DispatchOutcome dispatchOutcome = dispatcher.dispatch(dispatchCmd);
+        return switch (dispatchOutcome) {
+            case DispatchOutcome.Accepted a -> {
+                final SessionRecord updated = existing.withAcceptedChunk(
+                        cmd.chunkSeq(), cmd.nowMs(), cmd.idempotencyKey(), cmd.payload().sha256());
+                sessions.put(cmd.sessionId(), updated);
+                final ChunkAdmissionResponse resp = new ChunkAdmissionResponse(
+                        updated.sessionId(), null,
+                        updated.lastAcceptedChunkSeq(), updated.chunkCount(),
+                        updated.lastChunkAtMs(), false);
+                yield new ChunkOutcome.Accepted(updated, resp);
+            }
+            case DispatchOutcome.QueueFull q -> new ChunkOutcome.DispatchQueueFull(q.retryAfterSeconds());
+            case DispatchOutcome.Unavailable u -> new ChunkOutcome.DispatchUnavailable(u.retryAfterSeconds());
+        };
     }
 
     @Override

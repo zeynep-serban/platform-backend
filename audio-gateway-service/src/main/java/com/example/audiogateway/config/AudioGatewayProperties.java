@@ -14,9 +14,19 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "audio.gateway")
 public class AudioGatewayProperties {
 
+    /**
+     * Codex {@code 019e8df2} iter-4 P1.2 absorb: nested {@code @PostConstruct} bean lifecycle
+     * callback olarak çağrılmaz; outer {@code AudioGatewayProperties} bean üzerinde tetikle.
+     */
+    @jakarta.annotation.PostConstruct
+    public void validate() {
+        dispatcher.validate();
+    }
+
+
     private final Contract contract = new Contract();
     private final Bounds bounds = new Bounds();
-    private final Stt stt = new Stt();
+    private final Dispatcher dispatcher = new Dispatcher();
     private final Jwt jwt = new Jwt();
     private final Idempotency idempotency = new Idempotency();
 
@@ -28,8 +38,8 @@ public class AudioGatewayProperties {
         return bounds;
     }
 
-    public Stt getStt() {
-        return stt;
+    public Dispatcher getDispatcher() {
+        return dispatcher;
     }
 
     public Jwt getJwt() {
@@ -100,15 +110,56 @@ public class AudioGatewayProperties {
         }
     }
 
-    public static class Stt {
-        private String dispatchMode = "noop";
+    /**
+     * Dispatcher config — Codex {@code 019e8df2} iter-2 AGREE PR-gw-01B3:
+     * {@code audio.gateway.dispatcher.mode} canonical (eski {@code audio.gateway.stt.dispatch-mode}
+     * retire); {@code mode=noop} default; {@code mode=redis} PR-gw-01C scope (yeni
+     * RedisStreamsAudioChunkDispatcher bean register).
+     */
+    public static class Dispatcher {
+        /** Supported modes in PR-gw-01B3. PR-gw-01C ekleyecek: redis. */
+        private static final java.util.Set<String> SUPPORTED_MODES_B3 = java.util.Set.of("noop");
 
-        public String getDispatchMode() {
-            return dispatchMode;
+        private String mode = "noop";
+        private long queueFullRetryAfterSeconds = 5L;
+        private long unavailableRetryAfterSeconds = 30L;
+
+        public String getMode() {
+            return mode;
         }
 
-        public void setDispatchMode(final String dispatchMode) {
-            this.dispatchMode = dispatchMode;
+        public void setMode(final String mode) {
+            this.mode = mode;
+        }
+
+        /**
+         * Codex {@code 019e8df2} iter-3+iter-4 P1.2 absorb: fail-fast unsupported mode.
+         * Outer {@link AudioGatewayProperties#validate()} tetikler (nested
+         * {@code @PostConstruct} bean lifecycle olarak çağrılmaz).
+         */
+        public void validate() {
+            if (!SUPPORTED_MODES_B3.contains(mode)) {
+                throw new IllegalStateException(
+                        "audio.gateway.dispatcher.mode='" + mode + "' not supported in PR-gw-01B3 — "
+                        + "only 'noop' currently. 'redis' arrives in PR-gw-01C with cross-server "
+                        + "Streams producer. Supported: " + SUPPORTED_MODES_B3);
+            }
+        }
+
+        public long getQueueFullRetryAfterSeconds() {
+            return queueFullRetryAfterSeconds;
+        }
+
+        public void setQueueFullRetryAfterSeconds(final long queueFullRetryAfterSeconds) {
+            this.queueFullRetryAfterSeconds = queueFullRetryAfterSeconds;
+        }
+
+        public long getUnavailableRetryAfterSeconds() {
+            return unavailableRetryAfterSeconds;
+        }
+
+        public void setUnavailableRetryAfterSeconds(final long unavailableRetryAfterSeconds) {
+            this.unavailableRetryAfterSeconds = unavailableRetryAfterSeconds;
         }
     }
 

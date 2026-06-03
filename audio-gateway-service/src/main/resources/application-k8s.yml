@@ -8,8 +8,10 @@ spring:
 
 audio:
   gateway:
-    stt:
-      dispatch-mode: ${AUDIO_GATEWAY_STT_DISPATCH:noop}
+    dispatcher:
+      mode: ${AUDIO_GATEWAY_DISPATCHER_MODE:noop}
+      queue-full-retry-after-seconds: ${AUDIO_GATEWAY_DISPATCHER_QUEUE_FULL_RETRY_AFTER_SECONDS:5}
+      unavailable-retry-after-seconds: ${AUDIO_GATEWAY_DISPATCHER_UNAVAILABLE_RETRY_AFTER_SECONDS:30}
     bounds:
       max-chunk-bytes: ${AUDIO_GATEWAY_MAX_CHUNK_BYTES:1048576}
       max-buffered-seconds: ${AUDIO_GATEWAY_MAX_BUFFERED_SECONDS:30}

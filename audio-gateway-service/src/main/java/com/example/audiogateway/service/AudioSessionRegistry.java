@@ -1,27 +1,27 @@
 package com.example.audiogateway.service;
 
+import com.example.audiogateway.dto.AudioChunkPayload;
 import com.example.audiogateway.dto.AudioFormat;
 import com.example.audiogateway.dto.ChunkAdmissionResponse;
 
 import java.util.Optional;
 
 /**
- * Session lifecycle registry — bounded in-memory storage for PR-gw-01A + PR-gw-01B-core.
+ * Session lifecycle registry — bounded in-memory storage.
  *
- * <p>Codex {@code 019e8c26} + {@code 019e8d78} iter-2 AGREE: persistence iddiası YOK;
- * durability sonraki slice'larda Redis Streams (PR-gw-01C) ile gelir. Bu interface
- * restart sonrası kayıp davranışını contract olarak yazar.
+ * <p>Codex {@code 019e8c26} + {@code 019e8c09} + {@code 019e8d78} + {@code 019e8df2}
+ * iter-2 AGREE: persistence iddiası YOK (PR-gw-01C Redis Streams durability); single
+ * atomic {@code admitChunk(cmd, dispatcher)} surface — dispatcher reject ederse
+ * registry state ilerletmez (B3 atomicity blocker absorb, veri kaybı kapısı kapalı).
  *
  * <p>Idempotency-Key scope:
  * <ul>
  *   <li>Start: {@code tenantId + userId + "POST" + "/sessions" + key}</li>
- *   <li>Chunk: {@code tenantId + userId + "POST" + "/chunks" + sessionId + chunkSeq + key} —
- *       PR-gw-01B-core domain method {@link #admitChunk(ChunkRecordCommand)} ile</li>
+ *   <li>Chunk: {@code tenantId + userId + "POST" + "/chunks" + sessionId + chunkSeq + key}
+ *       — replay path dispatcher'ı TEKRAR ÇAĞIRMAZ (Codex iter-2: replay = previously
+ *       dispatched, lastChunkIdempotencyKey + lastChunkPayloadSha256 cache dispatch-
+ *       accepted gate sonrası set'lenir)</li>
  * </ul>
- *
- * <p>Chunk admission contract (PR-gw-01B-core Codex {@code 019e8d78} iter-1 absorb):
- * strict contiguous {@code chunkSeq} (init -1 → first chunk 0, sonraki {@code last+1});
- * replay yalnız aynı key + aynı seq + aynı payload SHA-256; aksi halde 409.
  */
 public interface AudioSessionRegistry {
 
@@ -34,11 +34,16 @@ public interface AudioSessionRegistry {
     Optional<SessionRecord> get(String sessionId);
 
     /**
-     * Admit a chunk for {@code sessionId}. Domain method — strict contiguous chunkSeq,
-     * payload-hash bound idempotent replay, atomic STARTED → STREAMING transition on first
-     * chunk, owner check.
+     * Atomic admit-chunk + dispatch (Codex {@code 019e8df2} iter-2 AGREE B3):
+     * <ul>
+     *   <li>Session lookup + owner + state validation</li>
+     *   <li>Replay check (same key + same hash + same seq) → no dispatcher call</li>
+     *   <li>Idempotency conflict / out-of-order → no dispatcher call</li>
+     *   <li>Fresh chunk: dispatcher.dispatch → Accepted → mutate state; QueueFull/Unavailable
+     *       → NO mutation (atomicity gate)</li>
+     * </ul>
      */
-    ChunkOutcome admitChunk(ChunkRecordCommand cmd);
+    ChunkOutcome admitChunk(ChunkRecordCommand cmd, AudioChunkDispatcher dispatcher);
 
     /**
      * Mark session as FINISHED. Idempotent: same {@code finishIdempotencyKey} returns
@@ -82,8 +87,16 @@ public interface AudioSessionRegistry {
         }
     }
 
-    // ----- Chunk command & outcome (PR-gw-01B-core) ------------------------
+    // ----- Chunk command & outcome (PR-gw-01B-core + B3 atomic) ------------
 
+    /**
+     * Chunk admission command — registry-facing input.
+     *
+     * <p>{@link #payload} is the bounded read-only buffer + SHA-256; dispatcher gets a
+     * {@link AudioChunkDispatcher.ChunkDispatchCommand} built from {@link SessionRecord} +
+     * this command's payload/correlationId (Codex {@code 019e8df2} iter-2: dispatcher
+     * receives session-derived fields, NOT client headers).
+     */
     record ChunkRecordCommand(
             String sessionId,
             Long tenantId,
@@ -91,8 +104,8 @@ public interface AudioSessionRegistry {
             String idempotencyKey,
             long chunkSeq,
             long chunkStartedAtMs,
-            int byteLength,
-            String payloadSha256,
+            String correlationId,
+            AudioChunkPayload payload,
             long nowMs
     ) {
     }
@@ -117,6 +130,20 @@ public interface AudioSessionRegistry {
         }
 
         record IdempotencyConflict() implements ChunkOutcome {
+        }
+
+        /**
+         * Dispatcher reported bounded queue full — caller should retry after the given
+         * seconds. NO mutation (Codex {@code 019e8df2} iter-2 B3 atomicity gate).
+         */
+        record DispatchQueueFull(long retryAfterSeconds) implements ChunkOutcome {
+        }
+
+        /**
+         * Dispatcher reported downstream STT unavailable — caller should retry after the
+         * given seconds. NO mutation.
+         */
+        record DispatchUnavailable(long retryAfterSeconds) implements ChunkOutcome {
         }
     }
 

@@ -54,8 +54,11 @@ audio:
       # Bounded in-memory session registry (PR-gw-01A persistence iddiası YOK;
       # durability sonraki slice PR-gw-01C Redis Streams ile gelir).
       max-active-sessions: 1000
-    stt:
-      dispatch-mode: noop            # noop | redis | http (PR-queue-01)
+    # Codex `019e8df2` iter-2 AGREE PR-gw-01B3 — dispatcher canonical port (old stt.dispatch-mode retired)
+    dispatcher:
+      mode: noop                     # noop | redis (PR-gw-01C cross-server Streams producer)
+      queue-full-retry-after-seconds: 5
+      unavailable-retry-after-seconds: 30
     jwt:
       # 3-AI mutabakat Codex 019e8846 iter-1: tenant/user claim adı configurable;
       # backend canonical pattern (common-auth/AuthenticatedUserLookupService) "companyId" + "userId".

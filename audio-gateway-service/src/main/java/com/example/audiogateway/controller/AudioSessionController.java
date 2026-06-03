@@ -2,6 +2,7 @@ package com.example.audiogateway.controller;
 
 import com.example.audiogateway.config.AudioGatewayProperties;
 import com.example.audiogateway.config.CorrelationIdWebFilter;
+import com.example.audiogateway.dto.AudioChunkPayload;
 import com.example.audiogateway.dto.AudioFormat;
 import com.example.audiogateway.dto.ChunkAdmissionResponse;
 import com.example.audiogateway.dto.ErrorResponse;
@@ -9,6 +10,9 @@ import com.example.audiogateway.dto.FinishResponse;
 import com.example.audiogateway.dto.StartSessionRequest;
 import com.example.audiogateway.dto.StartSessionResponse;
 import com.example.audiogateway.dto.StatusResponse;
+import com.example.audiogateway.service.AudioChunkDispatcher;
+import com.example.audiogateway.service.AudioGatewayAuditSink;
+import com.example.audiogateway.service.AudioGatewayAuditSink.AuditEvent;
 import com.example.audiogateway.service.AudioSessionRegistry;
 import com.example.audiogateway.service.AudioSessionRegistry.ChunkOutcome;
 import com.example.audiogateway.service.AudioSessionRegistry.ChunkRecordCommand;
@@ -19,13 +23,11 @@ import com.example.audiogateway.service.SessionRecord;
 import com.example.audiogateway.service.SessionState;
 
 import jakarta.validation.Valid;
-import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.regex.Pattern;
-import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -46,32 +48,16 @@ import reactor.core.publisher.Mono;
 /**
  * Audio Gateway Contract 1.0 — session lifecycle + chunk admission endpoints.
  *
- * <p>ADR-0031 two-server topology (Codex {@code 019e8c26} iter-2 AGREE PR-gw-01A scope +
- * Codex {@code 019e8d78} iter-2 AGREE PR-gw-01B-core scope): canonical path
- * {@code /api/v1/audio-gateway}; eski {@code /api/meeting-audio} kaldırıldı.
+ * <p>ADR-0031 + Codex {@code 019e8c26} + {@code 019e8d78} + {@code 019e8df2}
+ * iter-2 AGREE PR-gw-01B3 scope: dispatcher port + audit sink + 429/503 + Retry-After.
  *
- * <p>PR-gw-01A scope (MERGED):
+ * <p>PR-gw-01B3 scope (bu PR):
  * <ul>
- *   <li>{@code POST /sessions} — start session + {@code Idempotency-Key} header zorunlu</li>
- *   <li>{@code GET /sessions/{id}/status} — lifecycle state snapshot</li>
- *   <li>{@code POST /sessions/{id}/finish} — terminal lifecycle + idempotent</li>
- * </ul>
- *
- * <p>PR-gw-01B-core scope (bu PR):
- * <ul>
- *   <li>{@code POST /sessions/{id}/chunks} — binary body + X-Audio-* headers; declared/
- *       actual byte length check, format/sample/channels session match, bounded body
- *       aggregation, SHA-256 payload hash, atomic admitChunk via registry domain method,
- *       strict contiguous chunkSeq, idempotent replay (same key + same seq + same hash)</li>
- *   <li>{@code GET /sessions/{id}/status} — real chunkCount + lastChunkSeq (no longer 0)</li>
- * </ul>
- *
- * <p>Out of scope (sonraki slice'lar):
- * <ul>
- *   <li>PR-gw-01B3: AudioChunkDispatcher + NoOp + 429/503 + Retry-After + audit sink</li>
- *   <li>PR-gw-01C: Redis Streams producer (bucketed 32-partition + consumer group)</li>
- *   <li>PR-gw-01D: WebSocket binary + JSON metadata stream</li>
- *   <li>PR-gw-01E: Header spoof strip + PII guard + invalid transition matrix</li>
+ *   <li>{@link AudioChunkDispatcher} injection — atomic admission gate; QueueFull/
+ *       Unavailable → 429/503 + Retry-After header + ChunkAdmissionRejected audit emit</li>
+ *   <li>{@link AudioGatewayAuditSink} injection — safeEmit for all rejected admissions
+ *       (413/415/409/429/503); auth failures (401/403) ayrı boundary B3 dışı</li>
+ *   <li>Eski {@code SttDispatchService}/{@code NoOpSttDispatch} retire (single canonical port)</li>
  * </ul>
  */
 @RestController
@@ -81,21 +67,27 @@ public class AudioSessionController {
     private static final Pattern IDEMPOTENCY_KEY_PATTERN =
             Pattern.compile("^[A-Za-z0-9._:\\-]{16,128}$");
 
-    // Chunk admission canonical headers (Codex `019e8d78` iter-2 AGREE — binary body + headers)
     private static final String HDR_CHUNK_SEQ = "X-Audio-Chunk-Seq";
     private static final String HDR_CHUNK_STARTED_AT_MS = "X-Audio-Chunk-Started-At-Ms";
     private static final String HDR_AUDIO_FORMAT = "X-Audio-Format";
     private static final String HDR_SAMPLE_RATE_HZ = "X-Audio-Sample-Rate-Hz";
     private static final String HDR_CHANNELS = "X-Audio-Channels";
     private static final String HDR_BYTE_LENGTH = "X-Audio-Byte-Length";
+    private static final String HDR_RETRY_AFTER = "Retry-After";
 
     private final AudioGatewayProperties props;
     private final AudioSessionRegistry registry;
+    private final AudioChunkDispatcher dispatcher;
+    private final AudioGatewayAuditSink auditSink;
 
     public AudioSessionController(final AudioGatewayProperties props,
-                                  final AudioSessionRegistry registry) {
+                                  final AudioSessionRegistry registry,
+                                  final AudioChunkDispatcher dispatcher,
+                                  final AudioGatewayAuditSink auditSink) {
         this.props = props;
         this.registry = registry;
+        this.dispatcher = dispatcher;
+        this.auditSink = auditSink;
     }
 
     // ----- POST /sessions ---------------------------------------------------
@@ -110,28 +102,18 @@ public class AudioSessionController {
         final String corrId = correlationId(exchange);
 
         final ResponseEntity<?> idempErr = validateIdempotencyKey(idempotencyKey, corrId);
-        if (idempErr != null) {
-            return Mono.just(idempErr);
-        }
+        if (idempErr != null) return Mono.just(idempErr);
 
         final ResponseEntity<?> formatErr = validateStartFormatGuards(req, corrId);
-        if (formatErr != null) {
-            return Mono.just(formatErr);
-        }
+        if (formatErr != null) return Mono.just(formatErr);
 
         final ResponseEntity<?> authErr = validateAuth(jwt, corrId);
-        if (authErr != null) {
-            return Mono.just(authErr);
-        }
+        if (authErr != null) return Mono.just(authErr);
 
         final Long tenantId = claimAsLong(jwt, props.getJwt().getTenantClaim());
         final Long userId = claimAsLong(jwt, props.getJwt().getUserClaim());
-        if (tenantId == null) {
-            return Mono.just(forbidden(props.getJwt().getTenantClaim(), corrId));
-        }
-        if (userId == null) {
-            return Mono.just(forbidden(props.getJwt().getUserClaim(), corrId));
-        }
+        if (tenantId == null) return Mono.just(forbidden(props.getJwt().getTenantClaim(), corrId));
+        if (userId == null) return Mono.just(forbidden(props.getJwt().getUserClaim(), corrId));
 
         final long now = Instant.now().toEpochMilli();
         final CreateOutcome outcome = registry.create(new SessionCreateCommand(
@@ -162,7 +144,7 @@ public class AudioSessionController {
         });
     }
 
-    // ----- POST /sessions/{sessionId}/chunks (PR-gw-01B-core) ---------------
+    // ----- POST /sessions/{sessionId}/chunks (PR-gw-01B-core + B3) ----------
 
     @PostMapping(value = "/sessions/{sessionId}/chunks",
             consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
@@ -174,27 +156,16 @@ public class AudioSessionController {
 
         final String corrId = correlationId(exchange);
 
-        // Idempotency-Key validation
         final ResponseEntity<?> idempErr = validateIdempotencyKey(idempotencyKey, corrId);
-        if (idempErr != null) {
-            return Mono.just(idempErr);
-        }
+        if (idempErr != null) return Mono.just(idempErr);
 
-        // JWT + tenant/user claims
         final ResponseEntity<?> authErr = validateAuth(jwt, corrId);
-        if (authErr != null) {
-            return Mono.just(authErr);
-        }
+        if (authErr != null) return Mono.just(authErr);
         final Long tenantId = claimAsLong(jwt, props.getJwt().getTenantClaim());
         final Long userId = claimAsLong(jwt, props.getJwt().getUserClaim());
-        if (tenantId == null) {
-            return Mono.just(forbidden(props.getJwt().getTenantClaim(), corrId));
-        }
-        if (userId == null) {
-            return Mono.just(forbidden(props.getJwt().getUserClaim(), corrId));
-        }
+        if (tenantId == null) return Mono.just(forbidden(props.getJwt().getTenantClaim(), corrId));
+        if (userId == null) return Mono.just(forbidden(props.getJwt().getUserClaim(), corrId));
 
-        // Header parsing
         final HttpHeaders headers = exchange.getRequest().getHeaders();
         final Long chunkSeq = parseLongHeader(headers, HDR_CHUNK_SEQ);
         final Long chunkStartedAtMs = parseLongHeader(headers, HDR_CHUNK_STARTED_AT_MS);
@@ -209,14 +180,16 @@ public class AudioSessionController {
                 || sampleRateHz == null || channels == null || audioFormat == null) {
             return Mono.just(ResponseEntity.badRequest().body(ErrorResponse.of(
                     ErrorResponse.CODE_VALIDATION,
-                    "Missing or invalid chunk metadata headers (X-Audio-Chunk-Seq/...-Started-At-Ms/"
-                            + "...-Byte-Length/X-Audio-Format/X-Audio-Sample-Rate-Hz/X-Audio-Channels)",
+                    "Missing or invalid chunk metadata headers",
                     corrId, false)));
         }
 
-        // Declared byteLength bounds
         final long maxChunkBytes = props.getBounds().getMaxChunkBytes();
         if (declaredByteLength > maxChunkBytes) {
+            final long seq = chunkSeq;
+            safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                    sessionId, tenantId, userId, seq, 413,
+                    ErrorResponse.CODE_OVERSIZE, null, corrId, Instant.now().toEpochMilli()));
             return Mono.just(ResponseEntity
                     .status(HttpStatus.PAYLOAD_TOO_LARGE)
                     .body(ErrorResponse.of(
@@ -226,8 +199,10 @@ public class AudioSessionController {
                             corrId, false)));
         }
 
-        // Format whitelist (CLIENT_ALLOWED subset)
         if (!AudioFormat.CLIENT_ALLOWED.contains(audioFormat)) {
+            safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                    sessionId, tenantId, userId, chunkSeq, 415,
+                    ErrorResponse.CODE_FORMAT_REJECTED, null, corrId, Instant.now().toEpochMilli()));
             return Mono.just(ResponseEntity
                     .status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
                     .body(ErrorResponse.of(
@@ -236,21 +211,29 @@ public class AudioSessionController {
                             corrId, false)));
         }
         if (!StartSessionRequest.ALLOWED_SAMPLE_RATES.contains(sampleRateHz)) {
+            safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                    sessionId, tenantId, userId, chunkSeq, 400,
+                    ErrorResponse.CODE_FORMAT_REJECTED, null, corrId, Instant.now().toEpochMilli()));
             return Mono.just(ResponseEntity.badRequest().body(ErrorResponse.of(
                     ErrorResponse.CODE_FORMAT_REJECTED,
                     "Unsupported sample rate: " + sampleRateHz,
                     corrId, false)));
         }
         if (channels != 1) {
+            safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                    sessionId, tenantId, userId, chunkSeq, 400,
+                    ErrorResponse.CODE_FORMAT_REJECTED, null, corrId, Instant.now().toEpochMilli()));
             return Mono.just(ResponseEntity.badRequest().body(ErrorResponse.of(
                     ErrorResponse.CODE_FORMAT_REJECTED,
                     "Stereo or multichannel not supported in PoC (channels must be 1)",
                     corrId, false)));
         }
 
-        // Session lookup + owner + format/sample/channels match
         final SessionRecord existing = registry.get(sessionId).orElse(null);
         if (existing == null) {
+            safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                    sessionId, tenantId, userId, chunkSeq, 404,
+                    ErrorResponse.CODE_SESSION_NOT_FOUND, null, corrId, Instant.now().toEpochMilli()));
             return Mono.just(ResponseEntity
                     .status(HttpStatus.NOT_FOUND)
                     .body(ErrorResponse.of(
@@ -259,6 +242,7 @@ public class AudioSessionController {
                             corrId, false)));
         }
         if (!tenantId.equals(existing.tenantId()) || !userId.equals(existing.userId())) {
+            // Codex iter-3 P1.3 absorb: 403 owner mismatch = authz boundary, B3 audit DIŞI
             return Mono.just(ResponseEntity
                     .status(HttpStatus.FORBIDDEN)
                     .body(ErrorResponse.of(
@@ -269,6 +253,9 @@ public class AudioSessionController {
         if (existing.audioFormat() != audioFormat
                 || existing.sampleRateHz() != sampleRateHz
                 || existing.channels() != channels) {
+            safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                    sessionId, tenantId, userId, chunkSeq, 415,
+                    ErrorResponse.CODE_FORMAT_REJECTED, null, corrId, Instant.now().toEpochMilli()));
             return Mono.just(ResponseEntity
                     .status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
                     .body(ErrorResponse.of(
@@ -277,8 +264,9 @@ public class AudioSessionController {
                             corrId, false)));
         }
 
-        // Bounded body aggregation + SHA-256 (Codex `019e8d78` iter-2: maxChunkBytes + 1 fail-fast)
         final long maxAllowed = maxChunkBytes;
+        final long capturedChunkSeq = chunkSeq;
+        final long capturedChunkStartedAtMs = chunkStartedAtMs;
         return DataBufferUtils.join(exchange.getRequest().getBody(), (int) (maxAllowed + 1))
                 .map(buffer -> {
                     try {
@@ -291,6 +279,9 @@ public class AudioSessionController {
                 })
                 .flatMap(bytes -> {
                     if (bytes.length > maxAllowed) {
+                        safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                                sessionId, tenantId, userId, capturedChunkSeq, 413,
+                                ErrorResponse.CODE_OVERSIZE, null, corrId, Instant.now().toEpochMilli()));
                         return Mono.just((ResponseEntity<?>) ResponseEntity
                                 .status(HttpStatus.PAYLOAD_TOO_LARGE)
                                 .body(ErrorResponse.of(
@@ -300,6 +291,9 @@ public class AudioSessionController {
                                         corrId, false)));
                     }
                     if (bytes.length != declaredByteLength) {
+                        safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                                sessionId, tenantId, userId, capturedChunkSeq, 400,
+                                ErrorResponse.CODE_VALIDATION, null, corrId, Instant.now().toEpochMilli()));
                         return Mono.just((ResponseEntity<?>) ResponseEntity
                                 .badRequest()
                                 .body(ErrorResponse.of(
@@ -309,15 +303,22 @@ public class AudioSessionController {
                                         corrId, false)));
                     }
                     final String sha256 = sha256Hex(bytes);
+                    final AudioChunkPayload payload = AudioChunkPayload.of(bytes, sha256);
                     final long now = Instant.now().toEpochMilli();
                     final ChunkOutcome outcome = registry.admitChunk(new ChunkRecordCommand(
                             sessionId, tenantId, userId, idempotencyKey,
-                            chunkSeq, chunkStartedAtMs, bytes.length, sha256, now));
-                    return Mono.just((ResponseEntity<?>) handleChunkOutcome(outcome, corrId, chunkSeq));
+                            capturedChunkSeq, capturedChunkStartedAtMs, corrId, payload, now),
+                            dispatcher);
+                    return Mono.just((ResponseEntity<?>) handleChunkOutcome(
+                            outcome, corrId, sessionId, tenantId, userId, capturedChunkSeq));
                 })
                 .onErrorResume(ex -> {
                     if (ex.getClass().getSimpleName().contains("DataBufferLimit")
                             || ex.getMessage() != null && ex.getMessage().contains("limit")) {
+                        // Codex iter-3 P1.4 absorb: bounded read limit 413 path da audit
+                        safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                                sessionId, tenantId, userId, capturedChunkSeq, 413,
+                                ErrorResponse.CODE_OVERSIZE, null, corrId, Instant.now().toEpochMilli()));
                         return Mono.just(ResponseEntity
                                 .status(HttpStatus.PAYLOAD_TOO_LARGE)
                                 .body(ErrorResponse.of(
@@ -325,6 +326,9 @@ public class AudioSessionController {
                                         "Chunk body exceeds bounded read limit (" + maxAllowed + ")",
                                         corrId, false)));
                     }
+                    safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                            sessionId, tenantId, userId, capturedChunkSeq, 400,
+                            ErrorResponse.CODE_VALIDATION, null, corrId, Instant.now().toEpochMilli()));
                     return Mono.just(ResponseEntity
                             .status(HttpStatus.BAD_REQUEST)
                             .body(ErrorResponse.of(
@@ -335,41 +339,87 @@ public class AudioSessionController {
     }
 
     private ResponseEntity<?> handleChunkOutcome(final ChunkOutcome outcome, final String corrId,
-                                                  final long chunkSeq) {
+                                                  final String sessionId, final Long tenantId,
+                                                  final Long userId, final long chunkSeq) {
+        final long ts = Instant.now().toEpochMilli();
         return switch (outcome) {
-            case ChunkOutcome.Accepted a -> ResponseEntity.ok(
-                    withCorrelation(a.response(), corrId));
-            case ChunkOutcome.Replayed r -> ResponseEntity.ok(
-                    withCorrelation(r.response(), corrId));
-            case ChunkOutcome.NotFound nf -> ResponseEntity
-                    .status(HttpStatus.NOT_FOUND)
-                    .body(ErrorResponse.of(
-                            ErrorResponse.CODE_SESSION_NOT_FOUND,
-                            "Session not found", corrId, false));
-            case ChunkOutcome.OwnerMismatch om -> ResponseEntity
-                    .status(HttpStatus.FORBIDDEN)
-                    .body(ErrorResponse.of(
-                            ErrorResponse.CODE_MEETING_FORBIDDEN,
-                            "Session owner mismatch", corrId, false));
-            case ChunkOutcome.InvalidState is -> ResponseEntity
-                    .status(HttpStatus.CONFLICT)
-                    .body(ErrorResponse.of(
-                            ErrorResponse.CODE_INVALID_TRANSITION,
-                            "Chunk admission not allowed in state " + is.currentState(),
-                            corrId, false));
-            case ChunkOutcome.OutOfOrder oo -> ResponseEntity
-                    .status(HttpStatus.CONFLICT)
-                    .body(ErrorResponse.of(
-                            ErrorResponse.CODE_CHUNK_OUT_OF_ORDER,
-                            "Chunk seq out of order: expected " + oo.expectedChunkSeq()
-                                    + ", got " + oo.actualChunkSeq(),
-                            corrId, false));
-            case ChunkOutcome.IdempotencyConflict ic -> ResponseEntity
-                    .status(HttpStatus.CONFLICT)
-                    .body(ErrorResponse.of(
-                            ErrorResponse.CODE_IDEMPOTENCY_CONFLICT,
-                            "Same chunkSeq=" + chunkSeq + " with different Idempotency-Key or payload",
-                            corrId, false));
+            case ChunkOutcome.Accepted a -> ResponseEntity.ok(withCorrelation(a.response(), corrId));
+            case ChunkOutcome.Replayed r -> ResponseEntity.ok(withCorrelation(r.response(), corrId));
+            case ChunkOutcome.NotFound nf -> {
+                safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                        sessionId, tenantId, userId, chunkSeq, 404,
+                        ErrorResponse.CODE_SESSION_NOT_FOUND, null, corrId, ts));
+                yield ResponseEntity
+                        .status(HttpStatus.NOT_FOUND)
+                        .body(ErrorResponse.of(
+                                ErrorResponse.CODE_SESSION_NOT_FOUND,
+                                "Session not found", corrId, false));
+            }
+            case ChunkOutcome.OwnerMismatch om ->
+                    // Codex iter-3 P1.3 absorb: 403 owner mismatch B3 audit DIŞI
+                    ResponseEntity
+                            .status(HttpStatus.FORBIDDEN)
+                            .body(ErrorResponse.of(
+                                    ErrorResponse.CODE_MEETING_FORBIDDEN,
+                                    "Session owner mismatch", corrId, false));
+            case ChunkOutcome.InvalidState is -> {
+                safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                        sessionId, tenantId, userId, chunkSeq, 409,
+                        ErrorResponse.CODE_INVALID_TRANSITION, null, corrId, ts));
+                yield ResponseEntity
+                        .status(HttpStatus.CONFLICT)
+                        .body(ErrorResponse.of(
+                                ErrorResponse.CODE_INVALID_TRANSITION,
+                                "Chunk admission not allowed in state " + is.currentState(),
+                                corrId, false));
+            }
+            case ChunkOutcome.OutOfOrder oo -> {
+                safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                        sessionId, tenantId, userId, chunkSeq, 409,
+                        ErrorResponse.CODE_CHUNK_OUT_OF_ORDER, null, corrId, ts));
+                yield ResponseEntity
+                        .status(HttpStatus.CONFLICT)
+                        .body(ErrorResponse.of(
+                                ErrorResponse.CODE_CHUNK_OUT_OF_ORDER,
+                                "Chunk seq out of order: expected " + oo.expectedChunkSeq()
+                                        + ", got " + oo.actualChunkSeq(),
+                                corrId, false));
+            }
+            case ChunkOutcome.IdempotencyConflict ic -> {
+                safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                        sessionId, tenantId, userId, chunkSeq, 409,
+                        ErrorResponse.CODE_IDEMPOTENCY_CONFLICT, null, corrId, ts));
+                yield ResponseEntity
+                        .status(HttpStatus.CONFLICT)
+                        .body(ErrorResponse.of(
+                                ErrorResponse.CODE_IDEMPOTENCY_CONFLICT,
+                                "Same chunkSeq=" + chunkSeq + " with different Idempotency-Key or payload",
+                                corrId, false));
+            }
+            case ChunkOutcome.DispatchQueueFull qf -> {
+                safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                        sessionId, tenantId, userId, chunkSeq, 429,
+                        ErrorResponse.CODE_QUEUE_FULL, qf.retryAfterSeconds(), corrId, ts));
+                yield ResponseEntity
+                        .status(HttpStatus.TOO_MANY_REQUESTS)
+                        .header(HDR_RETRY_AFTER, String.valueOf(qf.retryAfterSeconds()))
+                        .body(ErrorResponse.of(
+                                ErrorResponse.CODE_QUEUE_FULL,
+                                "Admission queue full; retry after " + qf.retryAfterSeconds() + "s",
+                                corrId, true));
+            }
+            case ChunkOutcome.DispatchUnavailable du -> {
+                safeAudit(new AuditEvent.ChunkAdmissionRejected(
+                        sessionId, tenantId, userId, chunkSeq, 503,
+                        ErrorResponse.CODE_STT_UNAVAILABLE, du.retryAfterSeconds(), corrId, ts));
+                yield ResponseEntity
+                        .status(HttpStatus.SERVICE_UNAVAILABLE)
+                        .header(HDR_RETRY_AFTER, String.valueOf(du.retryAfterSeconds()))
+                        .body(ErrorResponse.of(
+                                ErrorResponse.CODE_STT_UNAVAILABLE,
+                                "STT downstream unavailable; retry after " + du.retryAfterSeconds() + "s",
+                                corrId, true));
+            }
         };
     }
 
@@ -379,7 +429,16 @@ public class AudioSessionController {
                 response.chunkCount(), response.receivedAtMs(), response.replayed());
     }
 
-    // ----- GET /sessions/{sessionId}/status (PR-gw-01B-core real values) ----
+    /** Codex {@code 019e8df2} iter-2 safeEmit: Exception catch (Throwable YASAK). */
+    private void safeAudit(final AuditEvent event) {
+        try {
+            auditSink.emit(event);
+        } catch (Exception ignored) {
+            // intentionally swallow — audit sink failure must NOT corrupt primary response
+        }
+    }
+
+    // ----- GET /sessions/{sessionId}/status ---------------------------------
 
     @GetMapping("/sessions/{sessionId}/status")
     public Mono<ResponseEntity<?>> status(
@@ -389,18 +448,12 @@ public class AudioSessionController {
 
         final String corrId = correlationId(exchange);
         final ResponseEntity<?> authErr = validateAuth(jwt, corrId);
-        if (authErr != null) {
-            return Mono.just(authErr);
-        }
+        if (authErr != null) return Mono.just(authErr);
 
         final Long tenantId = claimAsLong(jwt, props.getJwt().getTenantClaim());
         final Long userId = claimAsLong(jwt, props.getJwt().getUserClaim());
-        if (tenantId == null) {
-            return Mono.just(forbidden(props.getJwt().getTenantClaim(), corrId));
-        }
-        if (userId == null) {
-            return Mono.just(forbidden(props.getJwt().getUserClaim(), corrId));
-        }
+        if (tenantId == null) return Mono.just(forbidden(props.getJwt().getTenantClaim(), corrId));
+        if (userId == null) return Mono.just(forbidden(props.getJwt().getUserClaim(), corrId));
 
         return Mono.just(registry.get(sessionId)
                 .filter(r -> tenantId.equals(r.tenantId()) && userId.equals(r.userId()))
@@ -408,8 +461,6 @@ public class AudioSessionController {
                         record.sessionId(),
                         corrId,
                         record.state().name(),
-                        // PR-gw-01B-core: gerçek chunkCount + lastChunkSeq (init -1; surface'de
-                        // 0 fallback — Codex `019e8d78` iter-1 ambiguity note absorb).
                         (int) Math.min(record.chunkCount(), Integer.MAX_VALUE),
                         Math.max(0L, record.lastAcceptedChunkSeq()),
                         record.state() == SessionState.FINISHED
@@ -437,23 +488,15 @@ public class AudioSessionController {
         final String corrId = correlationId(exchange);
 
         final ResponseEntity<?> idempErr = validateIdempotencyKey(idempotencyKey, corrId);
-        if (idempErr != null) {
-            return Mono.just(idempErr);
-        }
+        if (idempErr != null) return Mono.just(idempErr);
 
         final ResponseEntity<?> authErr = validateAuth(jwt, corrId);
-        if (authErr != null) {
-            return Mono.just(authErr);
-        }
+        if (authErr != null) return Mono.just(authErr);
 
         final Long tenantId = claimAsLong(jwt, props.getJwt().getTenantClaim());
         final Long userId = claimAsLong(jwt, props.getJwt().getUserClaim());
-        if (tenantId == null) {
-            return Mono.just(forbidden(props.getJwt().getTenantClaim(), corrId));
-        }
-        if (userId == null) {
-            return Mono.just(forbidden(props.getJwt().getUserClaim(), corrId));
-        }
+        if (tenantId == null) return Mono.just(forbidden(props.getJwt().getTenantClaim(), corrId));
+        if (userId == null) return Mono.just(forbidden(props.getJwt().getUserClaim(), corrId));
 
         final FinishOutcome outcome = registry.finish(sessionId, idempotencyKey, tenantId, userId);
         return Mono.just(switch (outcome) {
@@ -561,12 +604,8 @@ public class AudioSessionController {
 
     private static Long claimAsLong(final Jwt jwt, final String claim) {
         final Object v = jwt.getClaim(claim);
-        if (v == null) {
-            return null;
-        }
-        if (v instanceof Number n) {
-            return n.longValue();
-        }
+        if (v == null) return null;
+        if (v instanceof Number n) return n.longValue();
         try {
             return Long.parseLong(v.toString());
         } catch (NumberFormatException ex) {
@@ -574,13 +613,9 @@ public class AudioSessionController {
         }
     }
 
-    // ----- chunk header parsing helpers (Codex `019e8d78` iter-2 AGREE) ----
-
     private static Long parseLongHeader(final HttpHeaders headers, final String name) {
         final String v = headers.getFirst(name);
-        if (v == null || v.isBlank()) {
-            return null;
-        }
+        if (v == null || v.isBlank()) return null;
         try {
             return Long.parseLong(v.trim());
         } catch (NumberFormatException ex) {
@@ -590,17 +625,13 @@ public class AudioSessionController {
 
     private static Integer parseIntHeader(final HttpHeaders headers, final String name) {
         final Long v = parseLongHeader(headers, name);
-        if (v == null || v > Integer.MAX_VALUE || v < Integer.MIN_VALUE) {
-            return null;
-        }
+        if (v == null || v > Integer.MAX_VALUE || v < Integer.MIN_VALUE) return null;
         return v.intValue();
     }
 
     private static AudioFormat parseAudioFormatHeader(final HttpHeaders headers) {
         final String v = headers.getFirst(HDR_AUDIO_FORMAT);
-        if (v == null || v.isBlank()) {
-            return null;
-        }
+        if (v == null || v.isBlank()) return null;
         try {
             return AudioFormat.valueOf(v.trim().toUpperCase());
         } catch (IllegalArgumentException ex) {
@@ -622,19 +653,10 @@ public class AudioSessionController {
         return new StartSessionResponse(
                 record.sessionId(),
                 corrId,
-                base + "/stream",            // PR-gw-01D (planned contract)
-                base + "/chunks",            // PR-gw-01B-core LIVE
-                base + "/status",            // PR-gw-01A LIVE
-                base + "/finish",            // PR-gw-01A LIVE
+                base + "/stream",
+                base + "/chunks",
+                base + "/status",
+                base + "/finish",
                 record.sessionStartMs());
-    }
-
-    /**
-     * ByteBuffer wrapper for dispatcher payload (PR-gw-01B3 placeholder — read-only
-     * buffer + length + SHA-256 hash). Codex {@code 019e8d78} iter-2 AGREE.
-     */
-    @SuppressWarnings("unused")
-    private static ByteBuffer toReadOnlyBuffer(final byte[] bytes) {
-        return ByteBuffer.wrap(bytes).asReadOnlyBuffer();
     }
 }
