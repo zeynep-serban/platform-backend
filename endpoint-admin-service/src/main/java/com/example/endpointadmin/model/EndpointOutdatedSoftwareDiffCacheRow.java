@@ -32,6 +32,15 @@ public class EndpointOutdatedSoftwareDiffCacheRow {
     @Column(name = "tenant_id", nullable = false, updatable = false)
     private UUID tenantId;
 
+    /**
+     * Faz 21.1 PR2c — endpoint org_id canonicalize compat field.
+     * Nullable until cleanup PR drops tenant_id. V33 trigger fills this
+     * from tenant_id when caller leaves it null; V33 CHECK enforces
+     * org_id IS NULL OR org_id = tenant_id (V30 mirror).
+     */
+    @Column(name = "org_id")
+    private UUID orgId;
+
     @Column(name = "device_id", nullable = false, updatable = false)
     private UUID deviceId;
 
@@ -80,6 +89,10 @@ public class EndpointOutdatedSoftwareDiffCacheRow {
 
     public UUID getTenantId() { return tenantId; }
     public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }
+
+    /** Faz 21.1 PR2c — org_id accessor. */
+    public UUID getOrgId() { return orgId; }
+    public void setOrgId(UUID orgId) { this.orgId = orgId; }
 
     public UUID getDeviceId() { return deviceId; }
     public void setDeviceId(UUID deviceId) { this.deviceId = deviceId; }

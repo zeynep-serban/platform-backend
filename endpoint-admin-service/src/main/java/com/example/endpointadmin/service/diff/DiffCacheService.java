@@ -159,16 +159,30 @@ public class DiffCacheService {
         // Insert path bypasses the guard; initial-row source integrity is
         // owned by the listener summarize() against latest committed state
         // (Codex iter-4 guardrail #5).
+        // Faz 21.1 PR2c (Codex 019e8e29 iter-1 REVISE #2 absorb) —
+        // canonical org_id write at the INSERT path: include
+        // org_id = tenant_id in the INSERT column list so genuinely-new
+        // rows land canonical immediately.
+        // ON CONFLICT DO UPDATE SET also includes org_id = EXCLUDED.org_id
+        // BUT the SET only applies when the WHERE clause below (source-
+        // pair / from-downgrade / any-column-differs guards) returns true.
+        // No-op conflicts (identical payload) do NOT refresh org_id from
+        // this code path — the V33 trigger handles legacy NULL re-fill
+        // independently on every INSERT/UPDATE. Combined with the
+        // migration backfill, the test cluster reaches mismatch=0 even
+        // without an explicit drift heal here; the cleanup PR will
+        // sequence the schema migration (conflict target + UNIQUE +
+        // FK + repository + grid join) before tenant_id drop.
         String sql = """
                 INSERT INTO %s AS c (
-                    id, tenant_id, device_id,
+                    id, tenant_id, org_id, device_id,
                     from_history_id, to_history_id,
                     status,
                     added_count, removed_count, version_changed_count,
                     source_captured_at, source_created_at, source_row_id,
                     computed_at
                 ) VALUES (
-                    :id, :tenantId, :deviceId,
+                    :id, :tenantId, :tenantId, :deviceId,
                     :fromHistoryId, :toHistoryId,
                     :status,
                     :added, :removed, :versionChanged,
@@ -176,6 +190,7 @@ public class DiffCacheService {
                     :computedAt
                 )
                 ON CONFLICT (tenant_id, device_id) DO UPDATE SET
+                    org_id = EXCLUDED.org_id,
                     from_history_id = EXCLUDED.from_history_id,
                     to_history_id = EXCLUDED.to_history_id,
                     status = EXCLUDED.status,
@@ -260,9 +275,13 @@ public class DiffCacheService {
         // BE-024c v2-c-pre-2-C-A (Codex 019e89a3 iter-3 AGREE) — outdated
         // mirror of the software source-pair ordering tuple guard. See
         // software UPSERT for full rationale.
+        // Faz 21.1 PR2c (Codex 019e8e29 iter-1 REVISE #2 absorb) —
+        // outdated mirror of the canonical org_id write (see software
+        // UPSERT comment above for full rationale on no-op conflict
+        // semantics + cleanup PR sequence).
         String sql = """
                 INSERT INTO %s AS c (
-                    id, tenant_id, device_id,
+                    id, tenant_id, org_id, device_id,
                     from_snapshot_id, to_snapshot_id,
                     status,
                     added_count, removed_count, version_changed_count,
@@ -270,7 +289,7 @@ public class DiffCacheService {
                     source_captured_at, source_created_at, source_row_id,
                     computed_at
                 ) VALUES (
-                    :id, :tenantId, :deviceId,
+                    :id, :tenantId, :tenantId, :deviceId,
                     :fromSnapshotId, :toSnapshotId,
                     :status,
                     :added, :removed, :versionChanged,
@@ -279,6 +298,7 @@ public class DiffCacheService {
                     :computedAt
                 )
                 ON CONFLICT (tenant_id, device_id) DO UPDATE SET
+                    org_id = EXCLUDED.org_id,
                     from_snapshot_id = EXCLUDED.from_snapshot_id,
                     to_snapshot_id = EXCLUDED.to_snapshot_id,
                     status = EXCLUDED.status,
