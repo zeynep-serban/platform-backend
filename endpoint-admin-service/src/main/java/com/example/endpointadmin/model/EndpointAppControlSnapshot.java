@@ -70,6 +70,10 @@ public class EndpointAppControlSnapshot {
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
 
+    /** Faz 21.1 PR2b-i org_id compat field (Codex 019e8cac Option A). */
+    @Column(name = "org_id")
+    private UUID orgId;
+
     @Column(name = "device_id", nullable = false)
     private UUID deviceId;
 
@@ -162,6 +166,11 @@ public class EndpointAppControlSnapshot {
     public void setId(UUID id) { this.id = id; }
     public UUID getTenantId() { return tenantId; }
     public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }
+    /** Faz 21.1 PR2b-i org_id accessor (Codex 019e8cac Option A). */
+    public UUID getOrgId() { return orgId; }
+    public void setOrgId(UUID orgId) { this.orgId = orgId; }
+    /** Faz 21.1 PR2b-i effective-org accessor: orgId fallback to tenantId. */
+    public UUID getEffectiveOrgId() { return orgId != null ? orgId : tenantId; }
     public UUID getDeviceId() { return deviceId; }
     public void setDeviceId(UUID deviceId) { this.deviceId = deviceId; }
     public UUID getSourceCommandResultId() { return sourceCommandResultId; }

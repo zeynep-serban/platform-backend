@@ -65,6 +65,14 @@ public class EndpointOutdatedSoftwarePackage {
     @Column(name = "tenant_id", nullable = false, updatable = false)
     private UUID tenantId;
 
+    /**
+     * Faz 21.1 PR2b-i org_id compat field (Codex 019e8cac Option A).
+     * Mirrors {@link #tenantId} updatable=false constraint — once written,
+     * the parent snapshot's tenant scope is immutable.
+     */
+    @Column(name = "org_id", updatable = false)
+    private UUID orgId;
+
     /** Stable winget package id ({@code ^\S+$}). The ONLY package
      * identifier inside the redaction boundary. */
     @Column(name = "package_id", nullable = false, length = 256)
@@ -89,6 +97,16 @@ public class EndpointOutdatedSoftwarePackage {
         if (snapshot != null && tenantId == null) {
             tenantId = snapshot.getTenantId();
         }
+        // Codex 019e8cac iter-1 absorb: mirror orgId from the snapshot's
+        // effective org at insert time. Because the column is
+        // updatable=false, this is the ONLY safe write site for orgId on
+        // this child table; later setOrgId() calls during UPDATE will be
+        // silently ignored by Hibernate. Falling back to tenantId via
+        // getEffectiveOrgId() keeps legacy snapshots (orgId NULL on parent)
+        // working until PR2b-ii canonicalizes the snapshot write path.
+        if (snapshot != null && orgId == null) {
+            orgId = snapshot.getEffectiveOrgId();
+        }
     }
 
     public UUID getId() {
@@ -107,6 +125,13 @@ public class EndpointOutdatedSoftwarePackage {
         this.snapshot = snapshot;
         if (snapshot != null) {
             this.tenantId = snapshot.getTenantId();
+            // Codex 019e8cac iter-1 absorb: mirror orgId alongside tenantId
+            // at setSnapshot time. updatable=false means setOrgId() during
+            // update is a no-op; eager mirror at setSnapshot covers the
+            // insert path even if onPersist mutates fewer fields.
+            if (this.orgId == null) {
+                this.orgId = snapshot.getEffectiveOrgId();
+            }
         }
     }
 
@@ -116,6 +141,20 @@ public class EndpointOutdatedSoftwarePackage {
 
     public void setTenantId(UUID tenantId) {
         this.tenantId = tenantId;
+    }
+
+    /** Faz 21.1 PR2b-i org_id accessor (Codex 019e8cac Option A). */
+    public UUID getOrgId() {
+        return orgId;
+    }
+
+    public void setOrgId(UUID orgId) {
+        this.orgId = orgId;
+    }
+
+    /** Faz 21.1 PR2b-i effective-org accessor: orgId fallback to tenantId. */
+    public UUID getEffectiveOrgId() {
+        return orgId != null ? orgId : tenantId;
     }
 
     public String getPackageId() {

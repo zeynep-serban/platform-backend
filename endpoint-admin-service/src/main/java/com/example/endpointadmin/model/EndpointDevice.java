@@ -40,6 +40,19 @@ public class EndpointDevice {
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
 
+    /**
+     * Faz 21.1 PR2b-i org_id compat field (Codex 019e8cac plan-time AGREE
+     * Option A). Mapped to the V29 {@code org_id} column. Nullable in JPA
+     * (V29 schema kept nullable; V30 CHECK constraint enforces
+     * {@code org_id IS NULL OR org_id = tenant_id}). Service-layer
+     * canonical write path (PR2b-ii) sets BOTH this and {@code tenantId}
+     * to the same UUID. Repository / query layer reads through
+     * {@link #getEffectiveOrgId()} so legacy rows
+     * ({@code orgId IS NULL}, {@code tenantId NOT NULL}) still resolve.
+     */
+    @Column(name = "org_id")
+    private UUID orgId;
+
     @Column(name = "hostname", nullable = false)
     private String hostname;
 
@@ -108,6 +121,32 @@ public class EndpointDevice {
 
     public void setTenantId(UUID tenantId) {
         this.tenantId = tenantId;
+    }
+
+    /**
+     * Faz 21.1 PR2b-i org_id accessor. May return {@code null} on legacy
+     * rows where the canonical write path has not (yet) populated the
+     * column. Read paths should call {@link #getEffectiveOrgId()} so
+     * legacy rows still resolve a tenant scope.
+     */
+    public UUID getOrgId() {
+        return orgId;
+    }
+
+    public void setOrgId(UUID orgId) {
+        this.orgId = orgId;
+    }
+
+    /**
+     * Faz 21.1 PR2b-i effective-org accessor (Codex 019e8cac Option A).
+     * Returns {@code orgId} when populated (canonical post-PR2b-ii
+     * write path) else falls back to {@code tenantId} (legacy rows).
+     * V30 CHECK constraint guarantees, when {@code orgId IS NOT NULL},
+     * it equals {@code tenantId}, so the two paths are observably
+     * indistinguishable for downstream consumers.
+     */
+    public UUID getEffectiveOrgId() {
+        return orgId != null ? orgId : tenantId;
     }
 
     public String getHostname() {
