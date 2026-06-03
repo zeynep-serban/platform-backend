@@ -164,7 +164,13 @@ class EndpointUninstallServiceTest {
                         + "(Codex iter-1 must-fix #4)")
                 .containsEntry("approvedBy", SUBJECT_BOB)
                 .containsEntry("createdBy", SUBJECT_ALICE)
-                .containsEntry("intent", "UNINSTALL");
+                .containsEntry("intent", "UNINSTALL")
+                // AG-028 Phase 2B (Codex 019e8de2 iter-2 finding #3): the
+                // agent unmarshalUninstallRequest expects argsPolicyPreset
+                // to resolve the SEPARATE uninstall argv registry. Missing
+                // the key would cause the agent dispatch to fall back to the
+                // INSTALL argv preset.
+                .containsEntry("argsPolicyPreset", "UNINSTALL_DEFAULT");
     }
 
     @Test

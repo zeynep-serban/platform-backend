@@ -609,6 +609,14 @@ public class EndpointUninstallService {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("intent", "UNINSTALL");
         payload.put("requestId", req.getId().toString());
+        // AG-028 Phase 2B (Codex 019e8de2 iter-2 finding #3 absorb): the agent
+        // unmarshalUninstallRequest contract expects argsPolicyPreset and
+        // resolves the SEPARATE uninstall argv registry from it. Missing the
+        // key would cause the agent dispatch path to fall back to the default
+        // INSTALL argv preset (Codex `019e8de2` iter-2). The literal
+        // {@code UNINSTALL_DEFAULT} is the Phase 2A
+        // {@code uninstall_winget.go UninstallArgsPresetDefault} constant.
+        payload.put("argsPolicyPreset", "UNINSTALL_DEFAULT");
         payload.put("catalogItemId", catalogItem.getCatalogItemId());
         payload.put("catalogItemUuid", catalogItem.getId().toString());
         payload.put("catalogPackageId", catalogItem.getPackageId());

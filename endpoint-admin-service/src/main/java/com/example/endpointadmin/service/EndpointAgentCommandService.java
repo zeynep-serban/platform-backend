@@ -18,6 +18,7 @@ import com.example.endpointadmin.security.HotfixPosturePayloadPolicy;
 import com.example.endpointadmin.security.InstallEvidencePayloadPolicy;
 import com.example.endpointadmin.security.OutdatedSoftwarePayloadPolicy;
 import com.example.endpointadmin.security.SoftwareInventoryPayloadPolicy;
+import com.example.endpointadmin.security.UninstallEvidencePayloadPolicy;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
@@ -58,6 +59,8 @@ public class EndpointAgentCommandService {
     private final EndpointStartupExposureService startupExposureService;
     private final EndpointAppControlService appControlService;
     private final EndpointInstallAuditService installAuditService;
+    private final UninstallEvidencePayloadPolicy uninstallEvidencePayloadPolicy;
+    private final EndpointUninstallAuditService uninstallAuditService;
     private final Clock clock;
     private final Duration claimTtl;
 
@@ -83,6 +86,8 @@ public class EndpointAgentCommandService {
                                        EndpointStartupExposureService startupExposureService,
                                        EndpointAppControlService appControlService,
                                        EndpointInstallAuditService installAuditService,
+                                       UninstallEvidencePayloadPolicy uninstallEvidencePayloadPolicy,
+                                       EndpointUninstallAuditService uninstallAuditService,
                                        Clock clock,
                                        @Value("${endpoint-admin.commands.claim-ttl-seconds:300}") long claimTtlSeconds) {
         this.commandRepository = commandRepository;
@@ -107,6 +112,8 @@ public class EndpointAgentCommandService {
         this.startupExposureService = startupExposureService;
         this.appControlService = appControlService;
         this.installAuditService = installAuditService;
+        this.uninstallEvidencePayloadPolicy = uninstallEvidencePayloadPolicy;
+        this.uninstallAuditService = uninstallAuditService;
         this.clock = clock;
         this.claimTtl = Duration.ofSeconds(Math.max(30L, claimTtlSeconds));
     }
@@ -288,6 +295,24 @@ public class EndpointAgentCommandService {
             effectiveDetails = installEvidencePayloadPolicy.redact(request.details());
         }
 
+        // AG-028 Phase 2B (Codex 019e8de2 iter-2 absorb): mirror for
+        // UNINSTALL_SOFTWARE. The agent's destructive-side terminal-result
+        // payload goes through the same validate-then-redact pass so the
+        // raw payload never reaches endpoint_command_results.result_payload
+        // .details or endpoint_uninstall_audit.redacted_payload. A forbidden
+        // key/value throws 400 + rolls back the entire submitResult tx
+        // (matching the install-side fail-closed contract).
+        if (command.getCommandType() == CommandType.UNINSTALL_SOFTWARE
+                && request.details() != null) {
+            try {
+                uninstallEvidencePayloadPolicy.validate(request.details());
+            } catch (IllegalArgumentException ex) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        ex.getMessage());
+            }
+            effectiveDetails = uninstallEvidencePayloadPolicy.redact(request.details());
+        }
+
         Instant now = Instant.now(clock);
         EndpointCommandResult result = new EndpointCommandResult();
         result.setTenantId(command.getTenantId());
@@ -458,6 +483,17 @@ public class EndpointAgentCommandService {
         if (command.getCommandType() == CommandType.INSTALL_SOFTWARE
                 && isTerminalResult(request.status())) {
             installAuditService.recordInstallResult(
+                    command, result, request, effectiveDetails, now);
+        }
+
+        // AG-028 Phase 2B (Codex 019e8de2 iter-2 absorb): write the
+        // uninstall audit row + finalise EndpointUninstallRequest.state →
+        // TERMINAL in the SAME transaction so a failed audit insert (e.g.
+        // V32 result_status CHECK violation or appendonly-trigger fire)
+        // rolls back both the result row and the state transition.
+        if (command.getCommandType() == CommandType.UNINSTALL_SOFTWARE
+                && isTerminalResult(request.status())) {
+            uninstallAuditService.recordUninstallResult(
                     command, result, request, effectiveDetails, now);
         }
     }

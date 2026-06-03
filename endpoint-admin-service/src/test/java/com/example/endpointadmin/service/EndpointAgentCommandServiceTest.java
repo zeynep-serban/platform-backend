@@ -72,7 +72,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         EndpointStartupExposureService.class,
         // AG-041-be — Application Control (WDAC + AppLocker) ingest service + policy (Faz 22.5).
         com.example.endpointadmin.security.AppControlPayloadPolicy.class,
-        EndpointAppControlService.class
+        EndpointAppControlService.class,
+        // AG-028 Phase 2B — uninstall evidence sanitiser + audit service wired
+        // into the UNINSTALL_SOFTWARE submitResult branch (Faz 22.5.6,
+        // Codex 019e8de2 iter-2 absorb).
+        com.example.endpointadmin.security.UninstallEvidencePayloadPolicy.class,
+        EndpointUninstallAuditService.class
 })
 class EndpointAgentCommandServiceTest {
 

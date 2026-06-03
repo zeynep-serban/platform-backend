@@ -307,4 +307,115 @@ class UninstallEvidencePayloadPolicyTest {
         assertThat(outUninstall).doesNotContainKey("authority");
         assertThat(outUninstall).containsEntry("probeState", "ABSENT");
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // AG-028 Phase 2B (Codex 019e8de2 iter-2 absorb) tests
+
+    @Test
+    void redact_authorityAuthoritativeLiteralPreserved_codex019e8de2Iter2() {
+        // Phase 2B finding #4: the agent emits the literal "AUTHORITATIVE"
+        // when a per-probe ruleType already implies authoritative tier
+        // (REGISTRY_UNINSTALL / FILE_*). Pre-fix the allow-list omitted the
+        // value → the policy silently dropped it. Phase 2B adds the literal
+        // to KNOWN_AUTHORITIES so it survives redaction.
+        Map<String, Object> uninstall = new LinkedHashMap<>();
+        uninstall.put("probeState", "ABSENT");
+        uninstall.put("authority", "AUTHORITATIVE");
+
+        Map<String, Object> payload = Map.of("uninstall", uninstall);
+        Map<String, Object> out = policy.redact(payload);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outUninstall = (Map<String, Object>) out.get("uninstall");
+        assertThat(outUninstall).containsEntry("authority", "AUTHORITATIVE");
+    }
+
+    @Test
+    void redact_preProbeProjectedToScalarAllowList_codex019e8de2Iter2() {
+        // Phase 2B finding #5 (Option A): the agent ships uninstall.preProbe +
+        // uninstall.postProbe nested sub-trees. The policy now projects each
+        // to ALLOWED_PROBE_KEYS scalars so tail-shaped fields cannot leak.
+        Map<String, Object> preProbe = new LinkedHashMap<>();
+        preProbe.put("probeState", "MATCHED");
+        preProbe.put("ruleType", "REGISTRY_UNINSTALL");
+        preProbe.put("matchedPackageId", "Microsoft.7Zip");
+        preProbe.put("durationMs", 42);
+        preProbe.put("stdoutTail", "should-not-leak-1234"); // forbidden tail
+        preProbe.put("exotic_key", "drop-me");              // off-allow-list
+
+        Map<String, Object> uninstall = new LinkedHashMap<>();
+        uninstall.put("finalStatus", "SUCCEEDED_VERIFIED");
+        uninstall.put("probeState", "ABSENT");
+        uninstall.put("preProbe", preProbe);
+
+        Map<String, Object> payload = Map.of("uninstall", uninstall);
+        Map<String, Object> out = policy.redact(payload);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outUninstall = (Map<String, Object>) out.get("uninstall");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outPre = (Map<String, Object>) outUninstall.get("preProbe");
+        assertThat(outPre)
+                .containsEntry("probeState", "MATCHED")
+                .containsEntry("ruleType", "REGISTRY_UNINSTALL")
+                .containsEntry("matchedPackageId", "Microsoft.7Zip")
+                .containsEntry("durationMs", 42)
+                .doesNotContainKey("stdoutTail")
+                .doesNotContainKey("exotic_key");
+    }
+
+    @Test
+    void redact_postProbeProjectedToScalarAllowList_codex019e8de2Iter2() {
+        Map<String, Object> postProbe = new LinkedHashMap<>();
+        postProbe.put("probeState", "ABSENT");
+        postProbe.put("ruleType", "REGISTRY_UNINSTALL");
+        postProbe.put("absentReason", "registry_uninstall_key_missing");
+        postProbe.put("durationMs", 17);
+        postProbe.put("stderrTail", "C:\\Users\\halil\\sensitive"); // forbidden tail
+        postProbe.put("anotherDropMe", true);
+
+        Map<String, Object> uninstall = new LinkedHashMap<>();
+        uninstall.put("finalStatus", "SUCCEEDED_VERIFIED");
+        uninstall.put("probeState", "ABSENT");
+        uninstall.put("postProbe", postProbe);
+
+        Map<String, Object> payload = Map.of("uninstall", uninstall);
+        Map<String, Object> out = policy.redact(payload);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outUninstall = (Map<String, Object>) out.get("uninstall");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outPost = (Map<String, Object>) outUninstall.get("postProbe");
+        assertThat(outPost)
+                .containsEntry("probeState", "ABSENT")
+                .containsEntry("ruleType", "REGISTRY_UNINSTALL")
+                .containsEntry("absentReason", "registry_uninstall_key_missing")
+                .containsEntry("durationMs", 17)
+                .doesNotContainKey("stderrTail")
+                .doesNotContainKey("anotherDropMe");
+    }
+
+    @Test
+    void redact_preProbeErrorRunsThroughForbiddenValueReplacement_codex019e8de2() {
+        // Probe-side error MUST go through the same forbidden-value masker
+        // (USERS_PATH / SID / JWT / RAW_MSI_GUID) as other summary strings —
+        // an agent-side probe error message may legitimately mention a path
+        // we still want to scrub.
+        Map<String, Object> preProbe = new LinkedHashMap<>();
+        preProbe.put("probeState", "ERROR");
+        preProbe.put("error", "failed to open C:\\Users\\halil\\target");
+
+        Map<String, Object> uninstall = new LinkedHashMap<>();
+        uninstall.put("finalStatus", "FAILED_PRECHECK_INCONCLUSIVE");
+        uninstall.put("preProbe", preProbe);
+
+        Map<String, Object> payload = Map.of("uninstall", uninstall);
+        Map<String, Object> out = policy.redact(payload);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outUninstall = (Map<String, Object>) out.get("uninstall");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outPre = (Map<String, Object>) outUninstall.get("preProbe");
+        String error = (String) outPre.get("error");
+        assertThat(error)
+                .as("USERS_PATH masked from probe-side error message")
+                .doesNotContain("halil")
+                .contains("[REDACTED]");
+    }
 }

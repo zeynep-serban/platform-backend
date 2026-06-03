@@ -111,7 +111,13 @@ public class UninstallEvidencePayloadPolicy {
             // column via {@link #deriveVerification}.
             "probeState",
             "authority",
-            "safeEvidence");
+            "safeEvidence",
+            // AG-028 Phase 2B (Codex 019e8de2 iter-2 absorb): the agent
+            // ships nested preProbe + postProbe sub-trees for diagnostic
+            // visibility. Both are projected to {@link #ALLOWED_PROBE_KEYS}
+            // scalars so tails / raw output never leak through.
+            "preProbe",
+            "postProbe");
 
     /**
      * Scalar projection allow-list for {@code uninstall.safeEvidence} —
@@ -128,6 +134,31 @@ public class UninstallEvidencePayloadPolicy {
             "matchedPublisher",
             "candidateCount",
             "absentReason");
+
+    /**
+     * AG-028 Phase 2B (Codex 019e8de2 iter-2 absorb): scalar projection
+     * allow-list for {@code uninstall.preProbe} and {@code uninstall.postProbe}
+     * sub-trees. Superset of {@link #ALLOWED_SAFE_EVIDENCE_KEYS} with
+     * {@code probeState} (each probe carries its own state) + {@code error}
+     * (probe-side sanitised error message; ran through the same forbidden-
+     * value replacement + summary truncate as other strings) +
+     * {@code durationMs}.
+     *
+     * <p>Strict-scalar projection blocks tail-shaped fields like
+     * {@code stdoutTail} / {@code stderrTail} from leaking through.
+     */
+    private static final Set<String> ALLOWED_PROBE_KEYS = Set.of(
+            "probeState",
+            "ruleType",
+            "matchedPackageId",
+            "matchedVersion",
+            "matchedProductCode",
+            "matchedDisplayName",
+            "matchedPublisher",
+            "candidateCount",
+            "absentReason",
+            "error",
+            "durationMs");
 
     /**
      * Closed allow-list for {@code probeState}. Any other value is
@@ -154,7 +185,14 @@ public class UninstallEvidencePayloadPolicy {
             "FILE_EXISTS",
             "FILE_SHA256",
             "FILE_VERSION",
-            "CONFIRM_ONLY");
+            "CONFIRM_ONLY",
+            // AG-028 Phase 2B (Codex 019e8de2 iter-2 absorb): the agent's
+            // adapter emits the literal "AUTHORITATIVE" as a non-rule-typed
+            // authority hint when the per-probe ruleType already implies
+            // authority tier (REGISTRY_UNINSTALL / FILE_*). Missing this
+            // entry would have caused the {@code redactUninstall} authority
+            // projection to drop the literal silently.
+            "AUTHORITATIVE");
 
     private static final Set<String> FORBIDDEN_KEYS_LOWER = Set.of(
             "licensekey",
@@ -310,6 +348,12 @@ public class UninstallEvidencePayloadPolicy {
             Object value = entry.getValue();
             if ("safeEvidence".equals(key) && value instanceof Map<?, ?> evidence) {
                 out.put(key, projectScalars(evidence, ALLOWED_SAFE_EVIDENCE_KEYS));
+            } else if (("preProbe".equals(key) || "postProbe".equals(key))
+                    && value instanceof Map<?, ?> probe) {
+                // AG-028 Phase 2B: nested probe sub-trees go through the
+                // same scalar-projection allow-list as safeEvidence so
+                // tail-shaped fields (stdoutTail/stderrTail) cannot leak.
+                out.put(key, projectScalars(probe, ALLOWED_PROBE_KEYS));
             } else if ("authority".equals(key) && value != null) {
                 String hint = String.valueOf(value).trim().toUpperCase(Locale.ROOT);
                 if (KNOWN_AUTHORITIES.contains(hint)) {
