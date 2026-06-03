@@ -1,4 +1,0 @@
-# src/main/resources/application-docker.properties
-
-# DOCKER ORTAM AYARLARI
-eureka.client.service-url.defaultZone=http://discovery-server:8761/eureka
