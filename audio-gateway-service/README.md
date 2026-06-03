@@ -69,9 +69,9 @@ Mobile/Web hiçbir zaman platform-ai'a doğrudan bağlanmaz (Codex/Mavis RED).
 | Method | Path | Status |
 |---|---|---|
 | POST | `/api/v1/audio-gateway/sessions` | ✅ **PR-gw-01A LIVE** (start + Idempotency-Key) |
-| GET | `/api/v1/audio-gateway/sessions/{id}/status` | ✅ **PR-gw-01A LIVE** |
+| GET | `/api/v1/audio-gateway/sessions/{id}/status` | ✅ **PR-gw-01A/B-core LIVE** (real chunkCount + lastChunkSeq) |
 | POST | `/api/v1/audio-gateway/sessions/{id}/finish` | ✅ **PR-gw-01A LIVE** (idempotent) |
-| POST | `/api/v1/audio-gateway/sessions/{id}/chunks` | ⏳ planned (PR-gw-01B) |
+| POST | `/api/v1/audio-gateway/sessions/{id}/chunks` | ✅ **PR-gw-01B-core LIVE** (binary body + X-Audio-* + STREAMING state) |
 | WS | `/api/v1/audio-gateway/sessions/{id}/stream` | ⏳ planned (PR-gw-01D) |
 
 ## Config (env override)

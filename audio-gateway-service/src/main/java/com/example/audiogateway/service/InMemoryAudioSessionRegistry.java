@@ -1,6 +1,9 @@
 package com.example.audiogateway.service;
 
 import com.example.audiogateway.config.AudioGatewayProperties;
+import com.example.audiogateway.dto.ChunkAdmissionResponse;
+import com.example.audiogateway.service.AudioSessionRegistry.ChunkOutcome;
+import com.example.audiogateway.service.AudioSessionRegistry.ChunkRecordCommand;
 import com.example.audiogateway.service.AudioSessionRegistry.CreateOutcome;
 import com.example.audiogateway.service.AudioSessionRegistry.FinishOutcome;
 import com.example.audiogateway.service.AudioSessionRegistry.SessionCreateCommand;
@@ -19,29 +22,25 @@ import org.springframework.stereotype.Service;
 /**
  * Bounded in-memory implementation of {@link AudioSessionRegistry}.
  *
- * <p>PR-gw-01A scope (Codex {@code 019e8c26} iter-3 REVISE absorb): no Redis, no persistence;
- * restart loses all sessions. Durability sonraki slice'da Redis Streams (PR-gw-01C) ile gelir.
+ * <p>PR-gw-01A + PR-gw-01B-core scope (Codex {@code 019e8c26} + {@code 019e8d78}
+ * iter-2 AGREE): no Redis, no persistence; restart loses all sessions. Durability sonraki
+ * slice'da Redis Streams (PR-gw-01C) ile gelir. Slice PR-gw-01B-core migrates state
+ * machine + chunk admission domain method.
  *
- * <p>Idempotency replay: key = {@code tenantId|userId|"POST"|"/sessions"|idempotencyKey};
- * value = sessionId + signature. Bounded by {@code audio.gateway.idempotency.replay-cache-size}.
- * When cap reached, oldest entry evicted via {@link LinkedHashMap} insertion-order policy
- * (synchronized for thread-safety).
+ * <p><b>Concurrency contract:</b> {@code create(...)} and {@code admitChunk(...)} are
+ * fully {@code synchronized} on the same monitor — concurrent calls cannot produce two
+ * distinct sessions OR two distinct admitted chunks at the same seq. Capacity check is
+ * in the same critical section. Finish path uses CAS ({@code sessions.replace}).
  *
- * <p><b>Concurrency contract (Codex iter-3 P1 absorb):</b> {@code create(...)} is fully
- * {@code synchronized} on the monitor; concurrent calls with the same Idempotency-Key cannot
- * produce two distinct sessions. Capacity check is in the same critical section so the
- * registry never exceeds {@code maxActiveSessions}. Finish path uses CAS
- * ({@code sessions.replace(id, existing, finished)}) which is safe lock-free.
+ * <p>Idempotency replay (start): key = {@code tenantId|userId|"POST"|"/sessions"|key};
+ * Idempotency replay (chunk): key = {@code tenantId|userId|"POST"|"/chunks"|sessionId|
+ * chunkSeq|idempotencyKey}. Replay only if same payload SHA-256.
  */
 @Service
 public class InMemoryAudioSessionRegistry implements AudioSessionRegistry {
 
     private final AudioGatewayProperties props;
     private final ConcurrentMap<String, SessionRecord> sessions = new ConcurrentHashMap<>();
-    /**
-     * Insertion-order bounded replay cache (Codex iter-3 P2 absorb). Synchronized via
-     * {@link Collections#synchronizedMap} because {@link LinkedHashMap} is not thread-safe.
-     */
     private final Map<String, IdempotencyEntry> startReplay;
 
     public InMemoryAudioSessionRegistry(final AudioGatewayProperties props) {
@@ -70,7 +69,6 @@ public class InMemoryAudioSessionRegistry implements AudioSessionRegistry {
             if (rec != null) {
                 return new CreateOutcome.Replayed(rec);
             }
-            // record evicted but replay cache still present → treat as fresh create
             startReplay.remove(idempKey);
         }
 
@@ -79,11 +77,14 @@ public class InMemoryAudioSessionRegistry implements AudioSessionRegistry {
         }
 
         final String sessionId = "SES-" + UUID.randomUUID();
+        // PR-gw-01B-core: chunk admission state init (lastAcceptedChunkSeq=-1, chunkCount=0)
         final SessionRecord rec = new SessionRecord(
                 sessionId, cmd.tenantId(), cmd.userId(), cmd.meetingId(), cmd.deviceId(),
                 cmd.language(), cmd.audioFormat(), cmd.sampleRateHz(), cmd.channels(),
                 cmd.idempotencyKey(), cmd.sessionStartMs(),
-                SessionState.STARTED, null, 0L, cmd.sessionStartMs());
+                SessionState.STARTED,
+                -1L, 0L, 0L, null, null,
+                null, 0L, cmd.sessionStartMs());
 
         sessions.put(sessionId, rec);
         startReplay.put(idempKey, new IdempotencyEntry(sessionId, signature));
@@ -97,7 +98,52 @@ public class InMemoryAudioSessionRegistry implements AudioSessionRegistry {
     }
 
     @Override
-    public FinishOutcome finish(final String sessionId, final String finishIdempotencyKey,
+    public synchronized ChunkOutcome admitChunk(final ChunkRecordCommand cmd) {
+        final SessionRecord existing = sessions.get(cmd.sessionId());
+        if (existing == null) {
+            return new ChunkOutcome.NotFound();
+        }
+        if (!Objects.equals(existing.tenantId(), cmd.tenantId())
+                || !Objects.equals(existing.userId(), cmd.userId())) {
+            return new ChunkOutcome.OwnerMismatch();
+        }
+        if (existing.state() != SessionState.STARTED && existing.state() != SessionState.STREAMING) {
+            return new ChunkOutcome.InvalidState(existing.state());
+        }
+
+        // Replay: same chunkSeq AS last accepted + same idempotency-Key + same payload SHA-256
+        if (cmd.chunkSeq() == existing.lastAcceptedChunkSeq()) {
+            if (Objects.equals(cmd.idempotencyKey(), existing.lastChunkIdempotencyKey())
+                    && Objects.equals(cmd.payloadSha256(), existing.lastChunkPayloadSha256())) {
+                final ChunkAdmissionResponse resp = new ChunkAdmissionResponse(
+                        existing.sessionId(), null,
+                        existing.lastAcceptedChunkSeq(), existing.chunkCount(),
+                        existing.lastChunkAtMs(), true);
+                return new ChunkOutcome.Replayed(resp);
+            }
+            // Same chunkSeq but different key OR payload → conflict
+            return new ChunkOutcome.IdempotencyConflict();
+        }
+
+        // Strict contiguous: expected = lastAccepted + 1 (init -1 → first chunk 0)
+        final long expected = existing.lastAcceptedChunkSeq() + 1L;
+        if (cmd.chunkSeq() != expected) {
+            return new ChunkOutcome.OutOfOrder(expected, cmd.chunkSeq());
+        }
+
+        final SessionRecord updated = existing.withAcceptedChunk(
+                cmd.chunkSeq(), cmd.nowMs(), cmd.idempotencyKey(), cmd.payloadSha256());
+        sessions.put(cmd.sessionId(), updated);
+
+        final ChunkAdmissionResponse resp = new ChunkAdmissionResponse(
+                updated.sessionId(), null,
+                updated.lastAcceptedChunkSeq(), updated.chunkCount(),
+                updated.lastChunkAtMs(), false);
+        return new ChunkOutcome.Accepted(updated, resp);
+    }
+
+    @Override
+    public synchronized FinishOutcome finish(final String sessionId, final String finishIdempotencyKey,
                                 final Long tenantId, final Long userId) {
         final SessionRecord existing = sessions.get(sessionId);
         if (existing == null) {

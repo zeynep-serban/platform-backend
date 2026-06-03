@@ -169,11 +169,102 @@ Binary frame protocol — chunk-by-chunk. Frame header:
 [1 byte version][8 byte chunkSeq monotonic][8 byte capturedAtMs][2 byte length][N byte audio]
 ```
 
+**Bu slice'da implementation YOK** — surface URL'i `StartSessionResponse`'ta döndürülür ama endpoint deterministik 404 / not-yet-implemented (PR-gw-01D). REST chunk admission (`POST /chunks`) PR-gw-01B-core LIVE — Section 1.5'e bakın.
+
+### 1.5 POST `/api/v1/audio-gateway/sessions/{sessionId}/chunks` — Chunk Admission (**PR-gw-01B-core LIVE**)
+
+**Codex `019e8d78` iter-2 AGREE**: canonical body **binary + X-Audio-* headers** (multipart YASAK — RN/Electron client overhead + WebFlux bounded memory karmaşıklığı).
+
+**Headers**:
+
+| Header | Required | Anlam |
+|---|---|---|
+| `Authorization` | ✅ | Bearer JWT |
+| `Idempotency-Key` | ✅ | 16-128 char opaque (A slice pattern); scope `tenantId+userId+POST+/chunks+sessionId+chunkSeq+key` |
+| `X-Correlation-Id` | optional | Client-supplied trace ID |
+| `X-Audio-Chunk-Seq` | ✅ | Non-negative monotonic long; strict contiguous (init -1; first chunk 0; next `last+1`) |
+| `X-Audio-Chunk-Started-At-Ms` | ✅ | Non-negative long; chunk capture timestamp |
+| `X-Audio-Format` | ✅ | **Authoritative** enum (`WAV`/`WEBM_OPUS`/`PCM16`); Content-Type media type parse YASAK |
+| `X-Audio-Sample-Rate-Hz` | ✅ | `16000` / `48000`; session match zorunlu |
+| `X-Audio-Channels` | ✅ | `1` (PoC mono); session match zorunlu |
+| `X-Audio-Byte-Length` | ✅ | Declared chunk size; ≤ maxChunkBytes; `== actual` body size |
+| `Content-Type` | recommended | `application/octet-stream` |
+
+**Body**: raw binary audio bytes (≤ 256 KB).
+
+**Validation pipeline** (Codex iter-2 absorb):
+1. `Idempotency-Key` format guard → 400 `AUDIO_GATEWAY_IDEMPOTENCY_MISSING/INVALID`
+2. JWT + tenant/user claims → 401/403
+3. Chunk metadata header parsing → 400 `AUDIO_GATEWAY_VALIDATION` (missing/blank/parse fail/negative)
+4. `X-Audio-Byte-Length > maxChunkBytes` → 413 `AUDIO_GATEWAY_OVERSIZE`
+5. Format whitelist + sample rate enum + channels=1 → 415/400
+6. Session lookup → 404 `AUDIO_GATEWAY_SESSION_NOT_FOUND`
+7. Owner check (tenant+user) → 403 `AUDIO_GATEWAY_MEETING_FORBIDDEN`
+8. Format/sample/channels session match → 415 `AUDIO_GATEWAY_FORMAT_REJECTED`
+9. **Bounded body aggregation** (`maxChunkBytes + 1` fail-fast WebFlux `DataBufferUtils.join`) → 413 if actual > max
+10. Declared `== actual` size check → 400 `AUDIO_GATEWAY_VALIDATION`
+11. SHA-256 payload hash compute (internal-only; response body'ye tam hash KOYMA)
+12. Atomic `registry.admitChunk(ChunkRecordCommand)` dispatch (synchronized — concurrent same-seq impossible)
+
+**Response** (200 OK):
+
+```json
+{
+  "sessionId": "SES-...",
+  "correlationId": "c0ffee...",
+  "chunkSeq": 0,
+  "chunkCount": 1,
+  "receivedAtMs": 1781820000123,
+  "replayed": false
+}
+```
+
+**State machine transitions** (PR-gw-01B-core):
+
+- `STARTED` → `STREAMING` (first chunk admitted, chunkCount: 0 → 1)
+- `STREAMING` → `STREAMING` (subsequent chunks)
+- `STARTED` veya `STREAMING` → `FINISHED` (via finish endpoint)
+- Chunk admission after `FINISHING`/`FINISHED` → 409 `AUDIO_GATEWAY_INVALID_TRANSITION`
+
+**Idempotency semantics** (Codex iter-2 strict):
+
+| Scenario | Behavior |
+|---|---|
+| chunkSeq == lastAccepted + 1 (strict contiguous) | Accepted → 200 + state STREAMING + chunkCount++ |
+| chunkSeq == lastAccepted + same Idempotency-Key + same SHA-256 | Replayed → 200 (idempotent; chunkCount unchanged) |
+| chunkSeq == lastAccepted + different key OR different SHA-256 | 409 `AUDIO_GATEWAY_IDEMPOTENCY_CONFLICT` |
+| chunkSeq < lastAccepted (backward) | 409 `AUDIO_GATEWAY_CHUNK_OUT_OF_ORDER` |
+| chunkSeq > lastAccepted + 1 (gap) | 409 `AUDIO_GATEWAY_CHUNK_OUT_OF_ORDER` |
+
+**Errors**:
+
+| Status | Code | Anlam |
+|---|---|---|
+| 400 | `AUDIO_GATEWAY_IDEMPOTENCY_MISSING/INVALID` / `VALIDATION` | Header/body validation |
+| 401 | `AUDIO_GATEWAY_AUTH_INVALID` | JWT missing |
+| 403 | `AUDIO_GATEWAY_MEETING_FORBIDDEN` | Owner/tenant/user mismatch |
+| 404 | `AUDIO_GATEWAY_SESSION_NOT_FOUND` | Session yok |
+| 409 | `AUDIO_GATEWAY_INVALID_TRANSITION` | FINISHED/FINISHING state'de chunk admission |
+| 409 | `AUDIO_GATEWAY_CHUNK_OUT_OF_ORDER` | Backward/gap chunkSeq |
+| 409 | `AUDIO_GATEWAY_IDEMPOTENCY_CONFLICT` | Same chunkSeq, different key/payload |
+| 413 | `AUDIO_GATEWAY_OVERSIZE` | Declared veya actual > maxChunkBytes |
+| 415 | `AUDIO_GATEWAY_FORMAT_REJECTED` | Format/sample/channels mismatch |
+
+**Out of scope (PR-gw-01B3 sonraki)**:
+- `AudioChunkDispatcher` interface + `NoOpAudioChunkDispatcher` (Codex iter-2: dispatcher abstraction B3)
+- 429 `AUDIO_GATEWAY_QUEUE_FULL` + 503 `AUDIO_GATEWAY_STT_UNAVAILABLE` + `Retry-After` header
+- `AudioGatewayAuditSink` + `audio_chunk.admission_rejected` audit event
+- Cross-server transit (PR-gw-01C Redis Streams + WireGuard/mTLS)
+
+### 1.6 WS `/api/v1/audio-gateway/sessions/{sessionId}/stream` — Audio Stream (**PR-gw-01D planned**)
+
+Binary frame protocol — chunk-by-chunk. Frame header:
+
+```
+[1 byte version][8 byte chunkSeq monotonic][8 byte capturedAtMs][2 byte length][N byte audio]
+```
+
 **Bu slice'da implementation YOK** — surface URL'i `StartSessionResponse`'ta döndürülür ama endpoint deterministik 404 / not-yet-implemented (PR-gw-01D).
-
-### 1.5 POST `/api/v1/audio-gateway/sessions/{sessionId}/chunks` — REST Fallback (**PR-gw-01B planned**)
-
-Multipart upload for clients without WS support. **Bu slice'da implementation YOK** — surface URL'i döndürülür ama endpoint deterministik 404 / not-yet-implemented (PR-gw-01B).
 
 ---
 
@@ -330,11 +421,12 @@ Client-facing breaking change YASAK v1 lifetime'da.
 
 | Slice | Scope | Status |
 |---|---|---|
-| **PR-gw-01A** | Path normalize + module/POM + Idempotency-Key header + AudioSessionRegistry interface + InMemory impl + start/status/finish skeleton + canonical error envelope + contract doc revision | 🟡 **bu PR** |
-| PR-gw-01B | REST chunk admission (`POST /chunks`, max 256 KB, format whitelist config, 413/429/503, dispatcher mock interface) | ⏳ planned |
+| **PR-gw-01A** | Path normalize + module/POM + Idempotency-Key header + AudioSessionRegistry interface + InMemory impl + start/status/finish skeleton + canonical error envelope + contract doc revision | ✅ **MERGED** (PR #390) |
+| **PR-gw-01B-core (B1+B2)** | REST chunk admission (`POST /chunks`, binary body + X-Audio-* headers, max 256 KB, format/sample/channels session match, declared/actual byte length check, bounded body aggregation, SHA-256 payload hash, atomic `admitChunk` via registry domain method, strict contiguous chunkSeq, idempotent replay, status real chunkCount/lastChunkSeq, SessionState.STREAMING) | 🟡 **bu PR** |
+| PR-gw-01B3 | `AudioChunkDispatcher` + `NoOpAudioChunkDispatcher` + 429 QueueFull + 503 STT_UNAVAILABLE + `Retry-After` + `AudioGatewayAuditSink` + `audio_chunk.admission_rejected` audit event | ⏳ planned |
 | PR-gw-01C | Redis Streams producer (bucketed 32-partition `audio:chunks:p00..p31` + consumer group `live-stt-v1` + XADD fields + bounds + idempotency `(sessionId, chunkSeq)`) | ⏳ planned |
 | PR-gw-01D | WebSocket stream (binary + JSON metadata frames + unauthorized handshake + unknown session close + Redis Stream trim) | ⏳ planned |
-| PR-gw-01E | Contract hardening (client X-* strip code assert + PII guard error payload + invalid state transition matrix + duplicate/out-of-order chunkSeq) | ⏳ planned |
+| PR-gw-01E | Contract hardening (client X-* strip code assert + PII guard error payload + detailed transition matrix + duplicate/out-of-order edge cases) | ⏳ planned |
 
 ---
 

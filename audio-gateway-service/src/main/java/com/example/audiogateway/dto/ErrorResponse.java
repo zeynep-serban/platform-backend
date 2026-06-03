@@ -32,6 +32,9 @@ public record ErrorResponse(
     public static final String CODE_IDEMPOTENCY_CONFLICT = "AUDIO_GATEWAY_IDEMPOTENCY_CONFLICT";
     public static final String CODE_SESSION_NOT_FOUND = "AUDIO_GATEWAY_SESSION_NOT_FOUND";
     public static final String CODE_SESSION_REGISTRY_FULL = "AUDIO_GATEWAY_SESSION_REGISTRY_FULL";
+    // PR-gw-01B-core (Codex `019e8d78` iter-2 AGREE) — chunk admission state + ordering.
+    public static final String CODE_INVALID_TRANSITION = "AUDIO_GATEWAY_INVALID_TRANSITION";
+    public static final String CODE_CHUNK_OUT_OF_ORDER = "AUDIO_GATEWAY_CHUNK_OUT_OF_ORDER";
 
     public static ErrorResponse of(final String code, final String message, final String correlationId,
                                    final boolean retryable) {
