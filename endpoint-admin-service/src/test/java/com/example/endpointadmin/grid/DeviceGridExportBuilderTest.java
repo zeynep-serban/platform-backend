@@ -64,13 +64,17 @@ class DeviceGridExportBuilderTest {
                 DeviceGridColumns.all());
         assertThat(q.sql())
                 .contains("endpoint_admin_service.endpoint_devices d")
-                .contains("WHERE d.tenant_id = :tenantId")
+                // Faz 21.1 PR2b-iii (Codex 019e8cd4 AGREE): canonical
+                // effective-org filter on the export path mirrors the
+                // page-query path — same OR predicate, same :orgId param.
+                .contains("WHERE (d.org_id = :orgId OR (d.org_id IS NULL AND d.tenant_id = :orgId))")
                 .contains("ORDER BY d.id ASC")
                 // No pagination on an export (the LATERAL subqueries still
                 // carry their own LIMIT 1, so only OFFSET/:__limit are absent).
                 .doesNotContain("OFFSET")
                 .doesNotContain(":__limit");
-        assertThat(q.params().getValue("tenantId")).isEqualTo(TENANT);
+        assertThat(q.params().getValue("orgId")).isEqualTo(TENANT);
+        assertThat(q.params().hasValue("tenantId")).isFalse();
         // Canonical projection exposes every column id.
         for (String colId : DeviceGridColumns.allColumnIds()) {
             assertThat(q.sql()).contains(" AS " + colId);
@@ -107,7 +111,10 @@ class DeviceGridExportBuilderTest {
         assertThat(q.sql())
                 .contains("SELECT count(*) FROM (SELECT 1")
                 .contains("endpoint_admin_service.endpoint_devices d")
-                .contains("WHERE d.tenant_id = :tenantId")
+                // Faz 21.1 PR2b-iii (Codex 019e8cd4 AGREE): canonical
+                // effective-org filter on the preflight count mirrors the
+                // page-query path — same OR predicate, same :orgId param.
+                .contains("WHERE (d.org_id = :orgId OR (d.org_id IS NULL AND d.tenant_id = :orgId))")
                 .contains("LIMIT :__cap) preflight");
         assertThat(q.params().getValue("__cap")).isEqualTo(50001);
     }

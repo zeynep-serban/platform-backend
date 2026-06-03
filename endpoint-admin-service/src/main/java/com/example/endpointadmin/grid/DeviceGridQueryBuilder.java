@@ -96,10 +96,16 @@ public class DeviceGridQueryBuilder {
         int pageSize = req.endRow() - req.startRow();
 
         MapSqlParameterSource params = new MapSqlParameterSource();
-        params.addValue("tenantId", tenantId);
+        // Faz 21.1 PR2b-iii canonical effective-org filter (Codex 019e8cd4
+        // AGREE). The :orgId parameter is the canonical tenant scope (= old
+        // tenantId); the predicate accepts both canonical rows (org_id set
+        // post-PR2b-ii) and legacy rows (org_id NULL with tenant_id only,
+        // possible if V29 trigger has not yet filled — defensive).
+        params.addValue("orgId", tenantId);
         int[] seq = {0};
 
-        StringBuilder where = new StringBuilder("d.tenant_id = :tenantId");
+        StringBuilder where = new StringBuilder(
+                "(d.org_id = :orgId OR (d.org_id IS NULL AND d.tenant_id = :orgId))");
         appendFilterModel(req.filterModel(), where, params, seq);
         appendQuickFilter(req.quickFilterText(), where, params, seq);
 
@@ -129,10 +135,12 @@ public class DeviceGridQueryBuilder {
                                     DeviceGridExportRequest req,
                                     List<GridColumn> columns) {
         MapSqlParameterSource params = new MapSqlParameterSource();
-        params.addValue("tenantId", tenantId);
+        // Faz 21.1 PR2b-iii canonical effective-org filter (Codex 019e8cd4 AGREE).
+        params.addValue("orgId", tenantId);
         int[] seq = {0};
 
-        StringBuilder where = new StringBuilder("d.tenant_id = :tenantId");
+        StringBuilder where = new StringBuilder(
+                "(d.org_id = :orgId OR (d.org_id IS NULL AND d.tenant_id = :orgId))");
         String orderBy;
         if (mode == ExportMode.VIEW) {
             appendFilterModel(req.filterModel(), where, params, seq);
@@ -158,10 +166,12 @@ public class DeviceGridQueryBuilder {
     public GridSql buildCountPreflight(UUID tenantId, ExportMode mode,
                                        DeviceGridExportRequest req, int cap) {
         MapSqlParameterSource params = new MapSqlParameterSource();
-        params.addValue("tenantId", tenantId);
+        // Faz 21.1 PR2b-iii canonical effective-org filter (Codex 019e8cd4 AGREE).
+        params.addValue("orgId", tenantId);
         int[] seq = {0};
 
-        StringBuilder where = new StringBuilder("d.tenant_id = :tenantId");
+        StringBuilder where = new StringBuilder(
+                "(d.org_id = :orgId OR (d.org_id IS NULL AND d.tenant_id = :orgId))");
         if (mode == ExportMode.VIEW) {
             appendFilterModel(req.filterModel(), where, params, seq);
             appendQuickFilter(req.quickFilterText(), where, params, seq);

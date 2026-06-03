@@ -122,13 +122,15 @@ public class DiffCacheBackfillService {
         int offset = 0;
         String devicesTable = qualified("endpoint_devices");
         while (true) {
+            // Faz 21.1 PR2b-iii canonical effective-org filter (Codex 019e8cd4
+            // AGREE). Pass orgId twice: canonical match + legacy null path.
             List<UUID> page = jdbc.query(
                     "SELECT id FROM " + devicesTable + " "
-                    + "WHERE tenant_id = ? "
+                    + "WHERE (org_id = ? OR (org_id IS NULL AND tenant_id = ?)) "
                     + "ORDER BY id "
                     + "LIMIT ? OFFSET ?",
                     (rs, i) -> (UUID) rs.getObject("id"),
-                    tenantId, pageSize, offset);
+                    tenantId, tenantId, pageSize, offset);
             if (page.isEmpty()) {
                 break;
             }

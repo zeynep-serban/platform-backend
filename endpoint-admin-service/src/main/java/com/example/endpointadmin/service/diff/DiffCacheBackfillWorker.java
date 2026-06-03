@@ -116,8 +116,12 @@ public class DiffCacheBackfillWorker {
                 ? "endpoint_devices"
                 : (resolvedSchema + ".endpoint_devices");
         return jdbc.query(
-                "SELECT DISTINCT tenant_id FROM " + devicesTable + " "
-                + "ORDER BY tenant_id",
-                (rs, i) -> (UUID) rs.getObject("tenant_id"));
+                // Faz 21.1 PR2b-iii canonical effective-org discovery
+                // (Codex 019e8cd4 AGREE). COALESCE picks org_id when populated
+                // (canonical post-PR2b-ii) else tenant_id (legacy or trigger-
+                // filled). The DISTINCT set is the same tenant universe.
+                "SELECT DISTINCT COALESCE(org_id, tenant_id) AS org FROM " + devicesTable + " "
+                + "ORDER BY org",
+                (rs, i) -> (UUID) rs.getObject("org"));
     }
 }

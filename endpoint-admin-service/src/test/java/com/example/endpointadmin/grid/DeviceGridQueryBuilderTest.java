@@ -44,7 +44,11 @@ class DeviceGridQueryBuilderTest {
                 .contains("LEFT JOIN LATERAL")
                 .contains("endpoint_admin_service.endpoint_device_health_snapshots hs")
                 .contains("endpoint_admin_service.endpoint_outdated_software_snapshots os")
-                .contains("WHERE d.tenant_id = :tenantId")
+                // Faz 21.1 PR2b-iii (Codex 019e8cd4 AGREE): canonical
+                // effective-org filter — accepts both canonical rows
+                // (org_id set post-PR2b-ii) and legacy rows (org_id NULL
+                // with tenant_id only, V29 trigger silent-fill defensive).
+                .contains("WHERE (d.org_id = :orgId OR (d.org_id IS NULL AND d.tenant_id = :orgId))")
                 .contains("ORDER BY d.id ASC")
                 .contains("LIMIT :__limit OFFSET :__offset");
         // Latest-per-device ordering inside the lateral.
@@ -52,7 +56,10 @@ class DeviceGridQueryBuilderTest {
         // Overfetch by one row for lastRow detection.
         assertThat(q.params().getValue("__limit")).isEqualTo(51);
         assertThat(q.params().getValue("__offset")).isEqualTo(0);
-        assertThat(q.params().getValue("tenantId")).isEqualTo(TENANT);
+        // PR2b-iii: tenant scope is now exposed as :orgId (the canonical
+        // org_id parameter); the old :tenantId binding no longer exists.
+        assertThat(q.params().getValue("orgId")).isEqualTo(TENANT);
+        assertThat(q.params().hasValue("tenantId")).isFalse();
         assertThat(q.pageSize()).isEqualTo(50);
         assertThat(q.startRow()).isZero();
     }
