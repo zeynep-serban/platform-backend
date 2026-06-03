@@ -9,7 +9,6 @@ import com.example.endpointadmin.repository.EndpointAppControlSnapshotRepository
 import com.example.endpointadmin.security.AppControlPayloadPolicy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -97,12 +96,11 @@ public class EndpointAppControlService {
         AppControlPayloadPolicy.Projection projection = policy.projectAndHash(appControl);
         String payloadHash = projection.payloadHashSha256();
 
+        // Faz 21.1 PR2b-iv.f — effective-org payload-hash dedupe via
+        // default wrapper (Codex 019e8dec single-PR AGREE).
         Optional<EndpointAppControlSnapshot> identical =
-                repository.findByTenantDeviceAndPayloadHash(
-                        device.getTenantId(), device.getId(), payloadHash,
-                        PageRequest.of(0, 1))
-                        .stream()
-                        .findFirst();
+                repository.findFirstByOrgAndDeviceAndPayloadHash(
+                        device.getTenantId(), device.getId(), payloadHash);
         if (identical.isPresent()) {
             log.debug("App-control ingest no-op for device_id={} (payload hash unchanged, snapshot_id={})",
                     device.getId(), identical.get().getId());
@@ -122,7 +120,11 @@ public class EndpointAppControlService {
                     ? Optional.empty()
                     : repository.findBySourceCommandResultId(commandResultId);
             Optional<EndpointAppControlSnapshot> byHash =
-                    repository.findFirstByTenantIdAndDeviceIdAndPayloadHashSha256OrderByCollectedAtDescCreatedAtDescIdDesc(
+                    // Faz 21.1 PR2b-iv.f — same effective-org default
+                    // wrapper for the hash winner; the prior derived
+                    // Optional method is folded into the JPQL+wrapper
+                    // pair.
+                    repository.findFirstByOrgAndDeviceAndPayloadHash(
                             device.getTenantId(), device.getId(), payloadHash);
             if (bySource.isPresent() && byHash.isPresent()
                     && !bySource.get().getId().equals(byHash.get().getId())) {
@@ -158,7 +160,8 @@ public class EndpointAppControlService {
     }
 
     public Optional<EndpointAppControlSnapshot> findLatest(UUID tenantId, UUID deviceId) {
-        return repository.findFirstByTenantIdAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
+        // Faz 21.1 PR2b-iv.f — effective-org latest via default wrapper.
+        return repository.findFirstVisibleToOrgAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
                 tenantId, deviceId);
     }
 
