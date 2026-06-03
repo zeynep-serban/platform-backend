@@ -169,7 +169,10 @@ public class EndpointAppControlService {
             String payloadHash,
             Instant collectedAt) {
         EndpointAppControlSnapshot snapshot = new EndpointAppControlSnapshot();
-        snapshot.setTenantId(device.getTenantId());
+        // Faz 21.1 PR2b-ii canonical org_id write (Codex 019e8cc2 Option A).
+        UUID deviceOrgId = device.getEffectiveOrgId();
+        snapshot.setTenantId(deviceOrgId);
+        snapshot.setOrgId(deviceOrgId);
         snapshot.setDeviceId(device.getId());
         snapshot.setSourceCommandResultId(commandResultId);
         snapshot.setSchemaVersion(p.schemaVersion());

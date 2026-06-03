@@ -32,7 +32,12 @@ public class EndpointDeviceService {
                 .orElseGet(EndpointDevice::new);
 
         if (device.getId() == null) {
+            // Faz 21.1 PR2b-ii canonical org_id write (Codex 019e8cc2 Option A,
+            // inline pattern). Set both columns to the same UUID so V30 CHECK
+            // (org_id IS NULL OR org_id = tenant_id) passes; the cleanup PR
+            // (DROP COLUMN tenant_id) can safely flip the read path.
             device.setTenantId(tenantId);
+            device.setOrgId(tenantId);
             device.setEnrolledAt(now);
         }
         device.setHostname(request.hostname());

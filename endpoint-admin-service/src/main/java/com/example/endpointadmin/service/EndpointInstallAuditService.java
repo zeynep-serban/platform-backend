@@ -117,7 +117,12 @@ public class EndpointInstallAuditService {
         DetectionReadout readout = extractDetection(safeRedacted);
 
         EndpointInstallAudit audit = new EndpointInstallAudit();
-        audit.setTenantId(command.getTenantId());
+        // Faz 21.1 PR2b-ii canonical org_id write (Codex 019e8cc2 Option A).
+        // EndpointCommand has tenant_id only (not in PR2b-i scope); use the
+        // same UUID for org_id so V30 CHECK passes.
+        UUID commandTenantId = command.getTenantId();
+        audit.setTenantId(commandTenantId);
+        audit.setOrgId(commandTenantId);
         audit.setDeviceId(command.getDevice().getId());
         audit.setCommandId(command.getId());
         audit.setCatalogItemId(catalogItemId);

@@ -261,7 +261,13 @@ public class EndpointOutdatedSoftwareService {
             EndpointDevice device, UUID commandResultId, Map<String, Object> os,
             String payloadHash, Instant collectedAt) {
         EndpointOutdatedSoftwareSnapshot snapshot = new EndpointOutdatedSoftwareSnapshot();
-        snapshot.setTenantId(device.getTenantId());
+        // Faz 21.1 PR2b-ii canonical org_id write (Codex 019e8cc2 Option A).
+        // device.getEffectiveOrgId() inherits parent device's canonical scope
+        // whether the device row was written legacy (V29 trigger filled) or
+        // canonical (PR2b-ii write set both).
+        UUID deviceOrgId = device.getEffectiveOrgId();
+        snapshot.setTenantId(deviceOrgId);
+        snapshot.setOrgId(deviceOrgId);
         snapshot.setDeviceId(device.getId());
         snapshot.setSourceCommandResultId(commandResultId);
         // Required v1 fields — the policy projection (OutdatedSoftwarePayloadPolicy)

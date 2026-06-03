@@ -421,7 +421,9 @@ public class EndpointComplianceService {
 
         // ─── Persist evaluation + upsert latest pointer ───────────
         EndpointComplianceEvaluation persisted = new EndpointComplianceEvaluation();
+        // Faz 21.1 PR2b-ii canonical org_id write (Codex 019e8cc2 Option A).
         persisted.setTenantId(tenantId);
+        persisted.setOrgId(tenantId);
         persisted.setDeviceId(device.getId());
         persisted.setEvaluatedAt(now);
         persisted.setDecision(decision);

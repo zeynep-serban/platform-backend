@@ -418,7 +418,9 @@ public class EndpointSoftwareInventoryService {
 
         EndpointSoftwareInventoryStateHistory history =
                 new EndpointSoftwareInventoryStateHistory();
+        // Faz 21.1 PR2b-ii canonical org_id write (Codex 019e8cc2 Option A).
         history.setTenantId(tenantId);
+        history.setOrgId(tenantId);
         history.setDeviceId(deviceId);
         history.setSourceCommandResultId(sourceResultId);
         history.setSchemaVersion(schemaVersion != null ? schemaVersion : 1);
