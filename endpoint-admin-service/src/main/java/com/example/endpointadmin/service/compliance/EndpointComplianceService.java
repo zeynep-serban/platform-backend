@@ -241,7 +241,10 @@ public class EndpointComplianceService {
             AdminTenantContext tenant, UUID deviceId, Pageable pageable) {
         deviceRepository.findByTenantIdAndId(tenant.tenantId(), deviceId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Device not found."));
-        return evaluationRepository.findByTenantIdAndDeviceIdOrderByEvaluatedAtDesc(
+        // Faz 21.1 PR2b-iv.a (Codex 019e8d12 D′ AGREE): canonical effective-org
+        // read — accepts both canonical rows (org_id = tenant_id) and legacy
+        // (org_id IS NULL AND tenant_id = :orgId) via parenthesized OR.
+        return evaluationRepository.findVisibleToOrgAndDeviceIdOrderByEvaluatedAtDesc(
                 tenant.tenantId(), deviceId, pageable);
     }
 

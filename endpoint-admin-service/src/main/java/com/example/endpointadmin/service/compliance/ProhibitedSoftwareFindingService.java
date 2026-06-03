@@ -45,8 +45,12 @@ public class ProhibitedSoftwareFindingService {
     @Transactional(readOnly = true)
     public DeviceProhibitedSoftwareResponse getDeviceFindings(
             AdminTenantContext tenant, UUID deviceId) {
+        // Faz 21.1 PR2b-iv.a (Codex 019e8d12 D′ AGREE): canonical effective-org
+        // read — replaces derived `findFirstByTenantIdAnd…` with explicit
+        // @Query using parenthesized OR (canonical post-PR2b-ii rows + legacy
+        // org_id NULL rows both reachable).
         Optional<EndpointComplianceEvaluation> latest = evaluationRepository
-                .findFirstByTenantIdAndDeviceIdOrderByEvaluatedAtDesc(
+                .findFirstVisibleToOrgAndDeviceIdOrderByEvaluatedAtDesc(
                         tenant.tenantId(), deviceId);
         if (latest.isEmpty()) {
             return DeviceProhibitedSoftwareResponse.noEvaluation(deviceId);
