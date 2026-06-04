@@ -32,7 +32,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *   <li>cache non-null CHECK exists AND is VALIDATED (convalidated=true);</li>
  *   <li>new UNIQUE(org_id, device_id) exists;</li>
  *   <li>old UNIQUE(tenant_id, device_id) is DROPPED (single ON CONFLICT arbiter);</li>
- *   <li>the old tenant-composite cache FKs STILL exist (FK flip = C2b);</li>
+ *   <li>the tenant-composite cache FKs are GONE — C2b/V37 flipped them to
+ *       org-composite, and the cumulative schema (V1..V37) under test reflects
+ *       that (the 6 org-composite FKs are asserted by V37's own IT);</li>
  *   <li>duplicate (org_id, device_id) is REJECTED (23505 unique_violation);</li>
  *   <li>a trigger-disabled org_id NULL insert is REJECTED (23514) — the
  *       cache non-null invariant actually bites.</li>
@@ -129,9 +131,13 @@ class V35DiffCacheOrgKeyIdentityPostgresIntegrationTest {
     }
 
     @Test
-    void bothCachesStillHaveTenantCompositeForeignKeys_fkFlipDeferredToC2b() {
-        // C2a does NOT recreate the cache FKs as org-composite. Each cache
-        // keeps its 3 (child_col, tenant_id) -> parent(id, tenant_id) FKs.
+    void bothCachesTenantCompositeForeignKeys_flippedToOrgByV37C2b() {
+        // C2a/V35 kept the cache FKs tenant-composite; C2b/V37 later recreated
+        // all 6 as org-composite (child_col, org_id) -> parent(id, org_id).
+        // Testcontainers applies the FULL chain (V1..V37), so on the cumulative
+        // schema NO tenant-composite FK remains on either cache. (The 6
+        // org-composite FKs + their VALIDATE + cross-org rejection are asserted
+        // by V37Source... — V37's own migration IT.)
         for (String[] c : CACHE) {
             Long n = jdbc.queryForObject(
                     "SELECT count(*) FROM pg_constraint con "
@@ -140,8 +146,8 @@ class V35DiffCacheOrgKeyIdentityPostgresIntegrationTest {
                             + "AND pg_get_constraintdef(con.oid) ILIKE '%tenant_id%'",
                     Long.class, c[0]);
             assertThat(n)
-                    .as("%s must keep its 3 tenant-composite FKs (org FK flip = C2b)", c[0])
-                    .isEqualTo(3L);
+                    .as("%s tenant-composite FKs must be GONE (flipped to org-composite by V37/C2b)", c[0])
+                    .isEqualTo(0L);
         }
     }
 
