@@ -18,9 +18,11 @@ import java.util.Map;
  * BE-020 — admin create/update payload for an
  * {@link com.example.endpointadmin.model.EndpointSoftwareCatalogItem}.
  *
- * <p>{@code catalogItemId} is the stable slug; tenant-scoped uniqueness is
+ * <p>{@code catalogItemId} is the stable slug; per-tenant uniqueness is
  * enforced by the DB unique constraint
- * {@code uq_endpoint_software_catalog_items_tenant_catalog_item}.
+ * {@code uq_endpoint_software_catalog_items_org_catalog_item} on
+ * {@code (org_id, catalog_item_id)} (Faz 21.1 C4 V47 single-arbiter swap;
+ * {@code org_id = tenant_id}, so the slug stays scoped per tenant).
  *
  * <p>{@code detectionRule} is a raw JSON object whose shape is validated at
  * the service layer by {@code DetectionRuleValidator}; only the MVP allowlist

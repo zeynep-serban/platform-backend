@@ -17,8 +17,9 @@ import java.util.UUID;
  * {@code tenantId} from the {@code AdminTenantContext} so a tenant can
  * never observe another tenant's catalog rows even if the
  * {@code catalogItemId} slug collides across tenants (the
- * {@code uq_endpoint_software_catalog_items_tenant_catalog_item} unique
- * constraint scopes the slug per tenant).
+ * {@code uq_endpoint_software_catalog_items_org_catalog_item} unique on
+ * {@code (org_id, catalog_item_id)} scopes the slug per org; Faz 21.1 C4 V47
+ * single-arbiter swap, {@code org_id = tenant_id}, reads stay tenant-keyed).
  */
 public interface EndpointSoftwareCatalogItemRepository
         extends JpaRepository<EndpointSoftwareCatalogItem, UUID> {

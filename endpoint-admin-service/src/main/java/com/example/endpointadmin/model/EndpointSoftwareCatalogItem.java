@@ -46,10 +46,16 @@ import java.util.UUID;
  */
 @Entity
 @Table(name = "endpoint_software_catalog_items",
+        // Faz 21.1 C4 V47: business arbiter is org-keyed. The single arbiter is
+        // (org_id, catalog_item_id); the legacy (tenant_id, catalog_item_id)
+        // unique was dropped in V47 (single-arbiter swap). org_id is a mapped
+        // field canonicalized to tenant_id in prePersist/preUpdate so this
+        // arbiter holds on BOTH the H2 create-drop test path (no DB trigger)
+        // and the live Postgres schema. Reads stay tenant-keyed (A5 deferred).
         uniqueConstraints = {
                 @UniqueConstraint(
-                        name = "uq_endpoint_software_catalog_items_tenant_catalog_item",
-                        columnNames = {"tenant_id", "catalog_item_id"})
+                        name = "uq_endpoint_software_catalog_items_org_catalog_item",
+                        columnNames = {"org_id", "catalog_item_id"})
         },
         indexes = {
                 @Index(name = "idx_endpoint_software_catalog_items_tenant_status_enabled",
@@ -65,6 +71,21 @@ public class EndpointSoftwareCatalogItem {
 
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
+
+    /**
+     * Faz 21.1 C4 V47 org_id compat field (Option A — same pattern as
+     * {@code EndpointDevice} / {@code EndpointCommand}). Mapped to the V47
+     * {@code org_id} column. Nullable in JPA (V47 schema kept the column
+     * nullable; the VALIDATED CHECK {@code org_id IS NOT NULL} +
+     * {@code org_id = tenant_id} is the live enforcement surface, column-level
+     * SET NOT NULL deferred to A6). Canonicalized to {@code tenantId} in
+     * {@link #prePersist()} / {@link #preUpdate()} so the org-keyed business
+     * arbiter {@code (org_id, catalog_item_id)} holds on the H2 create-drop
+     * test path too. Reads stay tenant-keyed (A5 deferred);
+     * {@link #getEffectiveOrgId()} resolves legacy {@code orgId == null} rows.
+     */
+    @Column(name = "org_id")
+    private UUID orgId;
 
     @Column(name = "catalog_item_id", nullable = false, length = 128)
     private String catalogItemId;
@@ -181,11 +202,26 @@ public class EndpointSoftwareCatalogItem {
         if (detectionRule == null) {
             detectionRule = new HashMap<>();
         }
+        canonicalizeOrgId();
     }
 
     @PreUpdate
     void preUpdate() {
         lastUpdatedAt = Instant.now();
+        canonicalizeOrgId();
+    }
+
+    /**
+     * Faz 21.1 C4 V47 canonical org_id write: mirror the V47 DB
+     * {@code endpoint_org_id_compat_fill()} BEFORE-trigger at the JPA layer so
+     * the org-keyed business arbiter (org_id, catalog_item_id) holds even on the
+     * H2 create-drop test path (no DB trigger). org_id = tenant_id (the V47 match
+     * CHECK invariant); never overwrites an explicitly-set value.
+     */
+    private void canonicalizeOrgId() {
+        if (orgId == null && tenantId != null) {
+            orgId = tenantId;
+        }
     }
 
     public UUID getId() {
@@ -198,6 +234,24 @@ public class EndpointSoftwareCatalogItem {
 
     public void setTenantId(UUID tenantId) {
         this.tenantId = tenantId;
+    }
+
+    /**
+     * Faz 21.1 C4 V47 org_id accessor. May return {@code null} on a legacy row
+     * whose canonical write path has not populated the column; read paths should
+     * call {@link #getEffectiveOrgId()}.
+     */
+    public UUID getOrgId() {
+        return orgId;
+    }
+
+    public void setOrgId(UUID orgId) {
+        this.orgId = orgId;
+    }
+
+    /** Faz 21.1 C4 V47 effective-org accessor: orgId fallback to tenantId. */
+    public UUID getEffectiveOrgId() {
+        return orgId != null ? orgId : tenantId;
     }
 
     public String getCatalogItemId() {

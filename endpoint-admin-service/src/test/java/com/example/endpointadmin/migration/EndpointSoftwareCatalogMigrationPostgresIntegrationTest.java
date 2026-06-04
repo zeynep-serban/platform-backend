@@ -131,7 +131,14 @@ class EndpointSoftwareCatalogMigrationPostgresIntegrationTest {
                         + "'public.endpoint_software_catalog_items'::regclass "
                         + "AND contype = 'u'",
                 String.class);
+        // V47 (Faz 21.1 C4 step-7) swapped the business unique from the V7
+        // tenant-keyed (tenant_id, catalog_item_id) to the org-keyed single
+        // arbiter (org_id, catalog_item_id). This migration IT runs the full
+        // chain (incl. V47), so the live business unique is the org-keyed one;
+        // the legacy tenant-keyed unique is dropped by V47.
         assertThat(uniques).contains(
+                "uq_endpoint_software_catalog_items_org_catalog_item");
+        assertThat(uniques).doesNotContain(
                 "uq_endpoint_software_catalog_items_tenant_catalog_item");
     }
 
