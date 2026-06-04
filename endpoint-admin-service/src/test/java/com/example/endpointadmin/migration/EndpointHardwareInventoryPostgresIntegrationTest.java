@@ -258,8 +258,12 @@ class EndpointHardwareInventoryPostgresIntegrationTest {
                 100_000_000_000L,
                 Timestamp.from(Instant.now())))
                 .isInstanceOf(DataIntegrityViolationException.class)
-                .hasMessageContaining(
-                        "fk_endpoint_hardware_inventory_disks_snapshot");
+                // V40/C4 A2-3: the disk→snapshot FK is now org-composite
+                // (hw_inv_disk_snapshot_org_fk). The wrong-tenant disk gets
+                // org_id=wrongTenant (V29 trigger), which has no
+                // (snapshot_id, org_id) parent → rejected by the org FK (the
+                // cumulative V1..V40 schema dropped the old tenant-composite FK).
+                .hasMessageContaining("hw_inv_disk_snapshot_org_fk");
     }
 
     @Test
@@ -280,8 +284,10 @@ class EndpointHardwareInventoryPostgresIntegrationTest {
                 "[]",
                 Timestamp.from(Instant.now())))
                 .isInstanceOf(DataIntegrityViolationException.class)
-                .hasMessageContaining(
-                        "fk_endpoint_hardware_inventory_network_interfaces_snapshot");
+                // V40/C4 A2-3: the network_interface→snapshot FK is now
+                // org-composite (hw_inv_ni_snapshot_org_fk); cumulative V1..V40
+                // dropped the old tenant-composite FK.
+                .hasMessageContaining("hw_inv_ni_snapshot_org_fk");
     }
 
     // ──────────────────────────────────────────────────────────────────
