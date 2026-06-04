@@ -254,7 +254,7 @@ class EndpointOutdatedSoftwarePostgresIntegrationTest {
                 "7zip.7zip", "24.09", "25.01",
                 Timestamp.from(Instant.now())))
                 .isInstanceOf(DataIntegrityViolationException.class)
-                .hasMessageContaining("fk_endpoint_outdated_software_packages_snapshot");
+                .hasMessageContaining("osw_pkg_snapshot_org_fk");
     }
 
     // ──────────────────────────────────────────────────────────────────

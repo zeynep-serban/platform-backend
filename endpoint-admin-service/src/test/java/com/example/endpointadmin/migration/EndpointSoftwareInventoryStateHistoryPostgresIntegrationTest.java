@@ -186,7 +186,7 @@ class EndpointSoftwareInventoryStateHistoryPostgresIntegrationTest {
                 deviceIdOwner(wrongTenant), deviceId, null, 1, 0, VALID_HASH, "[]"))
                 .isInstanceOf(DataIntegrityViolationException.class)
                 .hasMessageContaining(
-                        "fk_endpoint_software_inventory_state_history_device");
+                        "sw_inv_device_org_fk");
     }
 
     // ──────────────────────────────────────────────────────────────────
