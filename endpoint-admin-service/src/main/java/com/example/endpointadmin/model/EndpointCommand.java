@@ -27,8 +27,16 @@ import java.util.UUID;
 
 @Entity
 @Table(name = "endpoint_commands",
-        uniqueConstraints = @UniqueConstraint(name = "uq_endpoint_commands_tenant_idempotency",
-                columnNames = {"tenant_id", "idempotency_key"}),
+        // Faz 21.1 C4 V46: idempotency arbiter is org-keyed. The single
+        // arbiter is (org_id, idempotency_key); the legacy (tenant_id,
+        // idempotency_key) unique was dropped in V46 (single-arbiter swap).
+        // org_id is a mapped field (Option A) canonicalized to tenant_id in
+        // prePersist/preUpdate so this arbiter holds on BOTH the H2
+        // create-drop test path (no DB trigger) and the live Postgres schema
+        // (V46 BEFORE-trigger is the belt-and-suspenders for non-JPA writers).
+        // Reads stay tenant-keyed (A5 deferred).
+        uniqueConstraints = @UniqueConstraint(name = "uq_endpoint_commands_org_idempotency",
+                columnNames = {"org_id", "idempotency_key"}),
         indexes = {
                 @Index(name = "idx_endpoint_commands_device_status",
                         columnList = "device_id,status"),
@@ -47,6 +55,21 @@ public class EndpointCommand {
 
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
+
+    /**
+     * Faz 21.1 C4 V46 org_id compat field (Option A — same pattern as
+     * {@code EndpointDevice} / {@code EndpointInstallAudit}). Mapped to the
+     * V46 {@code org_id} column. Nullable in JPA (V46 schema kept the column
+     * nullable; the VALIDATED CHECK {@code org_id IS NOT NULL} +
+     * {@code org_id = tenant_id} is the live enforcement surface, column-level
+     * SET NOT NULL deferred to A6). Canonicalized to {@code tenantId} in
+     * {@link #prePersist()} / {@link #preUpdate()} so the org-keyed idempotency
+     * arbiter holds on the H2 create-drop test path too. Reads stay
+     * tenant-keyed (A5 deferred); {@link #getEffectiveOrgId()} resolves legacy
+     * {@code orgId == null} rows to {@code tenantId}.
+     */
+    @Column(name = "org_id")
+    private UUID orgId;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "device_id", nullable = false)
@@ -142,11 +165,26 @@ public class EndpointCommand {
         if (visibleAfterAt == null) {
             visibleAfterAt = now;
         }
+        canonicalizeOrgId();
     }
 
     @PreUpdate
     void preUpdate() {
         updatedAt = Instant.now();
+        canonicalizeOrgId();
+    }
+
+    /**
+     * Faz 21.1 C4 V46 canonical org_id write: mirror the V46 DB
+     * {@code endpoint_org_id_compat_fill()} BEFORE-trigger at the JPA layer so
+     * the org-keyed idempotency arbiter (org_id, idempotency_key) holds even on
+     * the H2 create-drop test path (which has no DB trigger). org_id = tenant_id
+     * (the V46 match CHECK invariant); never overwrites an explicitly-set value.
+     */
+    private void canonicalizeOrgId() {
+        if (orgId == null && tenantId != null) {
+            orgId = tenantId;
+        }
     }
 
     public UUID getId() {
@@ -155,6 +193,24 @@ public class EndpointCommand {
 
     public UUID getTenantId() {
         return tenantId;
+    }
+
+    /**
+     * Faz 21.1 C4 V46 org_id accessor. May return {@code null} on a legacy row
+     * whose canonical write path has not populated the column; read paths
+     * should call {@link #getEffectiveOrgId()}.
+     */
+    public UUID getOrgId() {
+        return orgId;
+    }
+
+    public void setOrgId(UUID orgId) {
+        this.orgId = orgId;
+    }
+
+    /** Faz 21.1 C4 V46 effective-org accessor: orgId fallback to tenantId. */
+    public UUID getEffectiveOrgId() {
+        return orgId != null ? orgId : tenantId;
     }
 
     public void setTenantId(UUID tenantId) {
