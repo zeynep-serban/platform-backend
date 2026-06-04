@@ -18,12 +18,14 @@ import java.util.UUID;
  * AG-028 Phase 1 — Spring Data JPA repository for
  * {@link EndpointUninstallRequest}.
  *
- * <p>Tenant-scoped finders. The partial unique index
- * {@code uq_endpoint_uninstall_one_inflight} guarantees at most one open
- * request per {@code (tenant, device, catalog_item)}; second concurrent
- * propose hits the DB constraint that the service maps to 409 CONFLICT.
- * The partial unique index {@code uq_endpoint_uninstall_idempotency}
- * powers replay semantics on {@code (tenant, idempotency_key)}.
+ * <p>Tenant-scoped finders (reads stay tenant-keyed; A5 deferred). The partial
+ * unique index {@code uq_endpoint_uninstall_one_inflight} guarantees at most one
+ * open request per {@code (org_id, device, catalog_item)}; second concurrent
+ * propose hits the DB constraint that the service maps to 409 CONFLICT. The
+ * partial unique index {@code uq_endpoint_uninstall_idempotency} powers replay
+ * semantics on {@code (org_id, idempotency_key)}. (Faz 21.1 C4 V49 swapped both
+ * partial uniques tenant→org-keyed; {@code org_id = tenant_id}, so per-tenant
+ * scoping holds.)
  */
 public interface EndpointUninstallRequestRepository
         extends JpaRepository<EndpointUninstallRequest, UUID> {

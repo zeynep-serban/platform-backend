@@ -26,15 +26,17 @@ import java.util.UUID;
  *   PENDING_APPROVAL                                          → TERMINAL  (reject path)
  * </pre>
  *
- * <p>DB invariants enforced in V32:
+ * <p>DB invariants (created in V32; FKs + business partial-uniques flipped to
+ * org-keyed in Faz 21.1 C4 V49 — {@code org_id = tenant_id}, reads tenant-keyed,
+ * {@code tenant_id} + {@code uq_..._id_tenant} retained until A6):
  * <ul>
  *   <li>{@code ck_endpoint_uninstall_state}: closed state allowlist.</li>
- *   <li>{@code uq_endpoint_uninstall_requests_id_tenant}: composite tenant unique.</li>
- *   <li>{@code fk_endpoint_uninstall_requests_device}: composite (device_id, tenant_id) FK.</li>
- *   <li>{@code fk_endpoint_uninstall_requests_catalog}: composite (catalog_item_id, tenant_id) FK.</li>
- *   <li>{@code fk_endpoint_uninstall_requests_command}: deferred composite (command_id, tenant_id) FK.</li>
- *   <li>{@code uq_endpoint_uninstall_one_inflight}: partial unique on (tenant, device, catalog) where state != TERMINAL.</li>
- *   <li>{@code uq_endpoint_uninstall_idempotency}: partial unique on (tenant, idempotency_key) where not null.</li>
+ *   <li>{@code endpoint_uninstall_requests_id_org_id_key}: composite (id, org_id) unique (V49 FK target; V32 {@code uq_..._id_tenant} retained for A6).</li>
+ *   <li>{@code uninstall_req_device_org_fk}: composite (device_id, org_id) FK.</li>
+ *   <li>{@code uninstall_req_catalog_org_fk}: composite (catalog_item_id, org_id) FK.</li>
+ *   <li>{@code uninstall_req_command_org_fk}: deferred composite (command_id, org_id) FK (DEFERRABLE INITIALLY DEFERRED).</li>
+ *   <li>{@code uq_endpoint_uninstall_one_inflight}: partial unique on (org_id, device, catalog) where state != TERMINAL.</li>
+ *   <li>{@code uq_endpoint_uninstall_idempotency}: partial unique on (org_id, idempotency_key) where not null.</li>
  * </ul>
  *
  * <p>Cross-AI plan-time Codex consensus thread
@@ -56,6 +58,21 @@ public class EndpointUninstallRequest {
 
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
+
+    /**
+     * Faz 21.1 C4 V49 org_id compat field (Option A — same pattern as
+     * EndpointCommand / EndpointSoftwareCatalogItem). Mapped to the V49
+     * {@code org_id} column; nullable in JPA (the VALIDATED CHECK
+     * {@code org_id IS NOT NULL} + {@code org_id = tenant_id} is the live
+     * enforcement surface, column-level SET NOT NULL deferred to A6).
+     * Canonicalized to {@code tenantId} in {@link #prePersist()} /
+     * {@link #preUpdate()} so the org-keyed business arbiters (idempotency +
+     * one-inflight partial uniques) hold on the H2 create-drop test path too.
+     * Reads stay tenant-keyed (A5 deferred); {@link #getEffectiveOrgId()}
+     * resolves legacy {@code orgId == null} rows.
+     */
+    @Column(name = "org_id")
+    private UUID orgId;
 
     @Column(name = "device_id", nullable = false)
     private UUID deviceId;
@@ -103,11 +120,26 @@ public class EndpointUninstallRequest {
         if (state == null) {
             state = UninstallRequestState.PENDING_APPROVAL;
         }
+        canonicalizeOrgId();
     }
 
     @PreUpdate
     void preUpdate() {
         stateUpdatedAt = Instant.now();
+        canonicalizeOrgId();
+    }
+
+    /**
+     * Faz 21.1 C4 V49 canonical org_id write: mirror the V49 DB
+     * {@code endpoint_org_id_compat_fill()} BEFORE-trigger at the JPA layer so
+     * the org-keyed business arbiters hold even on the H2 create-drop test path
+     * (no DB trigger). org_id = tenant_id (V49 match CHECK invariant); never
+     * overwrites an explicitly-set value.
+     */
+    private void canonicalizeOrgId() {
+        if (orgId == null && tenantId != null) {
+            orgId = tenantId;
+        }
     }
 
     @Override
@@ -127,6 +159,11 @@ public class EndpointUninstallRequest {
     public void setId(UUID id) { this.id = id; }
     public UUID getTenantId() { return tenantId; }
     public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }
+    /** Faz 21.1 C4 V49 org_id accessor (may be null on legacy rows; use {@link #getEffectiveOrgId()} for reads). */
+    public UUID getOrgId() { return orgId; }
+    public void setOrgId(UUID orgId) { this.orgId = orgId; }
+    /** Faz 21.1 C4 V49 effective-org accessor: orgId fallback to tenantId. */
+    public UUID getEffectiveOrgId() { return orgId != null ? orgId : tenantId; }
     public UUID getDeviceId() { return deviceId; }
     public void setDeviceId(UUID deviceId) { this.deviceId = deviceId; }
     public UUID getCatalogItemId() { return catalogItemId; }

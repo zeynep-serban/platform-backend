@@ -65,6 +65,18 @@ public class EndpointUninstallAudit {
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
 
+    /**
+     * Faz 21.1 C4 V49 org_id compat field (Option A). Mapped to the V49
+     * {@code org_id} column; nullable in JPA (VALIDATED CHECK is the live
+     * enforcement, column-level SET NOT NULL deferred to A6). Canonicalized to
+     * {@code tenantId} in {@link #prePersist()} only — this table is append-only
+     * (a DB BEFORE UPDATE/DELETE trigger rejects mutations), so there is no
+     * {@code @PreUpdate}. Reads stay tenant-keyed (A5); {@link #getEffectiveOrgId()}
+     * resolves legacy {@code orgId == null} rows.
+     */
+    @Column(name = "org_id")
+    private UUID orgId;
+
     @Column(name = "device_id", nullable = false)
     private UUID deviceId;
 
@@ -114,6 +126,9 @@ public class EndpointUninstallAudit {
         if (detectionEvidence == null) {
             detectionEvidence = new HashMap<>();
         }
+        if (orgId == null && tenantId != null) {
+            orgId = tenantId;
+        }
     }
 
     @Override
@@ -135,6 +150,11 @@ public class EndpointUninstallAudit {
     public void setRequestId(UUID requestId) { this.requestId = requestId; }
     public UUID getTenantId() { return tenantId; }
     public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }
+    /** Faz 21.1 C4 V49 org_id accessor (may be null on legacy rows; use {@link #getEffectiveOrgId()} for reads). */
+    public UUID getOrgId() { return orgId; }
+    public void setOrgId(UUID orgId) { this.orgId = orgId; }
+    /** Faz 21.1 C4 V49 effective-org accessor: orgId fallback to tenantId. */
+    public UUID getEffectiveOrgId() { return orgId != null ? orgId : tenantId; }
     public UUID getDeviceId() { return deviceId; }
     public void setDeviceId(UUID deviceId) { this.deviceId = deviceId; }
     public UUID getCatalogItemId() { return catalogItemId; }
