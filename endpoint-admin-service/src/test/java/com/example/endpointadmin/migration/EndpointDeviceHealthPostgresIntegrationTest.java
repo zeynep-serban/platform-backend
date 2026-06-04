@@ -215,7 +215,13 @@ class EndpointDeviceHealthPostgresIntegrationTest {
                 "C:", 100_000_000_000L,
                 Timestamp.from(Instant.now())))
                 .isInstanceOf(DataIntegrityViolationException.class)
-                .hasMessageContaining("fk_endpoint_device_health_disks_snapshot");
+                // V38/C4 A2: the disk→snapshot FK is now org-composite
+                // (dev_health_disk_snapshot_org_fk). The wrong-tenant disk gets
+                // org_id = wrongTenant (V29 trigger fills org=tenant), which has
+                // no (snapshot_id, org_id) parent on the orgA snapshot → rejected
+                // by the org FK (the cumulative V1..V38 schema dropped the old
+                // tenant-composite fk_endpoint_device_health_disks_snapshot).
+                .hasMessageContaining("dev_health_disk_snapshot_org_fk");
     }
 
     // ──────────────────────────────────────────────────────────────────
