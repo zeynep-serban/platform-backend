@@ -149,17 +149,53 @@ class ServicesPayloadPolicyTest {
     }
 
     @Test
-    void servicesListReorderRejected() {
+    void servicesListReorderAcceptedAndCanonicalized() {
+        // LIVE regression (2026-06-04): the agent enumerates the 6 services in
+        // SCM/probe order (observed: BITS before WinDefend), which is a valid
+        // SET in a non-canonical ORDER. The previous positional check rejected
+        // it with HTTP 400 "violates canonical order", silently breaking AG-039
+        // ingest end-to-end. A valid set in ANY order must now be accepted +
+        // normalized to canonical order (validate-then-sort per the class doc).
         Map<String, Object> p = goldenWindows();
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> services = (List<Map<String, Object>>) p.get("services");
-        // Swap [0] and [1] — canonical order broken.
-        var first = services.get(0);
-        services.set(0, services.get(1));
-        services.set(1, first);
+        java.util.Collections.reverse(services); // fully non-canonical input order
+        var proj = policy.projectAndHash(p);
+        assertThat(proj.services()).hasSize(6);
+        assertThat(proj.services().stream()
+                .map(ServicesPayloadPolicy.EntryProjection::name))
+                .containsExactly("WinDefend", "wuauserv", "BITS", "EventLog", "EndpointAgent", "MpsSvc");
+        // rowOrdinal renumbered to the canonical position (deterministic)
+        assertThat(proj.services().get(0).rowOrdinal()).isEqualTo(0);
+        assertThat(proj.services().get(5).rowOrdinal()).isEqualTo(5);
+        assertThat(proj.payloadHashSha256()).matches("^[0-9a-f]{64}$");
+    }
+
+    @Test
+    void servicesPayloadHashIsAgentOrderIndependent() {
+        // The canonical hash must be identical whether the agent sends the six
+        // services in canonical order or any other order — the sort makes the
+        // hash a deterministic function of the SET, not the wire order.
+        var canonical = policy.projectAndHash(goldenWindows());
+        Map<String, Object> reordered = goldenWindows();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> svc = (List<Map<String, Object>>) reordered.get("services");
+        java.util.Collections.reverse(svc);
+        var shuffled = policy.projectAndHash(reordered);
+        assertThat(shuffled.payloadHashSha256()).isEqualTo(canonical.payloadHashSha256());
+    }
+
+    @Test
+    void servicesListDuplicateNameRejected() {
+        // exact-six size passes but a duplicate name (⇒ a missing canonical
+        // name) must still be rejected by the set-membership invariant.
+        Map<String, Object> p = goldenWindows();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> services = (List<Map<String, Object>>) p.get("services");
+        services.get(1).put("name", services.get(0).get("name")); // duplicate WinDefend
         assertThatThrownBy(() -> policy.projectAndHash(p))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("canonical order");
+                .hasMessageContaining("duplicate");
     }
 
     // ─── 6. Per-entry enum + null ────────────────────────────────

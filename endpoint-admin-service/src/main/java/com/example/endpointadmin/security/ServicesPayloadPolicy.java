@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -34,10 +35,15 @@ import java.util.regex.Pattern;
  *
  * <h3>Exact-six invariant (validate-then-sort, Codex iter-2)</h3>
  *
- * <p>When supported=true: services array MUST have EXACTLY 6 entries in
- * canonical allowlist order. Duplicate / missing / extra / reorder all
- * REJECT. When supported=false: services array MAY be empty (legitimate
- * non-Windows stub).
+ * <p>When supported=true: services array MUST have EXACTLY 6 entries whose
+ * names form the canonical allowlist SET (each canonical name exactly once).
+ * Duplicate / missing / extra REJECT; a valid set in ANY ORDER is ACCEPTED
+ * and the backend normalizes it to canonical allowlist order
+ * (validate-then-sort). Requiring a positional wire order silently broke
+ * live AG-039 ingest (2026-06-04: the agent enumerates in SCM order, BITS
+ * before WinDefend, and the result POST was rejected HTTP 400). When
+ * supported=false: services array MAY be empty (legitimate non-Windows
+ * stub).
  *
  * <h3>Canonical-form payload hash</h3>
  *
@@ -271,6 +277,7 @@ public class ServicesPayloadPolicy {
                             + " entries when supported=true; got " + rawList.size());
         }
         List<EntryProjection> out = new ArrayList<>(CANONICAL_ALLOWLIST.size());
+        Set<String> seenNames = new HashSet<>();
         for (int i = 0; i < rawList.size(); i++) {
             Object item = rawList.get(i);
             if (!(item instanceof Map<?, ?> itemMap)) {
@@ -291,11 +298,25 @@ public class ServicesPayloadPolicy {
                 }
             }
             String name = asString(itemMap.get("name"), "services[" + i + "].name");
-            String expected = CANONICAL_ALLOWLIST.get(i);
-            if (!name.equals(expected)) {
+            // validate-then-sort (class doc): canonical-SET membership, NOT
+            // positional order. The agent enumerates the 6 services in SCM /
+            // probe order (observed live: BITS before WinDefend), which is a
+            // valid set but a different order; the previous positional check
+            // (expected == CANONICAL_ALLOWLIST.get(i)) rejected it with HTTP
+            // 400 ("services[0].name violates canonical order"), silently
+            // breaking AG-039 ingest end-to-end. Canonical ORDER is a
+            // backend-owned normalization applied after the loop, not an agent
+            // wire contract. exact-six + membership + no-duplicate together
+            // prove the set is exactly the canonical six.
+            if (!CANONICAL_ALLOWLIST_SET.contains(name)) {
                 throw new IllegalArgumentException(
-                        "AG-039 services[" + i + "].name violates canonical order: expected "
-                                + expected + " got " + name);
+                        "AG-039 services[" + i + "].name not in canonical allowlist "
+                                + CANONICAL_ALLOWLIST + "; got " + name);
+            }
+            if (!seenNames.add(name)) {
+                throw new IllegalArgumentException(
+                        "AG-039 services[" + i + "].name duplicate (canonical set requires each "
+                                + "name exactly once): " + name);
             }
             boolean present = asBool(itemMap.get("present"), "services[" + i + "].present");
             String state = asString(itemMap.get("state"), "services[" + i + "].state");
@@ -312,7 +333,18 @@ public class ServicesPayloadPolicy {
             }
             out.add(new EntryProjection(i, name, present, state, startupMode));
         }
-        return out;
+        // exact-six + all-members + no-duplicate ⟹ exactly the canonical six.
+        // Normalize to canonical order with a canonical rowOrdinal (0..5) so the
+        // payload hash + persisted rows are deterministic regardless of the
+        // agent's enumeration order.
+        out.sort((a, b) -> Integer.compare(
+                CANONICAL_ALLOWLIST.indexOf(a.name()), CANONICAL_ALLOWLIST.indexOf(b.name())));
+        List<EntryProjection> ordered = new ArrayList<>(out.size());
+        for (int c = 0; c < out.size(); c++) {
+            EntryProjection e = out.get(c);
+            ordered.add(new EntryProjection(c, e.name(), e.present(), e.state(), e.startupMode()));
+        }
+        return ordered;
     }
 
     private List<ProbeErrorProjection> projectProbeErrors(Object raw, boolean explicitlyPresent) {
