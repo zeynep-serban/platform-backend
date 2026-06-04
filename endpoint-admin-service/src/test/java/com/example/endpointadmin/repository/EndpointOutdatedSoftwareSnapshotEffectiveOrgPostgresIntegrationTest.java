@@ -1,6 +1,7 @@
 package com.example.endpointadmin.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.endpointadmin.model.EndpointOutdatedSoftwareSnapshot;
 import java.sql.Timestamp;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -42,14 +44,16 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * <p>Six assertions covering the B-D-A read-path correctness modes:
  * <ol>
  *   <li>Canonical row read (both methods + default wrapper).</li>
- *   <li>Legacy NULL row read (both methods + V29 trigger bypass +
- *       pre-assert).</li>
+ *   <li>Legacy NULL row REJECTED by V36 (C1.5) — CHECK org_id IS NOT NULL
+ *       makes it unconstructable; a trigger-bypass org_id-NULL insert is
+ *       rejected 23514. The OR-fallback read branch (both methods) stays,
+ *       dead until A5.</li>
  *   <li>Cross-org negative — orgA must not see orgB's snapshot.</li>
  *   <li>id DESC tiebreaker honored on identical collected_at +
  *       created_at.</li>
- *   <li>Page count over OR-fallback: sums canonical + legacy rows.</li>
- *   <li>Page sort assertion — caller-supplied Pageable Sort applied to
- *       content side; newer first (HISTORY_SORT) over mixed rows.</li>
+ *   <li>Page count + sort over canonical rows: caller-supplied Pageable
+ *       Sort applied to content side; newer first (HISTORY_SORT).</li>
+ *   <li>Default wrapper picks the newest canonical row.</li>
  * </ol>
  */
 @Testcontainers
@@ -129,48 +133,23 @@ class EndpointOutdatedSoftwareSnapshotEffectiveOrgPostgresIntegrationTest {
         assertThat(page.getTotalElements()).isEqualTo(1L);
     }
 
-    // ───────────────────────── Assertion 2: legacy NULL row (both methods + V29 bypass) ─────────────────────────
+    // ───────────────────────── Assertion 2: legacy NULL insert REJECTED by V36 ─────────────────────────
 
     @Test
-    void legacyNullRow_orgIdNull_visibleViaTenantIdFallback_bothReads() {
+    void legacyNullRow_orgIdNullInsert_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL visibility fixture (both reads + wrapper +
+        // Page) is replaced by its invariant proof — a trigger-bypass
+        // org_id-NULL insert is rejected 23514. The OR-fallback read branches
+        // are left intact (provably dead until A5 removes them with composite
+        // indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceId = ensureDevice(orgA);
         UUID snapshotId = UUID.randomUUID();
-        insertSnapshotLegacyNullOrg(snapshotId, orgA, deviceId,
+        assertSnapshotLegacyNullOrgInsertRejectedByV36(snapshotId, orgA, deviceId,
                 Instant.parse("2026-06-03T10:00:00Z"),
                 Instant.parse("2026-06-03T10:00:01Z"));
-
-        Boolean orgIdIsNull = jdbc.queryForObject(
-                "SELECT org_id IS NULL FROM " + SCHEMA
-                        + ".endpoint_outdated_software_snapshots WHERE id = ?",
-                Boolean.class, snapshotId);
-        assertThat(orgIdIsNull)
-                .as("legacy NULL fixture pre-assert: V29 trigger bypass held")
-                .isTrue();
-
-        List<EndpointOutdatedSoftwareSnapshot> head = repository
-                .findVisibleToOrgAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
-                        orgA, deviceId, PageRequest.of(0, 2));
-        Optional<EndpointOutdatedSoftwareSnapshot> latest = repository
-                .findFirstVisibleToOrgAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
-                        orgA, deviceId);
-        Page<EndpointOutdatedSoftwareSnapshot> page = repository
-                .findVisibleToOrgAndDeviceId(
-                        orgA, deviceId, PageRequest.of(0, 10, HISTORY_SORT));
-
-        assertThat(head)
-                .as("legacy NULL row reachable via OR-fallback branch (List)")
-                .extracting(EndpointOutdatedSoftwareSnapshot::getId)
-                .containsExactly(snapshotId);
-        assertThat(latest)
-                .as("legacy NULL row reachable via OR-fallback branch (default wrapper)")
-                .map(EndpointOutdatedSoftwareSnapshot::getId)
-                .contains(snapshotId);
-        assertThat(page.getContent())
-                .as("legacy NULL row reachable via OR-fallback branch (Page)")
-                .extracting(EndpointOutdatedSoftwareSnapshot::getId)
-                .containsExactly(snapshotId);
-        assertThat(page.getTotalElements()).isEqualTo(1L);
     }
 
     // ───────────────────────── Assertion 3: cross-org negative ─────────────────────────
@@ -237,23 +216,26 @@ class EndpointOutdatedSoftwareSnapshotEffectiveOrgPostgresIntegrationTest {
                 .containsExactly(idHigh);
     }
 
-    // ───────────────────────── Assertion 5: page count over OR-fallback ─────────────────────────
+    // ───────────────────────── Assertion 5: page count + sort over canonical rows ─────────────────────────
 
     @Test
-    void pageHistory_countQuery_sumsBothCanonicalAndLegacyRowsForSameOrg() {
+    void pageHistory_countQuery_sumsCanonicalRowsForSameOrg() {
         UUID orgA = UUID.randomUUID();
         UUID deviceId = ensureDevice(orgA);
 
-        // Disjoint timestamps so the page test asserts both the count
-        // over the OR-fallback AND that the caller-supplied Pageable Sort
-        // is applied to the content side (Codex 019e8dbb slice c iter-1
-        // REVISE #3 hardening).
-        UUID canonical = UUID.randomUUID();
-        UUID legacy = UUID.randomUUID();
-        insertSnapshotCanonical(canonical, orgA, deviceId,
+        // Disjoint timestamps so the page test asserts both the count AND
+        // that the caller-supplied Pageable Sort is applied to the content
+        // side (Codex 019e8dbb slice c iter-1 REVISE #3 hardening). Under
+        // C1.5/V36 the prior legacy-NULL second row is no longer
+        // constructable; its rejection is pinned by
+        // legacyNullRow_orgIdNullInsert_isRejectedByV36. Two canonical rows
+        // (newer + older) retain the count + content-sort coverage.
+        UUID newer = UUID.randomUUID();
+        UUID older = UUID.randomUUID();
+        insertSnapshotCanonical(newer, orgA, deviceId,
                 Instant.parse("2026-06-03T10:00:00Z"),
                 Instant.parse("2026-06-03T10:00:01Z"));
-        insertSnapshotLegacyNullOrg(legacy, orgA, deviceId,
+        insertSnapshotCanonical(older, orgA, deviceId,
                 Instant.parse("2026-06-03T09:00:00Z"),
                 Instant.parse("2026-06-03T09:00:01Z"));
 
@@ -262,29 +244,33 @@ class EndpointOutdatedSoftwareSnapshotEffectiveOrgPostgresIntegrationTest {
                         orgA, deviceId, PageRequest.of(0, 10, HISTORY_SORT));
 
         assertThat(page.getContent())
-                .as("page returns rows in HISTORY_SORT order: canonical (newer) "
-                        + "first, legacy NULL (older) second — proves the "
+                .as("page returns rows in HISTORY_SORT order: newer canonical "
+                        + "first, older canonical second — proves the "
                         + "Pageable Sort is applied to the content side")
                 .extracting(EndpointOutdatedSoftwareSnapshot::getId)
-                .containsExactly(canonical, legacy);
+                .containsExactly(newer, older);
         assertThat(page.getTotalElements())
-                .as("countQuery sibling totals over the OR-fallback predicate")
+                .as("countQuery sibling totals over the effective-org predicate")
                 .isEqualTo(2L);
     }
 
-    // ───────────────────────── Assertion 6: default wrapper picks the newest mixed row ─────────────────────────
+    // ───────────────────────── Assertion 6: default wrapper picks the newest canonical row ─────────────────────────
 
     @Test
-    void defaultWrapper_pickNewestRow_evenWhenLegacyNullCoexistsWithCanonical() {
+    void defaultWrapper_pickNewestCanonicalRow() {
         UUID orgA = UUID.randomUUID();
         UUID deviceId = ensureDevice(orgA);
 
-        UUID legacyOlder = UUID.randomUUID();
-        UUID canonicalNewer = UUID.randomUUID();
-        insertSnapshotLegacyNullOrg(legacyOlder, orgA, deviceId,
+        // Under C1.5/V36 the prior older legacy-NULL coexisting row is no
+        // longer constructable; its rejection is pinned by
+        // legacyNullRow_orgIdNullInsert_isRejectedByV36. Two canonical rows
+        // (older + newer) retain the newest-wins wrapper coverage.
+        UUID older = UUID.randomUUID();
+        UUID newer = UUID.randomUUID();
+        insertSnapshotCanonical(older, orgA, deviceId,
                 Instant.parse("2026-06-03T09:00:00Z"),
                 Instant.parse("2026-06-03T09:00:01Z"));
-        insertSnapshotCanonical(canonicalNewer, orgA, deviceId,
+        insertSnapshotCanonical(newer, orgA, deviceId,
                 Instant.parse("2026-06-03T10:00:00Z"),
                 Instant.parse("2026-06-03T10:00:01Z"));
 
@@ -293,9 +279,9 @@ class EndpointOutdatedSoftwareSnapshotEffectiveOrgPostgresIntegrationTest {
                         orgA, deviceId);
 
         assertThat(latest)
-                .as("default wrapper picks the newest row across canonical + legacy NULL coexistence")
+                .as("default wrapper picks the newest canonical row")
                 .map(EndpointOutdatedSoftwareSnapshot::getId)
-                .contains(canonicalNewer);
+                .contains(newer);
     }
 
     // ───────────────────────── Seed helpers ─────────────────────────
@@ -331,24 +317,39 @@ class EndpointOutdatedSoftwareSnapshotEffectiveOrgPostgresIntegrationTest {
                 Timestamp.from(createdAt));
     }
 
-    private void insertSnapshotLegacyNullOrg(UUID id, UUID tenant, UUID deviceId,
-            Instant collectedAt, Instant createdAt) {
+    private void assertSnapshotLegacyNullOrgInsertRejectedByV36(UUID id, UUID tenant,
+            UUID deviceId, Instant collectedAt, Instant createdAt) {
+        // Disable the V29 compat trigger so org_id stays the explicit NULL we
+        // pass (proving the V36 CHECK, not the trigger, rejects it). Terminal
+        // assertion (Codex 019e92a7 transaction-hygiene): the failed INSERT
+        // aborts the tx, so there is no ENABLE-TRIGGER finally and nothing runs
+        // after — the @DataJpaTest rollback re-enables the trigger.
         jdbc.execute("ALTER TABLE " + SCHEMA
                 + ".endpoint_outdated_software_snapshots DISABLE TRIGGER USER");
-        try {
-            jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_outdated_software_snapshots "
-                            + "(id, tenant_id, org_id, device_id, schema_version, "
-                            + " supported, probe_complete, upgrade_count, "
-                            + " upgrade_truncated, max_upgrade, source_used, "
-                            + " payload_hash_sha256, collected_at, created_at) "
-                            + "VALUES (?, ?, NULL, ?, 1, true, true, 0, false, 0, "
-                            + "  'winget', ?, ?, ?)",
-                    id, tenant, deviceId, VALID_HASH,
-                    Timestamp.from(collectedAt),
-                    Timestamp.from(createdAt));
-        } finally {
-            jdbc.execute("ALTER TABLE " + SCHEMA
-                    + ".endpoint_outdated_software_snapshots ENABLE TRIGGER USER");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_outdated_software_snapshots "
+                        + "(id, tenant_id, org_id, device_id, schema_version, "
+                        + " supported, probe_complete, upgrade_count, "
+                        + " upgrade_truncated, max_upgrade, source_used, "
+                        + " payload_hash_sha256, collected_at, created_at) "
+                        + "VALUES (?, ?, NULL, ?, 1, true, true, 0, false, 0, "
+                        + "  'winget', ?, ?, ?)",
+                id, tenant, deviceId, VALID_HASH,
+                Timestamp.from(collectedAt),
+                Timestamp.from(createdAt)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(t -> assertThat(rootSqlState(t))
+                        .as("source org_id NULL must be 23514 check_violation")
+                        .isEqualTo("23514"));
+    }
+
+    private static String rootSqlState(Throwable throwable) {
+        Throwable cur = throwable;
+        while (cur != null) {
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                return sqlEx.getSQLState();
+            }
+            cur = cur.getCause();
         }
+        return null;
     }
 }

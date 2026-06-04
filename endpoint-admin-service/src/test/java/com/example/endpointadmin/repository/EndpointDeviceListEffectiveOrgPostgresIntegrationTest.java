@@ -1,6 +1,7 @@
 package com.example.endpointadmin.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.endpointadmin.model.EndpointDevice;
 import java.sql.Timestamp;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -33,9 +35,11 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * <p>Four behavioural assertions (Codex 019e8d1d b3 PG IT minimums):
  * <ol>
  *   <li>Canonical row listed.</li>
- *   <li>Legacy NULL row listed (V29 trigger bypassed + pre-assert).</li>
+ *   <li>Legacy NULL row REJECTED by V36 (C1.5) — CHECK org_id IS NOT NULL
+ *       makes it unconstructable; a trigger-bypass org_id-NULL insert is
+ *       rejected 23514. The OR-fallback read branch stays, dead until A5.</li>
  *   <li>Cross-org rows absent (orgA list MUST NOT contain orgB devices).</li>
- *   <li>Hostname ASC ordering preserved across canonical + legacy mix.</li>
+ *   <li>Hostname ASC ordering preserved across canonical rows.</li>
  * </ol>
  */
 @Testcontainers
@@ -86,23 +90,17 @@ class EndpointDeviceListEffectiveOrgPostgresIntegrationTest {
     }
 
     @Test
-    void legacyNullRow_isListed_andPreservedAsNullByFixture() {
+    void legacyNullRow_orgIdNullInsert_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL listing fixture is replaced by its
+        // invariant proof — a trigger-bypass org_id-NULL insert is rejected
+        // 23514. The OR-fallback branch in findVisibleToOrgOrderByHostnameAsc
+        // is left intact (provably dead until A5 removes it with composite
+        // indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceId = UUID.randomUUID();
-        insertDeviceLegacyNullOrg(deviceId, orgA, "legacy-host");
-
-        Boolean orgIdIsNull = jdbc.queryForObject(
-                "SELECT org_id IS NULL FROM " + SCHEMA + ".endpoint_devices WHERE id = ?",
-                Boolean.class, deviceId);
-        assertThat(orgIdIsNull)
-                .as("legacy NULL fixture pre-assert: V29 trigger bypass held")
-                .isTrue();
-
-        List<EndpointDevice> list = repository.findVisibleToOrgOrderByHostnameAsc(orgA);
-        assertThat(list)
-                .as("legacy NULL row listed via OR fallback branch")
-                .extracting(EndpointDevice::getId)
-                .containsExactly(deviceId);
+        assertDeviceLegacyNullOrgInsertRejectedByV36(deviceId, orgA, "legacy-host");
     }
 
     @Test
@@ -127,24 +125,24 @@ class EndpointDeviceListEffectiveOrgPostgresIntegrationTest {
     }
 
     @Test
-    void hostnameAscOrdering_preservedAcrossCanonicalAndLegacyMix() {
+    void hostnameAscOrdering_preservedAcrossCanonicalRows() {
         UUID orgA = UUID.randomUUID();
-        UUID legacyDeviceB = UUID.randomUUID();
         UUID canonicalDeviceA = UUID.randomUUID();
         UUID canonicalDeviceC = UUID.randomUUID();
 
-        // Three devices in orgA: "alpha" (canonical), "bravo" (legacy NULL),
-        // "charlie" (canonical). The OR fallback must not perturb the
-        // hostname ASC ordering between canonical and legacy rows.
+        // Two canonical devices in orgA: "alpha", "charlie". The
+        // effective-org filter must preserve the hostname ASC ordering.
+        // (Under C1.5/V36 the prior "bravo" legacy-NULL row is no longer
+        // constructable; its rejection is pinned by
+        // legacyNullRow_orgIdNullInsert_isRejectedByV36.)
         insertDeviceCanonical(canonicalDeviceA, orgA, "alpha-host");
-        insertDeviceLegacyNullOrg(legacyDeviceB, orgA, "bravo-host");
         insertDeviceCanonical(canonicalDeviceC, orgA, "charlie-host");
 
         List<EndpointDevice> list = repository.findVisibleToOrgOrderByHostnameAsc(orgA);
         assertThat(list)
-                .as("ordering: alpha < bravo < charlie regardless of canonical/legacy mix")
+                .as("ordering: alpha < charlie across canonical rows")
                 .extracting(EndpointDevice::getHostname)
-                .containsExactly("alpha-host", "bravo-host", "charlie-host");
+                .containsExactly("alpha-host", "charlie-host");
     }
 
     // ───────────────────────── Seed helpers ─────────────────────────
@@ -158,17 +156,33 @@ class EndpointDeviceListEffectiveOrgPostgresIntegrationTest {
                 id, org, org, hostname, now, now);
     }
 
-    private void insertDeviceLegacyNullOrg(UUID id, UUID tenant, String hostname) {
+    private void assertDeviceLegacyNullOrgInsertRejectedByV36(UUID id, UUID tenant, String hostname) {
         Timestamp now = Timestamp.from(Instant.parse("2026-06-03T10:00:00Z"));
+        // Disable the V29 compat trigger so org_id stays the explicit NULL we
+        // pass (proving the V36 CHECK, not the trigger, rejects it). Terminal
+        // assertion (Codex 019e92a7 transaction-hygiene): the failed INSERT
+        // aborts the tx, so there is no ENABLE-TRIGGER finally and nothing runs
+        // after — the @DataJpaTest rollback re-enables the trigger.
         jdbc.execute("ALTER TABLE " + SCHEMA + ".endpoint_devices DISABLE TRIGGER USER");
-        try {
-            jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_devices "
-                            + "(id, tenant_id, org_id, hostname, os_type, status, "
-                            + " created_at, updated_at, version) "
-                            + "VALUES (?, ?, NULL, ?, 'WINDOWS', 'ONLINE', ?, ?, 0)",
-                    id, tenant, hostname, now, now);
-        } finally {
-            jdbc.execute("ALTER TABLE " + SCHEMA + ".endpoint_devices ENABLE TRIGGER USER");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_devices "
+                        + "(id, tenant_id, org_id, hostname, os_type, status, "
+                        + " created_at, updated_at, version) "
+                        + "VALUES (?, ?, NULL, ?, 'WINDOWS', 'ONLINE', ?, ?, 0)",
+                id, tenant, hostname, now, now))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(t -> assertThat(rootSqlState(t))
+                        .as("source org_id NULL must be 23514 check_violation")
+                        .isEqualTo("23514"));
+    }
+
+    private static String rootSqlState(Throwable throwable) {
+        Throwable cur = throwable;
+        while (cur != null) {
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                return sqlEx.getSQLState();
+            }
+            cur = cur.getCause();
         }
+        return null;
     }
 }

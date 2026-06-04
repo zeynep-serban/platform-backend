@@ -2,6 +2,7 @@ package com.example.endpointadmin.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.endpointadmin.model.EndpointOutdatedSoftwareSnapshot;
 import java.sql.Timestamp;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -52,14 +54,20 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *
  * <p>Critical: the inner correlated subquery does NOT add a
  * {@code (newer.org_id = s.org_id OR newer.org_id IS NULL)} branch.
- * Under V30 {@code CHECK (org_id IS NULL OR org_id = tenant_id)},
- * fixed {@code tenant_id = X} already pins the inner candidates to
- * the same effective-org bucket (canonical {@code org_id = X} or
- * legacy {@code org_id IS NULL}). Adding such a branch would falsely
- * miss the "newer canonical row supersedes older legacy NULL row"
- * case for the same (org, device) — the
- * {@link #fleet_sameDeviceMixedRowAge_newerCanonicalSupersedesOlderLegacyNull()}
- * test pins this.
+ * Fixed {@code tenant_id = X} already pins the inner candidates to
+ * the same effective-org bucket. The production @Query keeps the
+ * OR-fallback so the older canonical-vs-canonical supersession case
+ * remains correct — the
+ * {@link #fleet_sameDeviceMixedRowAge_newerSupersedesOlder()} test
+ * pins the newest-per-device truncation.
+ *
+ * <p>C1.5/V36 note: the prior "newer canonical supersedes older legacy
+ * NULL" fixture is no longer constructable — CHECK org_id IS NOT NULL
+ * makes {@code org_id IS NULL} physically unconstructable on the source
+ * tables; a trigger-bypass org_id-NULL insert is rejected 23514. The
+ * pure legacy-NULL visibility fixtures are converted to that invariant
+ * proof; the supersession test keeps canonical-vs-canonical ordering
+ * coverage. The OR-fallback read branch stays, dead until A5.
  *
  * <p>Method 5 also retains the BE-022Q regression guard — the
  * {@code lower(bytea)} grammar bug from Halildeu/platform-backend#330.
@@ -129,33 +137,23 @@ class EndpointOutdatedSoftwareSnapshotPayloadHashAndFleetEffectiveOrgPostgresInt
                 .containsExactly(snapshotId);
     }
 
-    // ───────────────────────── Payload-hash assertion 2: legacy NULL row matching hash ─────────────────────────
+    // ───────────────────────── Payload-hash assertion 2: legacy NULL insert REJECTED by V36 ─────────────────────────
 
     @Test
-    void payloadHash_legacyNullRowMatchingHash_isReturnedViaOrFallback() {
+    void payloadHash_legacyNullOrgInsert_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL payload-hash OR-fallback fixture is replaced
+        // by its invariant proof — a trigger-bypass org_id-NULL insert is
+        // rejected 23514. The OR-fallback branch in
+        // findByOrgAndDeviceAndPayloadHash is left intact (provably dead until
+        // A5 removes it with composite indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceId = ensureDevice(orgA);
         UUID snapshotId = UUID.randomUUID();
-        insertSnapshotLegacyNullOrg(snapshotId, orgA, deviceId, HASH_A,
+        assertSnapshotLegacyNullOrgInsertRejectedByV36(snapshotId, orgA, deviceId, HASH_A,
                 Instant.parse("2026-06-03T10:00:00Z"),
                 Instant.parse("2026-06-03T10:00:01Z"));
-
-        Boolean orgIdIsNull = jdbc.queryForObject(
-                "SELECT org_id IS NULL FROM " + SCHEMA
-                        + ".endpoint_outdated_software_snapshots WHERE id = ?",
-                Boolean.class, snapshotId);
-        assertThat(orgIdIsNull)
-                .as("legacy NULL fixture pre-assert: V29 trigger bypass held")
-                .isTrue();
-
-        List<EndpointOutdatedSoftwareSnapshot> hits = repository
-                .findByOrgAndDeviceAndPayloadHash(
-                        orgA, deviceId, HASH_A, PageRequest.of(0, 1));
-
-        assertThat(hits)
-                .as("legacy NULL row reachable via OR-fallback branch (payload-hash probe)")
-                .extracting(EndpointOutdatedSoftwareSnapshot::getId)
-                .containsExactly(snapshotId);
     }
 
     // ───────────────────────── Payload-hash assertion 3: cross-org miss ─────────────────────────
@@ -230,23 +228,23 @@ class EndpointOutdatedSoftwareSnapshotPayloadHashAndFleetEffectiveOrgPostgresInt
                 .containsExactly(snapshotId);
     }
 
-    // ───────────────────────── Fleet assertion 2: legacy NULL row visible ─────────────────────────
+    // ───────────────────────── Fleet assertion 2: legacy NULL insert REJECTED by V36 ─────────────────────────
 
     @Test
-    void fleet_legacyNullRow_visibleViaOrFallback() {
+    void fleet_legacyNullOrgInsert_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL fleet OR-fallback fixture is replaced by its
+        // invariant proof — a trigger-bypass org_id-NULL insert is rejected
+        // 23514. The OR-fallback outer filter in findLatestPerDeviceForOrg is
+        // left intact (provably dead until A5 removes it with composite
+        // indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceId = ensureDevice(orgA);
         UUID snapshotId = UUID.randomUUID();
-        insertSnapshotLegacyNullOrg(snapshotId, orgA, deviceId, HASH_A,
+        assertSnapshotLegacyNullOrgInsertRejectedByV36(snapshotId, orgA, deviceId, HASH_A,
                 Instant.parse("2026-06-03T10:00:00Z"),
                 Instant.parse("2026-06-03T10:00:01Z"));
-
-        List<EndpointOutdatedSoftwareSnapshot> fleet = repository
-                .findLatestPerDeviceForOrg(orgA, PageRequest.of(0, 50));
-
-        assertThat(fleet)
-                .extracting(EndpointOutdatedSoftwareSnapshot::getId)
-                .containsExactly(snapshotId);
     }
 
     // ───────────────────────── Fleet assertion 3: cross-org isolation ─────────────────────────
@@ -275,26 +273,25 @@ class EndpointOutdatedSoftwareSnapshotPayloadHashAndFleetEffectiveOrgPostgresInt
                 .containsExactly(snapshotA);
     }
 
-    // ───────────────────────── Fleet assertion 4: critical — newer canonical supersedes older legacy NULL (inner subquery org-branch absence proof) ─────────────────────────
+    // ───────────────────────── Fleet assertion 4: newest-per-device truncation (same device, two canonical rows) ─────────────────────────
 
     @Test
-    void fleet_sameDeviceMixedRowAge_newerCanonicalSupersedesOlderLegacyNull() {
+    void fleet_sameDeviceMixedRowAge_newerSupersedesOlder() {
         UUID orgA = UUID.randomUUID();
         UUID deviceId = ensureDevice(orgA);
 
-        // Older legacy NULL row + newer canonical row, SAME (org, device).
-        // The "newer per device" rule must surface ONLY the canonical row.
-        // If the inner correlated NOT EXISTS subquery had falsely added
-        // (newer.org_id = s.org_id OR newer.org_id IS NULL) branch, the
-        // older legacy row (s.org_id IS NULL) wouldn't see the newer
-        // canonical row as superseding (newer.org_id = orgA ≠ s.org_id
-        // IS NULL) and would slip into the result set as a stale latest.
-        UUID legacyOlder = UUID.randomUUID();
-        UUID canonicalNewer = UUID.randomUUID();
-        insertSnapshotLegacyNullOrg(legacyOlder, orgA, deviceId, HASH_A,
+        // Older + newer canonical rows, SAME (org, device). The "newer per
+        // device" rule must surface ONLY the newer row. Under C1.5/V36 the
+        // prior older legacy-NULL row is no longer constructable; its
+        // rejection is pinned by fleet_legacyNullOrgInsert_isRejectedByV36.
+        // Two canonical rows retain the inner-correlated NOT EXISTS
+        // newest-per-device truncation coverage.
+        UUID older = UUID.randomUUID();
+        UUID newer = UUID.randomUUID();
+        insertSnapshotCanonical(older, orgA, deviceId, HASH_A,
                 Instant.parse("2026-06-03T09:00:00Z"),
                 Instant.parse("2026-06-03T09:00:01Z"));
-        insertSnapshotCanonical(canonicalNewer, orgA, deviceId, HASH_B,
+        insertSnapshotCanonical(newer, orgA, deviceId, HASH_B,
                 Instant.parse("2026-06-03T10:00:00Z"),
                 Instant.parse("2026-06-03T10:00:01Z"));
 
@@ -302,13 +299,11 @@ class EndpointOutdatedSoftwareSnapshotPayloadHashAndFleetEffectiveOrgPostgresInt
                 .findLatestPerDeviceForOrg(orgA, PageRequest.of(0, 50));
 
         assertThat(fleet)
-                .as("fleet must return ONLY the newer canonical row for "
-                        + "the same (org, device) — proves the inner correlated "
-                        + "NOT EXISTS subquery does not falsely add an "
-                        + "(orgId or orgId is null) branch that would let "
-                        + "the older legacy NULL row survive as a stale latest")
+                .as("fleet must return ONLY the newer row for the same "
+                        + "(org, device) — proves the inner correlated NOT EXISTS "
+                        + "subquery truncates to the newest per device")
                 .extracting(EndpointOutdatedSoftwareSnapshot::getId)
-                .containsExactly(canonicalNewer);
+                .containsExactly(newer);
     }
 
     // ───────────────────────── Fleet assertion 5: cap+1 overCap behavior preserved ─────────────────────────
@@ -371,24 +366,39 @@ class EndpointOutdatedSoftwareSnapshotPayloadHashAndFleetEffectiveOrgPostgresInt
                 Timestamp.from(createdAt));
     }
 
-    private void insertSnapshotLegacyNullOrg(UUID id, UUID tenant, UUID deviceId,
-            String payloadHash, Instant collectedAt, Instant createdAt) {
+    private void assertSnapshotLegacyNullOrgInsertRejectedByV36(UUID id, UUID tenant,
+            UUID deviceId, String payloadHash, Instant collectedAt, Instant createdAt) {
+        // Disable the V29 compat trigger so org_id stays the explicit NULL we
+        // pass (proving the V36 CHECK, not the trigger, rejects it). Terminal
+        // assertion (Codex 019e92a7 transaction-hygiene): the failed INSERT
+        // aborts the tx, so there is no ENABLE-TRIGGER finally and nothing runs
+        // after — the @DataJpaTest rollback re-enables the trigger.
         jdbc.execute("ALTER TABLE " + SCHEMA
                 + ".endpoint_outdated_software_snapshots DISABLE TRIGGER USER");
-        try {
-            jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_outdated_software_snapshots "
-                            + "(id, tenant_id, org_id, device_id, schema_version, "
-                            + " supported, probe_complete, upgrade_count, "
-                            + " upgrade_truncated, max_upgrade, source_used, "
-                            + " payload_hash_sha256, collected_at, created_at) "
-                            + "VALUES (?, ?, NULL, ?, 1, true, true, 0, false, 0, "
-                            + "  'winget', ?, ?, ?)",
-                    id, tenant, deviceId, payloadHash,
-                    Timestamp.from(collectedAt),
-                    Timestamp.from(createdAt));
-        } finally {
-            jdbc.execute("ALTER TABLE " + SCHEMA
-                    + ".endpoint_outdated_software_snapshots ENABLE TRIGGER USER");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_outdated_software_snapshots "
+                        + "(id, tenant_id, org_id, device_id, schema_version, "
+                        + " supported, probe_complete, upgrade_count, "
+                        + " upgrade_truncated, max_upgrade, source_used, "
+                        + " payload_hash_sha256, collected_at, created_at) "
+                        + "VALUES (?, ?, NULL, ?, 1, true, true, 0, false, 0, "
+                        + "  'winget', ?, ?, ?)",
+                id, tenant, deviceId, payloadHash,
+                Timestamp.from(collectedAt),
+                Timestamp.from(createdAt)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(t -> assertThat(rootSqlState(t))
+                        .as("source org_id NULL must be 23514 check_violation")
+                        .isEqualTo("23514"));
+    }
+
+    private static String rootSqlState(Throwable throwable) {
+        Throwable cur = throwable;
+        while (cur != null) {
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                return sqlEx.getSQLState();
+            }
+            cur = cur.getCause();
         }
+        return null;
     }
 }

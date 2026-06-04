@@ -1,6 +1,7 @@
 package com.example.endpointadmin.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.endpointadmin.model.ComplianceDecision;
 import com.example.endpointadmin.model.EndpointComplianceEvaluation;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -34,15 +36,15 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *     AND e.device_id = :deviceId
  * </pre>
  *
- * <p>Six behavioural assertions:
+ * <p>Behavioural assertions:
  * <ol>
  *   <li>Canonical row read — both columns equal, repository returns it
  *       via both methods (Page + Optional latest).</li>
- *   <li>Legacy NULL row read — V29 trigger temporarily disabled to seed
- *       {@code org_id IS NULL AND tenant_id = orgA}; both methods return
- *       it via the fallback OR branch.</li>
- *   <li>Legacy NULL fixture pre-assert — the seeded row truly has
- *       {@code org_id IS NULL} (trigger bypass held).</li>
+ *   <li>Legacy NULL row REJECTED by V36 (C1.5) — CHECK org_id IS NOT NULL
+ *       makes {@code org_id IS NULL} physically unconstructable on the
+ *       source tables; a trigger-bypass org_id-NULL insert is rejected
+ *       23514. The OR-fallback read branch (both methods) stays, dead
+ *       until A5.</li>
  *   <li>Cross-org negative — orgA filter returns zero orgB rows.</li>
  *   <li>Latest ordering — {@code findFirst…} returns the latest
  *       evaluatedAt row when multiple exist for the same (org, device).</li>
@@ -109,37 +111,22 @@ class EndpointComplianceEvaluationEffectiveOrgPostgresIntegrationTest {
                 .containsExactly(evalId);
     }
 
-    // ───────────────────────── Assertions 2 + 3: legacy NULL fixture ─────────────────────────
+    // ───────────────────────── Assertion 2: legacy NULL insert REJECTED by V36 ─────────────────────────
 
     @Test
-    void legacyNullRow_orgIdNull_isReturnedViaTenantIdFallback_andPreservedAsNullByFixture() {
+    void legacyNullRow_orgIdNullInsert_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL visibility fixture (findFirst + Page
+        // OR-fallback reads + pre-assert) is replaced by its invariant
+        // proof — a trigger-bypass org_id-NULL insert is rejected 23514.
+        // The OR-fallback branch in the read @Query is left intact (provably
+        // dead until A5 removes it with composite indexes).
         UUID orgA = UUID.randomUUID();
         UUID device = UUID.randomUUID();
         seedDevice(device, orgA, "legacy-device");
-        UUID legacyEvalId = seedEvaluationLegacyNullOrg(device, orgA,
+        assertEvaluationLegacyNullOrgInsertRejectedByV36(device, orgA,
                 Instant.parse("2026-06-03T10:00:00Z"), ComplianceDecision.COMPLIANT);
-
-        // Pre-assert: the seed actually persisted with org_id NULL.
-        Boolean orgIdIsNull = jdbc.queryForObject(
-                "SELECT org_id IS NULL FROM " + SCHEMA + ".endpoint_compliance_evaluations WHERE id = ?",
-                Boolean.class, legacyEvalId);
-        assertThat(orgIdIsNull)
-                .as("legacy NULL fixture pre-assert: row must have org_id IS NULL "
-                        + "(V29 trigger bypassed; otherwise the fallback OR branch "
-                        + "is not actually being exercised by the rest of the test)")
-                .isTrue();
-
-        Optional<EndpointComplianceEvaluation> latest = repository
-                .findFirstVisibleToOrgAndDeviceIdOrderByEvaluatedAtDesc(orgA, device);
-        Page<EndpointComplianceEvaluation> page = repository
-                .findVisibleToOrgAndDeviceIdOrderByEvaluatedAtDesc(orgA, device, PageRequest.of(0, 10));
-
-        assertThat(latest).isPresent()
-                .hasValueSatisfying(e -> assertThat(e.getId()).isEqualTo(legacyEvalId));
-        assertThat(page.getContent())
-                .as("legacy NULL row reachable via OR fallback branch")
-                .extracting(EndpointComplianceEvaluation::getId)
-                .containsExactly(legacyEvalId);
     }
 
     // ───────────────────────── Assertion 4: cross-org negative ─────────────────────────
@@ -245,25 +232,40 @@ class EndpointComplianceEvaluationEffectiveOrgPostgresIntegrationTest {
         return id;
     }
 
-    private UUID seedEvaluationLegacyNullOrg(UUID deviceId, UUID org, Instant evaluatedAt,
-                                             ComplianceDecision decision) {
+    private void assertEvaluationLegacyNullOrgInsertRejectedByV36(
+            UUID deviceId, UUID org, Instant evaluatedAt, ComplianceDecision decision) {
         UUID id = UUID.randomUUID();
         Timestamp now = Timestamp.from(Instant.parse("2026-06-03T09:00:00Z"));
         Timestamp ts = Timestamp.from(evaluatedAt);
+        // Disable the V29 compat trigger so org_id stays the explicit NULL we
+        // pass (proving the V36 CHECK, not the trigger, rejects it). Terminal
+        // assertion (Codex 019e92a7 transaction-hygiene): the failed INSERT
+        // aborts the tx, so there is no ENABLE-TRIGGER finally and nothing runs
+        // after — the @DataJpaTest rollback re-enables the trigger.
         jdbc.execute("ALTER TABLE " + SCHEMA + ".endpoint_compliance_evaluations DISABLE TRIGGER USER");
-        try {
-            jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_compliance_evaluations "
-                            + "(id, tenant_id, org_id, device_id, evaluated_at, decision, "
-                            + " reasons, blocking_reasons, warnings, evidence, "
-                            + " catalog_policy_hash, inventory_snapshot_id, created_at) "
-                            + "VALUES (?, ?, NULL, ?, ?, ?, "
-                            + " '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, "
-                            + " ?, NULL, ?)",
-                    id, org, deviceId, ts, decision.name(),
-                    "b".repeat(64), now);
-        } finally {
-            jdbc.execute("ALTER TABLE " + SCHEMA + ".endpoint_compliance_evaluations ENABLE TRIGGER USER");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_compliance_evaluations "
+                        + "(id, tenant_id, org_id, device_id, evaluated_at, decision, "
+                        + " reasons, blocking_reasons, warnings, evidence, "
+                        + " catalog_policy_hash, inventory_snapshot_id, created_at) "
+                        + "VALUES (?, ?, NULL, ?, ?, ?, "
+                        + " '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, "
+                        + " ?, NULL, ?)",
+                id, org, deviceId, ts, decision.name(),
+                "b".repeat(64), now))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(t -> assertThat(rootSqlState(t))
+                        .as("source org_id NULL must be 23514 check_violation")
+                        .isEqualTo("23514"));
+    }
+
+    private static String rootSqlState(Throwable throwable) {
+        Throwable cur = throwable;
+        while (cur != null) {
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                return sqlEx.getSQLState();
+            }
+            cur = cur.getCause();
         }
-        return id;
+        return null;
     }
 }

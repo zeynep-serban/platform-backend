@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -14,6 +15,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Postgres-only verification of V34 (Faz 21.1 Cleanup C1 — Source Org-Key
@@ -24,13 +26,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  * org_id)}. It does NOT add a non-null CHECK, rewrite FKs, change read paths,
  * or drop tenant_id.
  *
- * <p>Why no non-null CHECK (CI-driven correction): a {@code CHECK (org_id IS
- * NOT NULL)} would make the legacy org_id-NULL row unconstructable and break
- * the PR2b-iv {@code *EffectiveOrgPostgresIntegrationTest} suite. The non-null
- * CHECK and the OR-fallback read removal are one coupled invariant flip and
- * ship together later. This test therefore <b>machine-proves V34 did NOT flip
- * that invariant</b>: a trigger-disabled {@code org_id = NULL} insert still
- * SUCCEEDS.
+ * <p>Why V34 itself adds no non-null CHECK: a {@code CHECK (org_id IS NOT
+ * NULL)} would make the legacy org_id-NULL row unconstructable. V34 stays
+ * additive and defers the non-null flip. That flip later landed in <b>V36
+ * (C1.5)</b>. Because Testcontainers applies the FULL chain (V1..V36), the
+ * cumulative schema under test now carries V36's CHECK — so the trigger-bypass
+ * {@code org_id = NULL} insert below is REJECTED 23514 (the "flips to a
+ * rejection test in the same PR" the original V34 guard anticipated; V36 is
+ * that PR). The V34-additive assertions (UNIQUE / PK intact / canonical
+ * insert) remain unchanged and continue to prove V34's own bounded scope.
  *
  * <p>Assertions:
  * <ol>
@@ -38,8 +42,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *     <li>Pre-existing {@code PK(id)} + {@code UNIQUE(id, tenant_id)} on
  *         endpoint_devices are intact (V34 is purely additive).</li>
  *     <li>A canonical insert (trigger fills org_id) still succeeds.</li>
- *     <li>A trigger-disabled {@code org_id = NULL} insert still SUCCEEDS —
- *         V34 did not prematurely flip the non-null invariant.</li>
+ *     <li>A trigger-disabled {@code org_id = NULL} insert is REJECTED 23514
+ *         by the cumulative V36 CHECK (org_id IS NOT NULL).</li>
  * </ol>
  */
 @Testcontainers
@@ -148,31 +152,42 @@ class V34OrgIdSourceFoundationPostgresIntegrationTest {
     }
 
     @Test
-    void legacyNullOrgIdInsert_stillSucceeds_v34DidNotFlipNonNullInvariant() {
-        // The critical guard (Codex 019e919e): V34 must NOT add a non-null
-        // CHECK. Disable the V29 compat trigger and insert org_id = NULL; it
-        // must STILL SUCCEED (the legacy/compat scenario the OR-fallback read
-        // path + the *EffectiveOrg test suite still depend on). If a future
-        // PR flips the invariant, THIS test flips to a rejection test in the
-        // same PR. Own @Test so the disabled trigger is restored by
-        // @DataJpaTest method-end rollback.
+    void legacyNullOrgIdInsert_nowRejectedByCumulativeV36Check() {
+        // The original V34 guard (Codex 019e919e) proved V34 itself did NOT
+        // add a non-null CHECK, asserting this trigger-bypass org_id = NULL
+        // insert STILL SUCCEEDED — and explicitly anticipated: "If a future PR
+        // flips the invariant, THIS test flips to a rejection test in the same
+        // PR." V36 (C1.5) is that PR. Testcontainers applies the FULL chain
+        // (V1..V36), so the cumulative schema now carries V36's
+        // CHECK (org_id IS NOT NULL); the trigger-bypass NULL insert is
+        // REJECTED 23514. Terminal assertion (Codex 019e92a7
+        // transaction-hygiene): the failed INSERT aborts the tx, so nothing
+        // runs after it; @DataJpaTest rollback re-enables the trigger.
         UUID tenantId = UUID.randomUUID();
         String hostname = "v34-legacy-null-" + tenantId;
 
         jdbcTemplate.execute(
                 "ALTER TABLE endpoint_devices DISABLE TRIGGER endpoint_devices_org_id_compat");
 
-        jdbcTemplate.update(
+        assertThatThrownBy(() -> jdbcTemplate.update(
                 "INSERT INTO endpoint_devices "
                         + "(id, tenant_id, org_id, hostname, os_type) "
                         + "VALUES (gen_random_uuid(), ?, NULL, ?, 'LINUX')",
-                tenantId, hostname);
+                tenantId, hostname))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(t -> assertThat(rootSqlState(t))
+                        .as("source org_id NULL must be 23514 check_violation (cumulative V36)")
+                        .isEqualTo("23514"));
+    }
 
-        UUID orgId = jdbcTemplate.queryForObject(
-                "SELECT org_id FROM endpoint_devices WHERE hostname = ?",
-                UUID.class, hostname);
-        assertThat(orgId)
-                .as("V34 must NOT forbid org_id NULL — legacy/compat insert must still succeed")
-                .isNull();
+    private static String rootSqlState(Throwable throwable) {
+        Throwable cur = throwable;
+        while (cur != null) {
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                return sqlEx.getSQLState();
+            }
+            cur = cur.getCause();
+        }
+        return null;
     }
 }

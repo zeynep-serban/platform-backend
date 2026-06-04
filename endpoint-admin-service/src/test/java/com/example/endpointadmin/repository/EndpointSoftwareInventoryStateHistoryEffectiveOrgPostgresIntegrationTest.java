@@ -1,6 +1,7 @@
 package com.example.endpointadmin.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.endpointadmin.model.EndpointSoftwareInventoryStateHistory;
 import java.sql.Timestamp;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -51,8 +53,10 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *   <li>Canonical row read (both methods): {@code org_id = tenant_id}
  *       row returned by the effective-org filter for both the LIMIT-2
  *       latest-then-history method and the paged history method.</li>
- *   <li>Legacy NULL row read (both methods + V29 trigger bypass +
- *       pre-assert).</li>
+ *   <li>Legacy NULL row REJECTED by V36 (C1.5) — CHECK org_id IS NOT NULL
+ *       makes it unconstructable; a trigger-bypass org_id-NULL insert is
+ *       rejected 23514. The OR-fallback read branch (both methods) stays,
+ *       dead until A5.</li>
  *   <li>Cross-org negative: orgB's row is never returned for orgA query,
  *       even when both orgs have a row for the same device id (cross-org
  *       device id collision is rare in production but the predicate must
@@ -62,9 +66,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *       with identical captured_at + created_at; the head row must be the
  *       lexicographically largest UUID.</li>
  *   <li>Page count over the effective-org predicate: countQuery sibling
- *       computes total over the OR-fallback, not the tenant-only branch.
- *       Verified with mixed canonical + legacy NULL rows; total must be
- *       the sum of both shapes.</li>
+ *       computes total over the predicate. Verified with two canonical
+ *       rows (the prior legacy-NULL second row is unconstructable under
+ *       C1.5/V36); total must be the sum.</li>
  * </ol>
  */
 @Testcontainers
@@ -136,44 +140,23 @@ class EndpointSoftwareInventoryStateHistoryEffectiveOrgPostgresIntegrationTest {
         assertThat(page.getTotalElements()).isEqualTo(1L);
     }
 
-    // ───────────────────────── Assertion 2: legacy NULL row read (both methods + V29 bypass) ─────────────────────────
+    // ───────────────────────── Assertion 2: legacy NULL insert REJECTED by V36 ─────────────────────────
 
     @Test
-    void legacyNullRow_orgIdNull_visibleViaTenantIdFallback_bothReads() {
+    void legacyNullRow_orgIdNullInsert_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL visibility fixture (latest-then-history +
+        // Page + countQuery OR-fallback reads) is replaced by its invariant
+        // proof — a trigger-bypass org_id-NULL insert is rejected 23514. The
+        // OR-fallback read branches are left intact (provably dead until A5
+        // removes them with composite indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceId = ensureDevice(orgA);
         UUID historyId = UUID.randomUUID();
-        insertHistoryLegacyNullOrg(historyId, orgA, deviceId,
+        assertHistoryLegacyNullOrgInsertRejectedByV36(historyId, orgA, deviceId,
                 Instant.parse("2026-06-03T10:00:00Z"),
                 Instant.parse("2026-06-03T10:00:01Z"));
-
-        // Pre-assert: legacy fixture truly persisted with org_id NULL.
-        Boolean orgIdIsNull = jdbc.queryForObject(
-                "SELECT org_id IS NULL FROM " + SCHEMA
-                        + ".endpoint_software_inventory_state_history WHERE id = ?",
-                Boolean.class, historyId);
-        assertThat(orgIdIsNull)
-                .as("legacy NULL fixture pre-assert: V29 trigger bypass held")
-                .isTrue();
-
-        List<EndpointSoftwareInventoryStateHistory> latestTwo = repository
-                .findVisibleToOrgAndDeviceIdOrderByCapturedAtDescCreatedAtDescIdDesc(
-                        orgA, deviceId, PageRequest.of(0, 2));
-        Page<EndpointSoftwareInventoryStateHistory> page = repository
-                .findVisibleToOrgAndDeviceId(
-                        orgA, deviceId, PageRequest.of(0, 10, HISTORY_SORT));
-
-        assertThat(latestTwo)
-                .as("legacy NULL row reachable via OR-fallback branch (latest-then-history)")
-                .extracting(EndpointSoftwareInventoryStateHistory::getId)
-                .containsExactly(historyId);
-        assertThat(page.getContent())
-                .as("legacy NULL row reachable via OR-fallback branch (Page-history)")
-                .extracting(EndpointSoftwareInventoryStateHistory::getId)
-                .containsExactly(historyId);
-        assertThat(page.getTotalElements())
-                .as("countQuery sibling computes over the OR-fallback predicate")
-                .isEqualTo(1L);
     }
 
     // ───────────────────────── Assertion 3: cross-org negative ─────────────────────────
@@ -243,25 +226,27 @@ class EndpointSoftwareInventoryStateHistoryEffectiveOrgPostgresIntegrationTest {
                 .containsExactly(idHigh);
     }
 
-    // ───────────────────────── Assertion 5: page total over OR-fallback ─────────────────────────
+    // ───────────────────────── Assertion 5: page total + content sort over canonical rows ─────────────────────────
 
     @Test
-    void pageHistory_countQuery_sumsBothCanonicalAndLegacyRowsForSameOrg() {
+    void pageHistory_countQuery_sumsCanonicalRowsForSameOrg() {
         UUID orgA = UUID.randomUUID();
         UUID deviceId = ensureDevice(orgA);
 
-        // Codex 019e8dbb post-impl REVISE absorb #3 — disjoint timestamps
-        // so the page test asserts not only the count over the OR-fallback
-        // but also that the caller-supplied Pageable Sort
-        // (captured_at DESC, created_at DESC, id DESC) is applied to the
-        // content side of the Page. Canonical row is newer; legacy NULL
-        // row is older — newer first under the HISTORY_SORT.
-        UUID canonical = UUID.randomUUID();
-        UUID legacy = UUID.randomUUID();
-        insertHistoryCanonical(canonical, orgA, deviceId,
+        // Codex 019e8dbb post-impl REVISE absorb #3 — disjoint timestamps so
+        // the page test asserts not only the count but also that the
+        // caller-supplied Pageable Sort (captured_at DESC, created_at DESC,
+        // id DESC) is applied to the content side of the Page. Under C1.5/V36
+        // the prior legacy-NULL second row is no longer constructable; its
+        // rejection is pinned by legacyNullRow_orgIdNullInsert_isRejectedByV36.
+        // Two canonical rows (newer + older) retain the count + content-sort
+        // coverage.
+        UUID newer = UUID.randomUUID();
+        UUID older = UUID.randomUUID();
+        insertHistoryCanonical(newer, orgA, deviceId,
                 Instant.parse("2026-06-03T10:00:00Z"),
                 Instant.parse("2026-06-03T10:00:01Z"));
-        insertHistoryLegacyNullOrg(legacy, orgA, deviceId,
+        insertHistoryCanonical(older, orgA, deviceId,
                 Instant.parse("2026-06-03T09:00:00Z"),
                 Instant.parse("2026-06-03T09:00:01Z"));
 
@@ -271,13 +256,13 @@ class EndpointSoftwareInventoryStateHistoryEffectiveOrgPostgresIntegrationTest {
 
         assertThat(page.getContent())
                 .as("page returns rows in HISTORY_SORT order: newer canonical "
-                        + "first, older legacy NULL second — proves the "
-                        + "Pageable Sort is applied to the content side and "
-                        + "is not silently dropped by the countQuery sibling")
+                        + "first, older canonical second — proves the Pageable "
+                        + "Sort is applied to the content side and is not "
+                        + "silently dropped by the countQuery sibling")
                 .extracting(EndpointSoftwareInventoryStateHistory::getId)
-                .containsExactly(canonical, legacy);
+                .containsExactly(newer, older);
         assertThat(page.getTotalElements())
-                .as("countQuery sibling totals over the OR-fallback predicate")
+                .as("countQuery sibling totals over the effective-org predicate")
                 .isEqualTo(2L);
     }
 
@@ -317,27 +302,40 @@ class EndpointSoftwareInventoryStateHistoryEffectiveOrgPostgresIntegrationTest {
                 Timestamp.from(createdAt));
     }
 
-    private void insertHistoryLegacyNullOrg(UUID id, UUID tenant, UUID deviceId,
-            Instant capturedAt, Instant createdAt) {
-        // Bypass V29 trigger so the row persists with org_id IS NULL
-        // (a true pre-PR1 / legacy shape).
+    private void assertHistoryLegacyNullOrgInsertRejectedByV36(UUID id, UUID tenant,
+            UUID deviceId, Instant capturedAt, Instant createdAt) {
+        // Disable the V29 compat trigger so org_id stays the explicit NULL we
+        // pass (proving the V36 CHECK, not the trigger, rejects it). Terminal
+        // assertion (Codex 019e92a7 transaction-hygiene): the failed INSERT
+        // aborts the tx, so there is no ENABLE-TRIGGER finally and nothing runs
+        // after — the @DataJpaTest rollback re-enables the trigger.
         jdbc.execute("ALTER TABLE " + SCHEMA
                 + ".endpoint_software_inventory_state_history DISABLE TRIGGER USER");
-        try {
-            jdbc.update("INSERT INTO " + SCHEMA
-                            + ".endpoint_software_inventory_state_history "
-                            + "(id, tenant_id, org_id, device_id, schema_version, "
-                            + " app_count, apps_digest_hash, apps_digest, "
-                            + " captured_at, created_at) "
-                            + "VALUES (?, ?, NULL, ?, 1, 0, "
-                            + "  '0000000000000000000000000000000000000000000000000000000000000000', "
-                            + "  CAST('[]' AS jsonb), ?, ?)",
-                    id, tenant, deviceId,
-                    Timestamp.from(capturedAt),
-                    Timestamp.from(createdAt));
-        } finally {
-            jdbc.execute("ALTER TABLE " + SCHEMA
-                    + ".endpoint_software_inventory_state_history ENABLE TRIGGER USER");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO " + SCHEMA
+                        + ".endpoint_software_inventory_state_history "
+                        + "(id, tenant_id, org_id, device_id, schema_version, "
+                        + " app_count, apps_digest_hash, apps_digest, "
+                        + " captured_at, created_at) "
+                        + "VALUES (?, ?, NULL, ?, 1, 0, "
+                        + "  '0000000000000000000000000000000000000000000000000000000000000000', "
+                        + "  CAST('[]' AS jsonb), ?, ?)",
+                id, tenant, deviceId,
+                Timestamp.from(capturedAt),
+                Timestamp.from(createdAt)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(t -> assertThat(rootSqlState(t))
+                        .as("source org_id NULL must be 23514 check_violation")
+                        .isEqualTo("23514"));
+    }
+
+    private static String rootSqlState(Throwable throwable) {
+        Throwable cur = throwable;
+        while (cur != null) {
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                return sqlEx.getSQLState();
+            }
+            cur = cur.getCause();
         }
+        return null;
     }
 }

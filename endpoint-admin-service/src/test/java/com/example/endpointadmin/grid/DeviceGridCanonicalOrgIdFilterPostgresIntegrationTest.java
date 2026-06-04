@@ -1,6 +1,7 @@
 package com.example.endpointadmin.grid;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -115,38 +117,19 @@ class DeviceGridCanonicalOrgIdFilterPostgresIntegrationTest {
                 .anyMatch(r -> deviceCanon.equals(r.get("device_id")));
     }
 
-    // ───────────────────────── Assertions 2 + 3: legacy NULL fixture ─────────────────────────
+    // ───────────────────────── Assertion 2: legacy NULL fixture rejected by V36 ─────────────────────────
 
     @Test
-    void legacyNullRow_orgIdNull_isReturnedViaTenantIdFallback_andPreservedAsNullByFixture() {
+    void legacyNullRow_orgIdNullInsert_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on endpoint_devices (CHECK org_id IS NOT NULL). The
+        // pre-V36 legacy-NULL grid-visibility fixture is replaced by its
+        // invariant proof — a trigger-bypass org_id-NULL insert is rejected
+        // 23514. The grid's OR-fallback source filter stays intact (provably
+        // dead until A5 removes it with composite org_id mirror indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceLegacy = UUID.randomUUID();
-        // Seed a legacy-shaped row: org_id IS NULL, tenant_id = orgA.
-        // V29 trigger would silently compensate by filling org_id from
-        // tenant_id, defeating the test. So we temporarily disable both
-        // INSERT and UPDATE firing on endpoint_devices, raw-INSERT a NULL
-        // org_id, then re-enable. The "legacy NULL" simulation now stands.
-        insertDeviceLegacyNullOrg(deviceLegacy, orgA, "legacy-null-device");
-
-        // Pre-assertion (Codex 019e8cd4 — null-org fixture pre-assert):
-        // the SEED actually persisted with org_id IS NULL. If V29 trigger
-        // silently compensated the INSERT path, the rest of the test would
-        // pass trivially via the canonical branch of the OR — but this
-        // assertion would fail first and flag the regression.
-        Boolean orgIdIsNull = jdbc.queryForObject(
-                "SELECT org_id IS NULL FROM " + SCHEMA + ".endpoint_devices WHERE id = ?",
-                Boolean.class, deviceLegacy);
-        assertThat(orgIdIsNull)
-                .as("legacy fixture pre-assert: row must have org_id IS NULL "
-                        + "(trigger disable held; if false then trigger silently filled "
-                        + "org_id and the legacy OR branch is not actually being tested)")
-                .isTrue();
-
-        DeviceGridQueryResponse resp = service().query(orgA, emptyReq());
-
-        assertThat(resp.rows())
-                .as("orgA effective-org filter returns the legacy NULL row via tenant_id fallback")
-                .anyMatch(r -> deviceLegacy.equals(r.get("device_id")));
+        assertDeviceLegacyNullOrgInsertRejectedByV36(deviceLegacy, orgA, "legacy-null-device");
     }
 
     // ───────────────────────── Assertion 4: cross-tenant negative ─────────────────────────
@@ -248,22 +231,34 @@ class DeviceGridCanonicalOrgIdFilterPostgresIntegrationTest {
                 id, org, org, hostname, now, now);
     }
 
-    private void insertDeviceLegacyNullOrg(UUID id, UUID tenant, String hostname) {
-        // Defeat V29 trigger silent compensation: temporarily disable both
-        // INSERT and UPDATE firing on endpoint_devices, raw-INSERT a NULL
-        // org_id, then re-enable. The persisted row is then a true
-        // "legacy-shaped" pre-PR1 row: tenant_id set, org_id NULL.
+    private void assertDeviceLegacyNullOrgInsertRejectedByV36(UUID id, UUID tenant, String hostname) {
+        // Disable the V29 compat trigger so org_id stays the explicit NULL we
+        // pass (proving the V36 CHECK, not the trigger, rejects it). Terminal
+        // assertion (Codex 019e92a7 transaction-hygiene): the failed INSERT
+        // aborts the tx, so there is no ENABLE-TRIGGER finally and nothing runs
+        // after — the @DataJpaTest rollback re-enables the trigger.
         Timestamp now = Timestamp.from(Instant.parse("2026-06-03T10:00:00Z"));
         jdbc.execute("ALTER TABLE " + SCHEMA + ".endpoint_devices DISABLE TRIGGER USER");
-        try {
-            jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_devices "
-                            + "(id, tenant_id, org_id, hostname, os_type, status, "
-                            + " created_at, updated_at, version) "
-                            + "VALUES (?, ?, NULL, ?, 'WINDOWS', 'ONLINE', ?, ?, 0)",
-                    id, tenant, hostname, now, now);
-        } finally {
-            jdbc.execute("ALTER TABLE " + SCHEMA + ".endpoint_devices ENABLE TRIGGER USER");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_devices "
+                        + "(id, tenant_id, org_id, hostname, os_type, status, "
+                        + " created_at, updated_at, version) "
+                        + "VALUES (?, ?, NULL, ?, 'WINDOWS', 'ONLINE', ?, ?, 0)",
+                id, tenant, hostname, now, now))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(t -> assertThat(rootSqlState(t))
+                        .as("source org_id NULL must be 23514 check_violation")
+                        .isEqualTo("23514"));
+    }
+
+    private static String rootSqlState(Throwable throwable) {
+        Throwable cur = throwable;
+        while (cur != null) {
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                return sqlEx.getSQLState();
+            }
+            cur = cur.getCause();
         }
+        return null;
     }
 
     private void insertSoftwareDiffCacheNoHistory(UUID deviceId, UUID org) {

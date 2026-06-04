@@ -1,6 +1,7 @@
 package com.example.endpointadmin.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.endpointadmin.model.EndpointDevice;
 import java.sql.Timestamp;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -35,10 +37,11 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * <ol>
  *   <li>Canonical row read — both columns equal, repository returns
  *       it via {@code findVisibleToOrgAndId}.</li>
- *   <li>Legacy NULL row read — V29 trigger temporarily disabled to
- *       seed {@code org_id IS NULL AND tenant_id = orgA}; pre-assert
- *       confirms persisted NULL; method returns it via fallback OR
- *       branch.</li>
+ *   <li>Legacy NULL row REJECTED by V36 (C1.5) — the source CHECK
+ *       {@code (org_id IS NOT NULL)} makes the org_id-NULL row physically
+ *       unconstructable; a trigger-bypass insert is rejected 23514. The
+ *       OR-fallback read branch stays (provably dead until A5 removes it
+ *       with its composite org_id mirror indexes).</li>
  *   <li>Cross-org negative — orgA lookup for orgB's device returns
  *       empty (no existence leak, ownership gate preserved).</li>
  * </ol>
@@ -93,28 +96,16 @@ class EndpointDeviceByIdEffectiveOrgPostgresIntegrationTest {
     }
 
     @Test
-    void legacyNullRow_orgIdNull_isReturnedViaTenantIdFallback_andPreservedAsNullByFixture() {
+    void legacyNullRow_orgIdNullInsert_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL visibility fixture is replaced by its
+        // invariant proof — a trigger-bypass org_id-NULL insert is rejected
+        // 23514. The OR-fallback branch in findVisibleToOrgAndId is left
+        // intact (provably dead until A5 removes it with composite indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceId = UUID.randomUUID();
-        insertDeviceLegacyNullOrg(deviceId, orgA, "legacy-null-device");
-
-        // Pre-assertion (Codex 019e8d1d b1 must-fix): V29 trigger bypass
-        // must hold — if the row persisted with org_id auto-filled, the
-        // OR fallback branch is not actually being tested.
-        Boolean orgIdIsNull = jdbc.queryForObject(
-                "SELECT org_id IS NULL FROM " + SCHEMA + ".endpoint_devices WHERE id = ?",
-                Boolean.class, deviceId);
-        assertThat(orgIdIsNull)
-                .as("legacy NULL fixture pre-assert: org_id must persist as NULL "
-                        + "(DISABLE TRIGGER USER held); otherwise the fallback OR "
-                        + "branch isn't exercised")
-                .isTrue();
-
-        Optional<EndpointDevice> hit = repository.findVisibleToOrgAndId(orgA, deviceId);
-        assertThat(hit)
-                .as("legacy NULL row reachable via OR fallback branch")
-                .isPresent()
-                .hasValueSatisfying(d -> assertThat(d.getId()).isEqualTo(deviceId));
+        assertDeviceLegacyNullOrgInsertRejectedByV36(deviceId, orgA, "legacy-null-device");
     }
 
     @Test
@@ -153,19 +144,33 @@ class EndpointDeviceByIdEffectiveOrgPostgresIntegrationTest {
                 id, org, org, hostname, now, now);
     }
 
-    private void insertDeviceLegacyNullOrg(UUID id, UUID tenant, String hostname) {
+    private void assertDeviceLegacyNullOrgInsertRejectedByV36(UUID id, UUID tenant, String hostname) {
         Timestamp now = Timestamp.from(Instant.parse("2026-06-03T10:00:00Z"));
-        // Bypass V29 trigger so the row persists with org_id IS NULL
-        // (a true pre-PR1 / legacy shape).
+        // Disable the V29 compat trigger so org_id stays the explicit NULL we
+        // pass (proving the V36 CHECK, not the trigger, rejects it). Terminal
+        // assertion (Codex 019e92a7 transaction-hygiene): the failed INSERT
+        // aborts the tx, so there is no ENABLE-TRIGGER finally and nothing runs
+        // after — the @DataJpaTest rollback re-enables the trigger.
         jdbc.execute("ALTER TABLE " + SCHEMA + ".endpoint_devices DISABLE TRIGGER USER");
-        try {
-            jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_devices "
-                            + "(id, tenant_id, org_id, hostname, os_type, status, "
-                            + " created_at, updated_at, version) "
-                            + "VALUES (?, ?, NULL, ?, 'WINDOWS', 'ONLINE', ?, ?, 0)",
-                    id, tenant, hostname, now, now);
-        } finally {
-            jdbc.execute("ALTER TABLE " + SCHEMA + ".endpoint_devices ENABLE TRIGGER USER");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_devices "
+                        + "(id, tenant_id, org_id, hostname, os_type, status, "
+                        + " created_at, updated_at, version) "
+                        + "VALUES (?, ?, NULL, ?, 'WINDOWS', 'ONLINE', ?, ?, 0)",
+                id, tenant, hostname, now, now))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(t -> assertThat(rootSqlState(t))
+                        .as("source org_id NULL must be 23514 check_violation")
+                        .isEqualTo("23514"));
+    }
+
+    private static String rootSqlState(Throwable throwable) {
+        Throwable cur = throwable;
+        while (cur != null) {
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                return sqlEx.getSQLState();
+            }
+            cur = cur.getCause();
         }
+        return null;
     }
 }

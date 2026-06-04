@@ -1,6 +1,7 @@
 package com.example.endpointadmin.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.endpointadmin.model.CommandResultStatus;
 import com.example.endpointadmin.model.EndpointInstallAudit;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -38,12 +40,18 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *     [+ a.id = :id for ownership gate]
  * </pre>
  *
- * <p>Eight assertions: ownership gate (canonical / legacy NULL /
- * cross-org), device history Page (canonical + legacy NULL +
- * countQuery), tenant-wide history Page (canonical + cross-org),
- * plus a non-migration guard for {@code findByCommandId} (V12
- * {@code command_id UNIQUE} backs per-result uniqueness independent
- * of effective-org).
+ * <p>Assertions: ownership gate (canonical / legacy NULL insert
+ * REJECTED by V36 / cross-org), device history Page (canonical ordering
+ * + countQuery), tenant-wide history Page (canonical + cross-org), a
+ * dedicated legacy-NULL UPDATE rejection proof, plus a non-migration
+ * guard for {@code findByCommandId} (V12 {@code command_id UNIQUE} backs
+ * per-result uniqueness independent of effective-org).
+ *
+ * <p>Legacy NULL row REJECTED by V36 (C1.5) — CHECK org_id IS NOT NULL
+ * makes {@code org_id IS NULL} physically unconstructable on the source
+ * tables; the prior trigger-bypass {@code UPDATE org_id = NULL} fixture
+ * is now rejected 23514. The OR-fallback read branch stays, dead until
+ * A5.
  */
 @Testcontainers
 @DataJpaTest
@@ -98,29 +106,22 @@ class EndpointInstallAuditEffectiveOrgPostgresIntegrationTest {
     }
 
     @Test
-    void ownership_legacyNullRow_visibleViaOrFallback() {
+    void ownership_legacyNullOrgUpdate_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL ownership-gate visibility fixture is
+        // replaced by its invariant proof — a trigger-bypass
+        // UPDATE org_id = NULL on a persisted canonical row is rejected
+        // 23514. The OR-fallback branch in findVisibleToOrgAndId is left
+        // intact (provably dead until A5 removes it with composite indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceId = seedDevice(orgA);
         UUID catalogId = seedCatalog(orgA, "pkg.legacy");
         UUID commandId = seedCommand(orgA, deviceId, "INSTALL_SOFTWARE", "key-legacy");
         UUID auditId = persistAuditCanonical(orgA, deviceId, commandId, catalogId);
-        makeAuditOrgIdNull(auditId);
 
-        Boolean orgIdIsNull = jdbc.queryForObject(
-                "SELECT org_id IS NULL FROM " + SCHEMA
-                        + ".endpoint_install_audit WHERE id = ?",
-                Boolean.class, auditId);
-        assertThat(orgIdIsNull)
-                .as("legacy NULL fixture pre-assert: UPDATE org_id=NULL held")
-                .isTrue();
-
-        Optional<EndpointInstallAudit> hit = repository
-                .findVisibleToOrgAndId(orgA, auditId);
-
-        assertThat(hit)
-                .as("legacy NULL row reachable via OR-fallback (ownership gate)")
-                .isPresent()
-                .hasValueSatisfying(a -> assertThat(a.getId()).isEqualTo(auditId));
+        // Terminal: the rejected UPDATE must be the last DB op in the method.
+        assertMakeAuditOrgIdNullRejectedByV36(auditId);
     }
 
     @Test
@@ -141,26 +142,28 @@ class EndpointInstallAuditEffectiveOrgPostgresIntegrationTest {
     // ───────────────────────── Device history page (Method 3) ─────────────────────────
 
     @Test
-    void deviceHistoryPage_canonicalAndLegacyRows_sumOverOrFallback() {
+    void deviceHistoryPage_canonicalRows_orderedByReportedAtDesc() {
         // Codex 019e8dde iter-1 REVISE #1 hardening: disjoint reportedAt
-        // values + containsExactly(canonical newer, legacy older) so the
-        // inline ORDER BY a.reportedAt DESC contract is pinned by the
-        // test (a regression removing the sort from the @Query would
-        // fail this assertion).
+        // values + containsExactly(newer, older) so the inline
+        // ORDER BY a.reportedAt DESC contract is pinned by the test (a
+        // regression removing the sort from the @Query would fail this
+        // assertion). Under C1.5/V36 the prior legacy-NULL second row is
+        // no longer constructable; its rejection is pinned by
+        // ownership_legacyNullOrgUpdate_isRejectedByV36. Two canonical rows
+        // retain the ORDER BY DESC + countQuery coverage.
         UUID orgA = UUID.randomUUID();
         UUID deviceId = seedDevice(orgA);
         UUID catalogId = seedCatalog(orgA, "pkg.deviceHist");
-        UUID commandCanonical = seedCommand(orgA, deviceId,
-                "INSTALL_SOFTWARE", "key-canonical");
-        UUID commandLegacy = seedCommand(orgA, deviceId,
-                "INSTALL_SOFTWARE", "key-legacy");
+        UUID commandNewer = seedCommand(orgA, deviceId,
+                "INSTALL_SOFTWARE", "key-newer");
+        UUID commandOlder = seedCommand(orgA, deviceId,
+                "INSTALL_SOFTWARE", "key-older");
         Instant newer = Instant.parse("2026-06-03T10:00:00Z");
         Instant older = Instant.parse("2026-06-03T09:00:00Z");
-        UUID auditCanonical = persistAuditCanonical(
-                orgA, deviceId, commandCanonical, catalogId, newer);
-        UUID auditLegacy = persistAuditCanonical(
-                orgA, deviceId, commandLegacy, catalogId, older);
-        makeAuditOrgIdNull(auditLegacy);
+        UUID auditNewer = persistAuditCanonical(
+                orgA, deviceId, commandNewer, catalogId, newer);
+        UUID auditOlder = persistAuditCanonical(
+                orgA, deviceId, commandOlder, catalogId, older);
 
         Page<EndpointInstallAudit> page = repository
                 .findVisibleToOrgAndDeviceIdOrderByReportedAtDesc(
@@ -169,11 +172,10 @@ class EndpointInstallAuditEffectiveOrgPostgresIntegrationTest {
         assertThat(page.getContent())
                 .extracting(EndpointInstallAudit::getId)
                 .as("page returns rows in ORDER BY reportedAt DESC: "
-                        + "canonical (newer) first, legacy NULL (older) second — "
-                        + "proves the inline sort + OR-fallback both hold")
-                .containsExactly(auditCanonical, auditLegacy);
+                        + "newer first, older second — proves the inline sort holds")
+                .containsExactly(auditNewer, auditOlder);
         assertThat(page.getTotalElements())
-                .as("countQuery sibling totals over the OR-fallback predicate")
+                .as("countQuery sibling totals over the effective-org predicate")
                 .isEqualTo(2L);
     }
 
@@ -353,30 +355,42 @@ class EndpointInstallAuditEffectiveOrgPostgresIntegrationTest {
     }
 
     /**
-     * Force the legacy NULL shape on an existing audit row by stripping
-     * {@code org_id} via direct UPDATE. {@code DISABLE TRIGGER USER} is
-     * essential here, NOT a defensive belt-and-suspenders (Codex
-     * 019e8dde iter-1 REVISE #2 correction):
+     * C1.5/V36 terminal-assertion helper: assert that forcing the legacy
+     * NULL shape on an existing canonical audit row via direct
+     * {@code UPDATE org_id = NULL} is REJECTED with SQLSTATE 23514.
      *
-     * <p>V29's {@code BEFORE INSERT OR UPDATE} function fires on every
-     * UPDATE that touches an org_id-bearing row. With the trigger
-     * enabled, {@code UPDATE ... SET org_id = NULL} would be silently
-     * rewritten by the trigger back to {@code org_id = tenant_id}
-     * (the trigger checks {@code NEW.org_id IS NULL} and refills it).
-     * The {@code DISABLE TRIGGER USER} guard is what makes the
-     * {@code UPDATE org_id = NULL} actually persist as NULL — exactly
-     * what the legacy fixture needs.
+     * <p>{@code DISABLE TRIGGER USER} is essential here (Codex 019e8dde
+     * iter-1 REVISE #2): V29's {@code BEFORE INSERT OR UPDATE} function
+     * would otherwise silently refill {@code NEW.org_id} from
+     * {@code tenant_id}, masking the V36 CHECK. With the trigger disabled
+     * the explicit {@code org_id = NULL} reaches the V36 CHECK
+     * {@code (org_id IS NOT NULL)} and is rejected.
+     *
+     * <p>Transaction-hygiene (Codex 019e92a7): the rejected UPDATE aborts
+     * the surrounding tx, so this helper performs NO ENABLE-TRIGGER finally
+     * and MUST be the last DB op of its caller — the @DataJpaTest per-method
+     * rollback re-enables the trigger.
      */
-    private void makeAuditOrgIdNull(UUID auditId) {
+    private void assertMakeAuditOrgIdNullRejectedByV36(UUID auditId) {
         jdbc.execute("ALTER TABLE " + SCHEMA
                 + ".endpoint_install_audit DISABLE TRIGGER USER");
-        try {
-            jdbc.update("UPDATE " + SCHEMA
-                            + ".endpoint_install_audit SET org_id = NULL WHERE id = ?",
-                    auditId);
-        } finally {
-            jdbc.execute("ALTER TABLE " + SCHEMA
-                    + ".endpoint_install_audit ENABLE TRIGGER USER");
+        assertThatThrownBy(() -> jdbc.update("UPDATE " + SCHEMA
+                        + ".endpoint_install_audit SET org_id = NULL WHERE id = ?",
+                auditId))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(t -> assertThat(rootSqlState(t))
+                        .as("source org_id NULL must be 23514 check_violation")
+                        .isEqualTo("23514"));
+    }
+
+    private static String rootSqlState(Throwable throwable) {
+        Throwable cur = throwable;
+        while (cur != null) {
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                return sqlEx.getSQLState();
+            }
+            cur = cur.getCause();
         }
+        return null;
     }
 }

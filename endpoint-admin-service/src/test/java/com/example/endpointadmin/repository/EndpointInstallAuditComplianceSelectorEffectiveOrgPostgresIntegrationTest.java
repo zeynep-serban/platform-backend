@@ -1,6 +1,7 @@
 package com.example.endpointadmin.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.endpointadmin.model.CommandResultStatus;
 import com.example.endpointadmin.model.EndpointInstallAudit;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -43,9 +45,11 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * <ol>
  *   <li>existsSucceededSatisfiedByOrgDeviceCatalog: canonical row
  *       returns true.</li>
- *   <li>existsSucceededSatisfiedByOrgDeviceCatalog: legacy NULL row
- *       returns true via OR-fallback (V29 trigger bypass + UPDATE +
- *       pre-assert).</li>
+ *   <li>existsSucceededSatisfiedByOrgDeviceCatalog: legacy NULL insert
+ *       REJECTED by V36 (C1.5) — CHECK org_id IS NOT NULL makes
+ *       {@code org_id IS NULL} unconstructable; a trigger-bypass
+ *       {@code UPDATE org_id = NULL} is rejected 23514. OR-fallback read
+ *       branch stays, dead until A5.</li>
  *   <li>existsSucceededSatisfiedByOrgDeviceCatalog: cross-org returns
  *       false.</li>
  *   <li>existsSucceededSatisfiedByOrgDeviceCatalog: FAILED + SATISFIED
@@ -56,7 +60,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *   <li>findLatestSucceededSatisfiedByOrgDeviceCatalogBefore: canonical
  *       row matched via wrapper.</li>
  *   <li>findLatestSucceededSatisfiedByOrgDeviceCatalogBefore: legacy
- *       NULL row matched via wrapper.</li>
+ *       NULL insert REJECTED by V36 (C1.5) — trigger-bypass
+ *       {@code UPDATE org_id = NULL} rejected 23514; OR-fallback read
+ *       branch stays, dead until A5.</li>
  *   <li>findLatestSucceededSatisfiedByOrgDeviceCatalogBefore: cross-org
  *       miss returns empty.</li>
  *   <li>findLatestSucceededSatisfiedByOrgDeviceCatalogBefore: strict
@@ -119,7 +125,14 @@ class EndpointInstallAuditComplianceSelectorEffectiveOrgPostgresIntegrationTest 
     }
 
     @Test
-    void exists_legacyNullRow_returnsTrueViaOrFallback() {
+    void exists_legacyNullOrgUpdate_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL OR-fallback provenance fixture is replaced
+        // by its invariant proof — a trigger-bypass UPDATE org_id = NULL on a
+        // persisted canonical row is rejected 23514. The OR-fallback branch
+        // in existsSucceededSatisfiedByOrgDeviceCatalog is left intact
+        // (provably dead until A5 removes it with composite indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceId = seedDevice(orgA);
         UUID catalogId = seedCatalog(orgA, "pkg.exists.legacy");
@@ -127,22 +140,9 @@ class EndpointInstallAuditComplianceSelectorEffectiveOrgPostgresIntegrationTest 
                 "INSTALL_SOFTWARE", "key-exists-legacy");
         UUID auditId = persistAuditCanonical(orgA, deviceId, commandId, catalogId,
                 CommandResultStatus.SUCCEEDED, InstallPostVerification.SATISFIED);
-        makeAuditOrgIdNull(auditId);
 
-        Boolean orgIdIsNull = jdbc.queryForObject(
-                "SELECT org_id IS NULL FROM " + SCHEMA
-                        + ".endpoint_install_audit WHERE id = ?",
-                Boolean.class, auditId);
-        assertThat(orgIdIsNull)
-                .as("legacy NULL fixture pre-assert: DISABLE TRIGGER USER held")
-                .isTrue();
-
-        boolean exists = repository
-                .existsSucceededSatisfiedByOrgDeviceCatalog(orgA, deviceId, catalogId);
-
-        assertThat(exists)
-                .as("legacy NULL row matches via OR-fallback (provenance guard)")
-                .isTrue();
+        // Terminal: the rejected UPDATE must be the last DB op in the method.
+        assertMakeAuditOrgIdNullRejectedByV36(auditId);
     }
 
     @Test
@@ -223,7 +223,14 @@ class EndpointInstallAuditComplianceSelectorEffectiveOrgPostgresIntegrationTest 
     }
 
     @Test
-    void selector_legacyNullRow_matchedViaOrFallback() {
+    void selector_legacyNullOrgUpdate_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL selector OR-fallback fixture is replaced by
+        // its invariant proof — a trigger-bypass UPDATE org_id = NULL on a
+        // persisted canonical row is rejected 23514. The OR-fallback branch in
+        // findLatestSucceededSatisfiedByOrgDeviceCatalogBefore is left intact
+        // (provably dead until A5 removes it with composite indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceId = seedDevice(orgA);
         UUID catalogId = seedCatalog(orgA, "pkg.sel.legacy");
@@ -231,15 +238,9 @@ class EndpointInstallAuditComplianceSelectorEffectiveOrgPostgresIntegrationTest 
                 "INSTALL_SOFTWARE", "key-sel-legacy");
         UUID auditId = persistAuditCanonical(orgA, deviceId, commandId, catalogId,
                 CommandResultStatus.SUCCEEDED, InstallPostVerification.SATISFIED);
-        makeAuditOrgIdNull(auditId);
 
-        Optional<EndpointInstallAudit> hit = repository
-                .findLatestSucceededSatisfiedByOrgDeviceCatalogBefore(
-                        orgA, deviceId, catalogId,
-                        Instant.parse("2999-12-31T23:59:59Z"));
-
-        assertThat(hit).isPresent()
-                .hasValueSatisfying(a -> assertThat(a.getId()).isEqualTo(auditId));
+        // Terminal: the rejected UPDATE must be the last DB op in the method.
+        assertMakeAuditOrgIdNullRejectedByV36(auditId);
     }
 
     @Test
@@ -371,19 +372,42 @@ class EndpointInstallAuditComplianceSelectorEffectiveOrgPostgresIntegrationTest 
         return saved.getId();
     }
 
-    private void makeAuditOrgIdNull(UUID auditId) {
-        // DISABLE TRIGGER USER essential (slice e-A iter-1 Codex comment
-        // correction): with V29 BEFORE UPDATE trigger enabled, UPDATE
-        // org_id = NULL would be silently refilled back to tenant_id.
+    /**
+     * C1.5/V36 terminal-assertion helper: assert that forcing the legacy
+     * NULL shape on an existing canonical audit row via direct
+     * {@code UPDATE org_id = NULL} is REJECTED with SQLSTATE 23514.
+     *
+     * <p>DISABLE TRIGGER USER essential (slice e-A iter-1 Codex comment):
+     * with the V29 BEFORE UPDATE trigger enabled, {@code UPDATE org_id = NULL}
+     * would be silently refilled back to tenant_id, masking the V36 CHECK.
+     * With the trigger disabled the explicit NULL reaches the V36 CHECK
+     * {@code (org_id IS NOT NULL)} and is rejected.
+     *
+     * <p>Transaction-hygiene (Codex 019e92a7): the rejected UPDATE aborts the
+     * surrounding tx, so this helper performs NO ENABLE-TRIGGER finally and
+     * MUST be the last DB op of its caller — the @DataJpaTest per-method
+     * rollback re-enables the trigger.
+     */
+    private void assertMakeAuditOrgIdNullRejectedByV36(UUID auditId) {
         jdbc.execute("ALTER TABLE " + SCHEMA
                 + ".endpoint_install_audit DISABLE TRIGGER USER");
-        try {
-            jdbc.update("UPDATE " + SCHEMA
-                            + ".endpoint_install_audit SET org_id = NULL WHERE id = ?",
-                    auditId);
-        } finally {
-            jdbc.execute("ALTER TABLE " + SCHEMA
-                    + ".endpoint_install_audit ENABLE TRIGGER USER");
+        assertThatThrownBy(() -> jdbc.update("UPDATE " + SCHEMA
+                        + ".endpoint_install_audit SET org_id = NULL WHERE id = ?",
+                auditId))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(t -> assertThat(rootSqlState(t))
+                        .as("source org_id NULL must be 23514 check_violation")
+                        .isEqualTo("23514"));
+    }
+
+    private static String rootSqlState(Throwable throwable) {
+        Throwable cur = throwable;
+        while (cur != null) {
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                return sqlEx.getSQLState();
+            }
+            cur = cur.getCause();
         }
+        return null;
     }
 }

@@ -2,6 +2,7 @@ package com.example.endpointadmin.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.endpointadmin.model.EndpointAppControlSnapshot;
 import java.sql.Timestamp;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -37,12 +39,20 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *     [+ s.payload_hash_sha256 = CAST(:payloadHash AS varchar) for hash variant]
  * </pre>
  *
- * <p>Six per-device assertions mirroring slice d-A, plus four
- * payload-hash assertions (Codex note: V26
+ * <p>Per-device assertions mirroring slice d-A, plus payload-hash
+ * assertions (Codex note: V26
  * {@code (tenant_id, device_id, payload_hash_sha256)} UNIQUE prevents
  * duplicate-hash same-(tenant, device) fixture so BE-022Q
  * non-matching/empty regression test plus canonical/legacy/cross-org
  * coverage are sufficient).
+ *
+ * <p>Legacy NULL row REJECTED by V36 (C1.5) — CHECK org_id IS NOT NULL
+ * makes {@code org_id IS NULL} physically unconstructable on the source
+ * tables; a trigger-bypass org_id-NULL insert is rejected 23514. The
+ * OR-fallback read branch stays, dead until A5. Both the per-device and
+ * the payload-hash legacy-NULL visibility fixtures are converted to that
+ * invariant proof; the mixed canonical+legacy ordering/wrapper tests keep
+ * their canonical assertions.
  */
 @Testcontainers
 @DataJpaTest
@@ -122,45 +132,23 @@ class EndpointAppControlSnapshotEffectiveOrgPostgresIntegrationTest {
         assertThat(page.getTotalElements()).isEqualTo(1L);
     }
 
-    // ───────────────────────── Per-device 2: legacy NULL row ─────────────────────────
+    // ───────────────────────── Per-device 2: legacy NULL insert REJECTED by V36 ─────────────────────────
 
     @Test
-    void legacyNullRow_visibleViaTenantIdFallback_bothReads() {
+    void legacyNullRow_orgIdNullInsert_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL per-device visibility fixture (both reads +
+        // wrapper + Page) is replaced by its invariant proof — a trigger-bypass
+        // org_id-NULL insert is rejected 23514. The OR-fallback read branches
+        // are left intact (provably dead until A5 removes them with composite
+        // indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceId = ensureDevice(orgA);
         UUID snapshotId = UUID.randomUUID();
-        insertSnapshotLegacyNullOrg(snapshotId, orgA, deviceId, HASH_A,
+        assertSnapshotLegacyNullOrgInsertRejectedByV36(snapshotId, orgA, deviceId, HASH_A,
                 Instant.parse("2026-06-03T10:00:00Z"),
                 Instant.parse("2026-06-03T10:00:01Z"));
-
-        Boolean orgIdIsNull = jdbc.queryForObject(
-                "SELECT org_id IS NULL FROM " + SCHEMA
-                        + ".endpoint_app_control_snapshots WHERE id = ?",
-                Boolean.class, snapshotId);
-        assertThat(orgIdIsNull)
-                .as("legacy NULL fixture pre-assert: V29 trigger bypass held")
-                .isTrue();
-
-        List<EndpointAppControlSnapshot> head = repository
-                .findVisibleToOrgAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
-                        orgA, deviceId, PageRequest.of(0, 2));
-        Optional<EndpointAppControlSnapshot> latest = repository
-                .findFirstVisibleToOrgAndDeviceIdOrderByCollectedAtDescCreatedAtDescIdDesc(
-                        orgA, deviceId);
-        Page<EndpointAppControlSnapshot> page = repository
-                .findVisibleToOrgAndDeviceId(
-                        orgA, deviceId, PageRequest.of(0, 10, HISTORY_SORT));
-
-        assertThat(head)
-                .extracting(EndpointAppControlSnapshot::getId)
-                .containsExactly(snapshotId);
-        assertThat(latest)
-                .map(EndpointAppControlSnapshot::getId)
-                .contains(snapshotId);
-        assertThat(page.getContent())
-                .extracting(EndpointAppControlSnapshot::getId)
-                .containsExactly(snapshotId);
-        assertThat(page.getTotalElements()).isEqualTo(1L);
     }
 
     // ───────────────────────── Per-device 3: cross-org negative ─────────────────────────
@@ -223,16 +211,21 @@ class EndpointAppControlSnapshotEffectiveOrgPostgresIntegrationTest {
     // ───────────────────────── Per-device 5: page count + sort over OR-fallback ─────────────────────────
 
     @Test
-    void pageHistory_countQuery_sumsBothCanonicalAndLegacyRowsAndContentSorted() {
+    void pageHistory_countQuery_sumsCanonicalRowsAndContentSorted() {
         UUID orgA = UUID.randomUUID();
         UUID deviceId = ensureDevice(orgA);
 
-        UUID canonical = UUID.randomUUID();
-        UUID legacy = UUID.randomUUID();
-        insertSnapshotCanonical(canonical, orgA, deviceId, HASH_A,
+        // Under C1.5/V36 the prior legacy-NULL second row is no longer
+        // constructable; its rejection is pinned by
+        // legacyNullRow_orgIdNullInsert_isRejectedByV36. Two canonical rows
+        // (newer HASH_A + older HASH_B) retain the Pageable-Sort-on-content +
+        // countQuery coverage.
+        UUID newer = UUID.randomUUID();
+        UUID older = UUID.randomUUID();
+        insertSnapshotCanonical(newer, orgA, deviceId, HASH_A,
                 Instant.parse("2026-06-03T10:00:00Z"),
                 Instant.parse("2026-06-03T10:00:01Z"));
-        insertSnapshotLegacyNullOrg(legacy, orgA, deviceId, HASH_B,
+        insertSnapshotCanonical(older, orgA, deviceId, HASH_B,
                 Instant.parse("2026-06-03T09:00:00Z"),
                 Instant.parse("2026-06-03T09:00:01Z"));
 
@@ -241,25 +234,30 @@ class EndpointAppControlSnapshotEffectiveOrgPostgresIntegrationTest {
                         orgA, deviceId, PageRequest.of(0, 10, HISTORY_SORT));
 
         assertThat(page.getContent())
-                .as("Pageable Sort applied to content side; canonical (newer) first")
+                .as("Pageable Sort applied to content side; newer canonical first")
                 .extracting(EndpointAppControlSnapshot::getId)
-                .containsExactly(canonical, legacy);
+                .containsExactly(newer, older);
         assertThat(page.getTotalElements()).isEqualTo(2L);
     }
 
     // ───────────────────────── Per-device 6: wrapper picks newest mixed row ─────────────────────────
 
     @Test
-    void defaultWrapper_picksNewestRow_evenWhenLegacyNullCoexistsWithCanonical() {
+    void defaultWrapper_picksNewestCanonicalRow() {
         UUID orgA = UUID.randomUUID();
         UUID deviceId = ensureDevice(orgA);
 
-        UUID legacyOlder = UUID.randomUUID();
-        UUID canonicalNewer = UUID.randomUUID();
-        insertSnapshotLegacyNullOrg(legacyOlder, orgA, deviceId, HASH_A,
+        // Under C1.5/V36 the prior older legacy-NULL coexisting row is no
+        // longer constructable; its rejection is pinned by
+        // legacyNullRow_orgIdNullInsert_isRejectedByV36. Two canonical rows
+        // (older HASH_A + newer HASH_B) retain the newest-wins wrapper
+        // coverage.
+        UUID older = UUID.randomUUID();
+        UUID newer = UUID.randomUUID();
+        insertSnapshotCanonical(older, orgA, deviceId, HASH_A,
                 Instant.parse("2026-06-03T09:00:00Z"),
                 Instant.parse("2026-06-03T09:00:01Z"));
-        insertSnapshotCanonical(canonicalNewer, orgA, deviceId, HASH_B,
+        insertSnapshotCanonical(newer, orgA, deviceId, HASH_B,
                 Instant.parse("2026-06-03T10:00:00Z"),
                 Instant.parse("2026-06-03T10:00:01Z"));
 
@@ -269,7 +267,7 @@ class EndpointAppControlSnapshotEffectiveOrgPostgresIntegrationTest {
 
         assertThat(latest)
                 .map(EndpointAppControlSnapshot::getId)
-                .contains(canonicalNewer);
+                .contains(newer);
     }
 
     // ───────────────────────── Payload-hash 1: canonical match (List + wrapper) ─────────────────────────
@@ -298,30 +296,24 @@ class EndpointAppControlSnapshotEffectiveOrgPostgresIntegrationTest {
                 .contains(snapshotId);
     }
 
-    // ───────────────────────── Payload-hash 2: legacy NULL match (List + wrapper) ─────────────────────────
+    // ───────────────────────── Payload-hash 2: legacy NULL insert REJECTED by V36 ─────────────────────────
 
     @Test
-    void payloadHash_legacyNullRowMatchingHash_isReturnedViaOrFallback() {
+    void payloadHash_legacyNullOrgInsert_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL payload-hash OR-fallback fixture (List +
+        // wrapper) is replaced by its invariant proof — a trigger-bypass
+        // org_id-NULL insert is rejected 23514. The OR-fallback branches in
+        // findByOrgAndDeviceAndPayloadHash / findFirstByOrgAndDeviceAndPayloadHash
+        // are left intact (provably dead until A5 removes them with composite
+        // indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceId = ensureDevice(orgA);
         UUID snapshotId = UUID.randomUUID();
-        insertSnapshotLegacyNullOrg(snapshotId, orgA, deviceId, HASH_A,
+        assertSnapshotLegacyNullOrgInsertRejectedByV36(snapshotId, orgA, deviceId, HASH_A,
                 Instant.parse("2026-06-03T10:00:00Z"),
                 Instant.parse("2026-06-03T10:00:01Z"));
-
-        List<EndpointAppControlSnapshot> hits = repository
-                .findByOrgAndDeviceAndPayloadHash(
-                        orgA, deviceId, HASH_A, PageRequest.of(0, 1));
-        Optional<EndpointAppControlSnapshot> wrapper = repository
-                .findFirstByOrgAndDeviceAndPayloadHash(
-                        orgA, deviceId, HASH_A);
-
-        assertThat(hits)
-                .extracting(EndpointAppControlSnapshot::getId)
-                .containsExactly(snapshotId);
-        assertThat(wrapper)
-                .map(EndpointAppControlSnapshot::getId)
-                .contains(snapshotId);
     }
 
     // ───────────────────────── Payload-hash 3: cross-org miss ─────────────────────────
@@ -415,33 +407,48 @@ class EndpointAppControlSnapshotEffectiveOrgPostgresIntegrationTest {
                 Timestamp.from(createdAt));
     }
 
-    private void insertSnapshotLegacyNullOrg(UUID id, UUID tenant, UUID deviceId,
-            String payloadHash, Instant collectedAt, Instant createdAt) {
+    private void assertSnapshotLegacyNullOrgInsertRejectedByV36(UUID id, UUID tenant,
+            UUID deviceId, String payloadHash, Instant collectedAt, Instant createdAt) {
+        // Disable the V29 compat trigger so org_id stays the explicit NULL we
+        // pass (proving the V36 CHECK, not the trigger, rejects it). Terminal
+        // assertion (Codex 019e92a7 transaction-hygiene): the failed INSERT
+        // aborts the tx, so there is no ENABLE-TRIGGER finally and nothing runs
+        // after — the @DataJpaTest rollback re-enables the trigger.
         jdbc.execute("ALTER TABLE " + SCHEMA
                 + ".endpoint_app_control_snapshots DISABLE TRIGGER USER");
-        try {
-            jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_app_control_snapshots "
-                            + "(id, tenant_id, org_id, device_id, schema_version, "
-                            + " supported, probe_complete, "
-                            + " wdac_queryable, app_locker_queryable, "
-                            + " wdac_mode, app_locker_exe_rule, app_locker_dll_rule, "
-                            + " app_locker_script_rule, app_locker_msi_rule, "
-                            + " app_locker_appx_rule, app_locker_app_id_svc_state, "
-                            + " app_locker_app_id_svc_startup, probe_duration_ms, "
-                            + " payload_hash_sha256, collected_at, created_at) "
-                            + "VALUES (?, ?, NULL, ?, 1, true, true, "
-                            + "  true, true, "
-                            + "  'UNKNOWN', 'NOT_CONFIGURED', 'NOT_CONFIGURED', "
-                            + "  'NOT_CONFIGURED', 'NOT_CONFIGURED', "
-                            + "  'NOT_CONFIGURED', 'UNKNOWN', "
-                            + "  'AUTO', 0, "
-                            + "  ?, ?, ?)",
-                    id, tenant, deviceId, payloadHash,
-                    Timestamp.from(collectedAt),
-                    Timestamp.from(createdAt));
-        } finally {
-            jdbc.execute("ALTER TABLE " + SCHEMA
-                    + ".endpoint_app_control_snapshots ENABLE TRIGGER USER");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_app_control_snapshots "
+                        + "(id, tenant_id, org_id, device_id, schema_version, "
+                        + " supported, probe_complete, "
+                        + " wdac_queryable, app_locker_queryable, "
+                        + " wdac_mode, app_locker_exe_rule, app_locker_dll_rule, "
+                        + " app_locker_script_rule, app_locker_msi_rule, "
+                        + " app_locker_appx_rule, app_locker_app_id_svc_state, "
+                        + " app_locker_app_id_svc_startup, probe_duration_ms, "
+                        + " payload_hash_sha256, collected_at, created_at) "
+                        + "VALUES (?, ?, NULL, ?, 1, true, true, "
+                        + "  true, true, "
+                        + "  'UNKNOWN', 'NOT_CONFIGURED', 'NOT_CONFIGURED', "
+                        + "  'NOT_CONFIGURED', 'NOT_CONFIGURED', "
+                        + "  'NOT_CONFIGURED', 'UNKNOWN', "
+                        + "  'AUTO', 0, "
+                        + "  ?, ?, ?)",
+                id, tenant, deviceId, payloadHash,
+                Timestamp.from(collectedAt),
+                Timestamp.from(createdAt)))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(t -> assertThat(rootSqlState(t))
+                        .as("source org_id NULL must be 23514 check_violation")
+                        .isEqualTo("23514"));
+    }
+
+    private static String rootSqlState(Throwable throwable) {
+        Throwable cur = throwable;
+        while (cur != null) {
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                return sqlEx.getSQLState();
+            }
+            cur = cur.getCause();
         }
+        return null;
     }
 }

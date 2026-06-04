@@ -1,6 +1,7 @@
 package com.example.endpointadmin.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.endpointadmin.model.DeviceStatus;
 import com.example.endpointadmin.model.EndpointDevice;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -34,8 +36,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * <p>Four behavioural assertions (Codex 019e8d1d b4 minimum guards):
  * <ol>
  *   <li>Canonical row matching status filter is returned.</li>
- *   <li>Legacy NULL row matching status filter is returned (V29 trigger
- *       bypassed + pre-assert).</li>
+ *   <li>Legacy NULL row REJECTED by V36 (C1.5) — CHECK org_id IS NOT NULL
+ *       makes it unconstructable; a trigger-bypass org_id-NULL insert is
+ *       rejected 23514. The OR-fallback read branch stays, dead until A5.</li>
  *   <li>Cross-org rows excluded even when their status matches.</li>
  *   <li>Status filter scope — devices with non-matching status are
  *       excluded; multi-status IN set returns the union.</li>
@@ -88,23 +91,18 @@ class EndpointDeviceStatusInEffectiveOrgPostgresIntegrationTest {
     }
 
     @Test
-    void legacyNullRow_matchingStatus_isReturnedViaTenantIdFallback_andPreservedAsNullByFixture() {
+    void legacyNullRow_orgIdNullInsert_isRejectedByV36() {
+        // C1.5/V36 invariant flip: org_id NULL is now physically
+        // unconstructable on the source tables (CHECK org_id IS NOT NULL).
+        // The pre-V36 legacy-NULL status-match visibility fixture is replaced
+        // by its invariant proof — a trigger-bypass org_id-NULL insert is
+        // rejected 23514. The OR-fallback branch in findVisibleToOrgAndStatusIn
+        // is left intact (provably dead until A5 removes it with composite
+        // indexes).
         UUID orgA = UUID.randomUUID();
         UUID deviceId = UUID.randomUUID();
-        insertDeviceLegacyNullOrg(deviceId, orgA, "legacy-host", DeviceStatus.ONLINE);
-
-        Boolean orgIdIsNull = jdbc.queryForObject(
-                "SELECT org_id IS NULL FROM " + SCHEMA + ".endpoint_devices WHERE id = ?",
-                Boolean.class, deviceId);
-        assertThat(orgIdIsNull)
-                .as("legacy NULL fixture pre-assert: V29 trigger bypass held")
-                .isTrue();
-
-        List<EndpointDevice> hits = repository.findVisibleToOrgAndStatusIn(
-                orgA, List.of(DeviceStatus.ONLINE));
-        assertThat(hits)
-                .as("legacy NULL row matching status reachable via OR fallback")
-                .extracting(EndpointDevice::getId).containsExactly(deviceId);
+        assertDeviceLegacyNullOrgInsertRejectedByV36(
+                deviceId, orgA, "legacy-host", DeviceStatus.ONLINE);
     }
 
     @Test
@@ -159,17 +157,34 @@ class EndpointDeviceStatusInEffectiveOrgPostgresIntegrationTest {
                 id, org, org, hostname, status.name(), now, now);
     }
 
-    private void insertDeviceLegacyNullOrg(UUID id, UUID tenant, String hostname, DeviceStatus status) {
+    private void assertDeviceLegacyNullOrgInsertRejectedByV36(
+            UUID id, UUID tenant, String hostname, DeviceStatus status) {
         Timestamp now = Timestamp.from(Instant.parse("2026-06-03T10:00:00Z"));
+        // Disable the V29 compat trigger so org_id stays the explicit NULL we
+        // pass (proving the V36 CHECK, not the trigger, rejects it). Terminal
+        // assertion (Codex 019e92a7 transaction-hygiene): the failed INSERT
+        // aborts the tx, so there is no ENABLE-TRIGGER finally and nothing runs
+        // after — the @DataJpaTest rollback re-enables the trigger.
         jdbc.execute("ALTER TABLE " + SCHEMA + ".endpoint_devices DISABLE TRIGGER USER");
-        try {
-            jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_devices "
-                            + "(id, tenant_id, org_id, hostname, os_type, status, "
-                            + " created_at, updated_at, version) "
-                            + "VALUES (?, ?, NULL, ?, 'WINDOWS', ?, ?, ?, 0)",
-                    id, tenant, hostname, status.name(), now, now);
-        } finally {
-            jdbc.execute("ALTER TABLE " + SCHEMA + ".endpoint_devices ENABLE TRIGGER USER");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO " + SCHEMA + ".endpoint_devices "
+                        + "(id, tenant_id, org_id, hostname, os_type, status, "
+                        + " created_at, updated_at, version) "
+                        + "VALUES (?, ?, NULL, ?, 'WINDOWS', ?, ?, ?, 0)",
+                id, tenant, hostname, status.name(), now, now))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(t -> assertThat(rootSqlState(t))
+                        .as("source org_id NULL must be 23514 check_violation")
+                        .isEqualTo("23514"));
+    }
+
+    private static String rootSqlState(Throwable throwable) {
+        Throwable cur = throwable;
+        while (cur != null) {
+            if (cur instanceof java.sql.SQLException sqlEx) {
+                return sqlEx.getSQLState();
+            }
+            cur = cur.getCause();
         }
+        return null;
     }
 }
