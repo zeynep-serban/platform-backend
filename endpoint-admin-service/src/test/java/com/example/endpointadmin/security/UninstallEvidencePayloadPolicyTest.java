@@ -418,4 +418,165 @@ class UninstallEvidencePayloadPolicyTest {
                 .doesNotContain("halil")
                 .contains("[REDACTED]");
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // AG-028 narrow hardening (live-incident fix, Codex cross-AI verdict B):
+    // raw stdout/stderr tails are legacy-compatible silently DROPPED from
+    // uninstall evidence (validate no longer 400s); all OTHER forbidden
+    // evidence keys still fail closed with 400.
+
+    @Test
+    void validate_dropsRawStdoutAndStderrTail_doesNotThrow_agNarrowHardening() {
+        // Live evidence: a real managed-uninstall succeeded on a Windows
+        // endpoint but the agent's result submit was rejected with HTTP 400
+        // "Forbidden uninstall-evidence field 'stdoutTail' at $.uninstall".
+        // After the narrow hardening, validate() must NOT throw — it drops
+        // the raw tails so the SUCCESSFUL destructive op stays recordable.
+        Map<String, Object> uninstall = new LinkedHashMap<>();
+        uninstall.put("finalStatus", "SUCCEEDED_VERIFIED");
+        uninstall.put("probeState", "ABSENT");
+        // Tails carry a secret + PII path that must NOT leak through.
+        uninstall.put("stdoutTail", "Bearer abc.def.ghi C:\\Users\\halil\\out.log");
+        uninstall.put("stderrTail", "tok=eyJaaa.eyJbbb.signature");
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("stage", "POST");
+        payload.put("uninstall", uninstall);
+
+        // (a) ACCEPTED — no exception from the forbidden-key guard.
+        policy.validate(payload);
+
+        // The raw-tail keys are absent from the sanitized output, and the
+        // secret/PII inside the tail never leaks (the whole sub-tree is gone).
+        Map<String, Object> out = policy.redact(payload);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outUninstall = (Map<String, Object>) out.get("uninstall");
+        assertThat(outUninstall).doesNotContainKey("stdoutTail");
+        assertThat(outUninstall).doesNotContainKey("stderrTail");
+        assertThat(outUninstall).containsEntry("finalStatus", "SUCCEEDED_VERIFIED");
+        assertThat(outUninstall).containsEntry("probeState", "ABSENT");
+
+        String serialized = out.toString();
+        assertThat(serialized)
+                .as("no secret/PII from the dropped raw tail leaks anywhere in the output")
+                .doesNotContain("Bearer abc.def.ghi")
+                .doesNotContain("eyJaaa.eyJbbb.signature")
+                .doesNotContain("halil");
+    }
+
+    @Test
+    void validate_rawTailCaseInsensitive_doesNotThrow_agNarrowHardening() {
+        // The forbidden-key comparison is case-insensitive, so the drop set
+        // must match e.g. "StdoutTail" / "StderrTail" too.
+        Map<String, Object> uninstall = new LinkedHashMap<>();
+        uninstall.put("finalStatus", "SUCCEEDED_VERIFIED");
+        uninstall.put("StdoutTail", "raw legacy output");
+        uninstall.put("StderrTail", "raw legacy err");
+
+        Map<String, Object> payload = Map.of("uninstall", uninstall);
+        policy.validate(payload); // must not throw
+
+        Map<String, Object> out = policy.redact(payload);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outUninstall = (Map<String, Object>) out.get("uninstall");
+        assertThat(outUninstall).doesNotContainKeys("StdoutTail", "StderrTail");
+    }
+
+    @Test
+    void validate_stdoutRaw_stillThrows_guardNotGloballyWeakened() {
+        // stdoutRaw is a DIFFERENT forbidden key (raw, not tail). It MUST
+        // still hard-reject — proving the general guard isn't weakened.
+        Map<String, Object> payload = Map.of("uninstall", Map.of(
+                "finalStatus", "SUCCEEDED",
+                "stdoutRaw", "full raw installer output"));
+        assertThatThrownBy(() -> policy.validate(payload))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Forbidden")
+                .hasMessageContaining("$.uninstall");
+    }
+
+    @Test
+    void validate_credentialAndPathForbiddenKeys_stillThrow_failClosed() {
+        // A credential/token-carrying forbidden key still hard-rejects.
+        Map<String, Object> credPayload = Map.of("uninstall", Map.of(
+                "finalStatus", "SUCCEEDED",
+                "token", "secret-bearer-xyz"));
+        assertThatThrownBy(() -> policy.validate(credPayload))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Forbidden");
+
+        // processEnvironment (env/paths/PII vector) still hard-rejects.
+        Map<String, Object> envPayload = Map.of("uninstall", Map.of(
+                "finalStatus", "SUCCEEDED",
+                "processEnvironment", Map.of("PATH", "C:\\Users\\halil")));
+        assertThatThrownBy(() -> policy.validate(envPayload))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Forbidden");
+
+        // password still hard-rejects.
+        Map<String, Object> pwPayload = Map.of("uninstall", Map.of(
+                "finalStatus", "SUCCEEDED",
+                "password", "hunter2"));
+        assertThatThrownBy(() -> policy.validate(pwPayload))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Forbidden");
+    }
+
+    @Test
+    void validate_rawTailDroppedButSiblingForbiddenKeyStillThrows() {
+        // Belt-and-braces: a raw tail (drop) sitting NEXT TO a hard-reject
+        // forbidden key (token) must NOT mask the hard reject — the token
+        // still throws even though the tail would have been dropped.
+        Map<String, Object> uninstall = new LinkedHashMap<>();
+        uninstall.put("finalStatus", "SUCCEEDED");
+        uninstall.put("stdoutTail", "legacy tail");
+        uninstall.put("token", "secret-bearer-xyz");
+
+        Map<String, Object> payload = Map.of("uninstall", uninstall);
+        assertThatThrownBy(() -> policy.validate(payload))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Forbidden");
+    }
+
+    @Test
+    void validate_allowedKeysWithProbesAndSummary_passThrough_agNarrowHardening() {
+        // (c) allowed keys (preProbe / postProbe / stdoutSummary) still
+        // validate clean AND survive redaction correctly.
+        Map<String, Object> preProbe = new LinkedHashMap<>();
+        preProbe.put("probeState", "MATCHED");
+        preProbe.put("ruleType", "REGISTRY_UNINSTALL");
+        preProbe.put("durationMs", 12);
+
+        Map<String, Object> postProbe = new LinkedHashMap<>();
+        postProbe.put("probeState", "ABSENT");
+        postProbe.put("ruleType", "REGISTRY_UNINSTALL");
+        postProbe.put("absentReason", "registry_uninstall_key_missing");
+
+        Map<String, Object> uninstall = new LinkedHashMap<>();
+        uninstall.put("finalStatus", "SUCCEEDED_VERIFIED");
+        uninstall.put("probeState", "ABSENT");
+        uninstall.put("preProbe", preProbe);
+        uninstall.put("postProbe", postProbe);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("stage", "POST");
+        payload.put("exitCode", 0);
+        payload.put("uninstall", uninstall);
+        payload.put("stdoutSummary", "Uninstall complete");
+
+        policy.validate(payload); // clean — no throw
+
+        Map<String, Object> out = policy.redact(payload);
+        assertThat(out).containsEntry("stage", "POST");
+        assertThat(out).containsEntry("stdoutSummary", "Uninstall complete");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outUninstall = (Map<String, Object>) out.get("uninstall");
+        assertThat(outUninstall).containsEntry("finalStatus", "SUCCEEDED_VERIFIED");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outPre = (Map<String, Object>) outUninstall.get("preProbe");
+        assertThat(outPre).containsEntry("probeState", "MATCHED");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outPost = (Map<String, Object>) outUninstall.get("postProbe");
+        assertThat(outPost).containsEntry("probeState", "ABSENT");
+    }
 }

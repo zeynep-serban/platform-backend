@@ -3,6 +3,8 @@ package com.example.endpointadmin.security;
 import com.example.endpointadmin.model.UninstallVerification;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -23,18 +25,24 @@ import java.util.regex.Pattern;
  * {@link InstallEvidencePayloadPolicy}. The backend cannot trust
  * agent-side redaction. Every uninstall terminal-result submit goes
  * through {@link #validate(Object)} (fail closed on a forbidden key /
- * value) and then through {@link #redact(Map)} (idempotent backend
- * strip + truncate + size cap) before either
- * {@code endpoint_command_results.result_payload.details} or
- * {@code endpoint_uninstall_audit.redacted_payload} is persisted.
+ * value, except the two legacy raw-tail keys below) and then through
+ * {@link #redact(Map)} (idempotent backend strip + truncate + size cap)
+ * before either {@code endpoint_command_results.result_payload.details}
+ * or {@code endpoint_uninstall_audit.redacted_payload} is persisted.
  *
- * <p>Codex Phase 1 plan iter-6 absorb: raw {@code stdoutTail} /
- * {@code stderrTail} are NOT in the allow-list — the backend redactor
- * is weaker than the agent's AG-027L installer/PII redactor and the
- * backend cannot trust agent-side redaction, so surfacing raw tails
- * through the audit/API would risk leaking secrets/PII the backend
- * patterns miss. A follow-up could add an AG-027L-equivalent backend
- * redactor before surfacing tails.
+ * <p>AG-028 narrow hardening (live-incident fix, Codex cross-AI verdict
+ * B): raw stdout/stderr tails are legacy-compatible silently dropped
+ * from uninstall evidence; all other forbidden evidence keys still fail
+ * closed with 400. Concretely, {@code stdoutTail} / {@code stderrTail}
+ * are still {@link #FORBIDDEN_KEYS_LOWER} members (so {@link #redact(Map)}
+ * strips their value and they never surface through the audit/API), but
+ * {@link #validate(Object)} now SKIPS them (key-only log) instead of
+ * throwing — a SUCCESSFUL destructive uninstall must stay recordable
+ * even when the agent ships a forensic tail the backend discards anyway.
+ * The backend redactor is still weaker than the agent's AG-027L
+ * installer/PII redactor, which is exactly why the tail is dropped (not
+ * surfaced); a follow-up could add an AG-027L-equivalent backend
+ * redactor before ever surfacing tails.
  *
  * <p>Idempotency guarantee: {@code redact(redact(x))} produces the
  * same map (forbidden keys dropped, forbidden value patterns replaced
@@ -212,6 +220,28 @@ public class UninstallEvidencePayloadPolicy {
             "stdouttail",
             "stderrtail");
 
+    /**
+     * AG-028 narrow hardening (live-incident fix, Codex cross-AI verdict B):
+     * the legacy raw-tail forensic keys {@code stdoutTail} / {@code stderrTail}
+     * are <strong>dropped</strong> (skipped + key-only logged) by
+     * {@link #validate(Object)} instead of throwing 400, because a SUCCESSFUL
+     * destructive uninstall must still be recordable even when the agent ships
+     * a forensic tail the backend discards anyway. These keys stay members of
+     * {@link #FORBIDDEN_KEYS_LOWER} so {@link #redact(Map)} still strips their
+     * value (the raw tail never reaches the audit row / API).
+     *
+     * <p>Every OTHER {@link #FORBIDDEN_KEYS_LOWER} member (credentials, tokens,
+     * raw command line, env, {@code stdoutRaw}/{@code stderrRaw}, etc.) still
+     * HARD-REJECTS with 400 — the general fail-closed guard is NOT weakened.
+     * Lowercased to match the case-insensitive forbidden-key comparison.
+     */
+    private static final Set<String> DROP_NOT_REJECT_RAW_TAIL_KEYS = Set.of(
+            "stdouttail",
+            "stderrtail");
+
+    private static final Logger log =
+            LoggerFactory.getLogger(UninstallEvidencePayloadPolicy.class);
+
     private static final Pattern USERS_PATH = Pattern.compile(
             "(?i)c:\\\\users\\\\[^\\\\\\s\"']+");
     private static final Pattern PROGRAMDATA_PATH = Pattern.compile(
@@ -243,9 +273,14 @@ public class UninstallEvidencePayloadPolicy {
     }
 
     /**
-     * Walk the agent payload tree; throw on any forbidden key or value.
-     * The throw rolls back the surrounding agent-submit transaction so
-     * neither the result row nor the audit row is persisted.
+     * Walk the agent payload tree; throw on any forbidden key or value,
+     * EXCEPT the two legacy raw-tail keys ({@code stdoutTail} /
+     * {@code stderrTail}) which are silently dropped (skipped + key-only
+     * logged) so a SUCCESSFUL destructive uninstall stays recordable. The
+     * throw rolls back the surrounding agent-submit transaction so neither
+     * the result row nor the audit row is persisted; the dropped raw tail
+     * is still stripped by {@link #redact(Map)} and never reaches the audit
+     * row / API.
      */
     public void validate(Object payload) {
         walkValidate(payload, "$");
@@ -498,6 +533,15 @@ public class UninstallEvidencePayloadPolicy {
             for (Map.Entry<?, ?> entry : map.entrySet()) {
                 String rawKey = String.valueOf(entry.getKey());
                 String keyLower = rawKey.toLowerCase(Locale.ROOT);
+                if (DROP_NOT_REJECT_RAW_TAIL_KEYS.contains(keyLower)) {
+                    // AG-028 narrow hardening (Codex verdict B): legacy raw
+                    // stdout/stderr tails are silently dropped from uninstall
+                    // evidence so a SUCCESSFUL destructive uninstall stays
+                    // recordable; redact() still strips the value. Key-only
+                    // log — never the raw tail value (it may carry secrets/PII).
+                    log.info("dropped forbidden raw-tail key '{}' at {}", rawKey, path);
+                    continue;
+                }
                 if (FORBIDDEN_KEYS_LOWER.contains(keyLower)) {
                     throw new IllegalArgumentException(
                             "Forbidden uninstall-evidence field '" + rawKey + "' at " + path);
