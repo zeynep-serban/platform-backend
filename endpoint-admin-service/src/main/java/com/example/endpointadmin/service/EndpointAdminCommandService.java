@@ -12,6 +12,7 @@ import com.example.endpointadmin.model.ApprovalDecision;
 import com.example.endpointadmin.model.ApprovalStatus;
 import com.example.endpointadmin.model.CommandStatus;
 import com.example.endpointadmin.model.CommandType;
+import com.example.endpointadmin.model.DeploymentRing;
 import com.example.endpointadmin.model.EndpointCommand;
 import com.example.endpointadmin.model.EndpointCommandApproval;
 import com.example.endpointadmin.model.EndpointCommandResult;
@@ -407,6 +408,7 @@ public class EndpointAdminCommandService {
         UUID tenantId = context.tenantId();
         EndpointDevice device = deviceRepository.findVisibleToOrgAndId(tenantId, deviceId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Endpoint device not found."));
+        validateRequiredDeploymentRing(device, request.requiredDeploymentRing());
         EndpointSoftwareCatalogItem catalogItem = catalogRepository
                 .findByTenantIdAndCatalogItemId(tenantId, slug)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Catalog item not found."));
@@ -429,7 +431,9 @@ public class EndpointAdminCommandService {
                     ? null : cmd.getPayload().get("catalogItemUuid"));
             if (cmd.getCommandType() != CommandType.INSTALL_SOFTWARE
                     || !Objects.equals(cmd.getDevice().getId(), deviceId)
-                    || !Objects.equals(existingCatalogUuid, catalogItem.getId())) {
+                    || !Objects.equals(existingCatalogUuid, catalogItem.getId())
+                    || !Objects.equals(cmd.getPayload() == null ? null : cmd.getPayload().get("requiredDeploymentRing"),
+                            request.requiredDeploymentRing() == null ? null : request.requiredDeploymentRing().name())) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
                         "Install idempotency key already used by another install.");
             }
@@ -445,7 +449,8 @@ public class EndpointAdminCommandService {
             throw new InstallBlockedException(preflight);
         }
 
-        Map<String, Object> payload = buildInstallPayload(catalogItem, preflight, reason);
+        Map<String, Object> payload = buildInstallPayload(catalogItem, preflight, reason,
+                device.getDeploymentRing(), request.requiredDeploymentRing());
 
         EndpointCommand command = new EndpointCommand();
         command.setTenantId(tenantId);
@@ -476,6 +481,10 @@ public class EndpointAdminCommandService {
         auditMetadata.put("catalogItemUuid", catalogItem.getId().toString());
         auditMetadata.put("catalogPackageId", catalogItem.getPackageId());
         auditMetadata.put("catalogRowVersion", catalogItem.getVersion());
+        auditMetadata.put("deviceDeploymentRing", device.getDeploymentRing().name());
+        if (request.requiredDeploymentRing() != null) {
+            auditMetadata.put("requiredDeploymentRing", request.requiredDeploymentRing().name());
+        }
         auditMetadata.put("preflightDecision", preflight.decision().name());
         auditMetadata.put("preflightDecisionAt", preflight.evaluatedAt().toString());
         if (preflight.warnings() != null && !preflight.warnings().isEmpty()) {
@@ -502,7 +511,9 @@ public class EndpointAdminCommandService {
 
     private Map<String, Object> buildInstallPayload(EndpointSoftwareCatalogItem catalogItem,
                                                     InstallPreflightResponse preflight,
-                                                    String reason) {
+                                                    String reason,
+                                                    DeploymentRing deviceDeploymentRing,
+                                                    DeploymentRing requiredDeploymentRing) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("catalogItemId", catalogItem.getCatalogItemId());
         payload.put("catalogItemUuid", catalogItem.getId().toString());
@@ -546,6 +557,12 @@ public class EndpointAdminCommandService {
         // (Codex 019e77bd).
         payload.put("detectionRule", buildAgentDetectionRule(catalogItem, agentPackageId));
         payload.put("catalogItemKey", catalogItem.getCatalogItemId());
+        if (deviceDeploymentRing != null) {
+            payload.put("deviceDeploymentRing", deviceDeploymentRing.name());
+        }
+        if (requiredDeploymentRing != null) {
+            payload.put("requiredDeploymentRing", requiredDeploymentRing.name());
+        }
 
         payload.put("preflightDecision", preflight.decision().name());
         payload.put("preflightDecisionAt", preflight.evaluatedAt() == null
@@ -565,6 +582,17 @@ public class EndpointAdminCommandService {
             payload.put("reason", reason);
         }
         return payload;
+    }
+
+    private static void validateRequiredDeploymentRing(EndpointDevice device, DeploymentRing requiredRing) {
+        if (requiredRing == null) {
+            return;
+        }
+        DeploymentRing actual = device.getDeploymentRing() == null ? DeploymentRing.PILOT : device.getDeploymentRing();
+        if (actual != requiredRing) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Endpoint device is not assigned to the requested deployment ring.");
+        }
     }
 
     /**

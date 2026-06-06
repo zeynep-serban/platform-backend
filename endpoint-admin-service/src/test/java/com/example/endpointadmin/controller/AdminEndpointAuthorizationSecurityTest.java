@@ -6,6 +6,7 @@ import com.example.endpointadmin.config.SecurityConfig;
 import com.example.endpointadmin.dto.v1.admin.CreateMaintenanceTokenResponse;
 import com.example.endpointadmin.dto.v1.admin.EndpointDeviceDto;
 import com.example.endpointadmin.model.DeviceStatus;
+import com.example.endpointadmin.model.DeploymentRing;
 import com.example.endpointadmin.model.MaintenanceAction;
 import com.example.endpointadmin.model.OsType;
 import com.example.endpointadmin.security.AdminTenantContext;
@@ -28,6 +29,7 @@ import org.springframework.test.web.servlet.request.RequestPostProcessor;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -36,6 +38,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -85,7 +88,9 @@ class AdminEndpointAuthorizationSecurityTest {
         mockMvc.perform(get("/api/v1/admin/endpoint-devices").with(adminJwt("user-1")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].id").value(DEVICE_ID.toString()))
-                .andExpect(jsonPath("$[0].hostname").value("PC-001"));
+                .andExpect(jsonPath("$[0].hostname").value("PC-001"))
+                .andExpect(jsonPath("$[0].deploymentRing").value("PILOT"))
+                .andExpect(jsonPath("$[0].deviceTags[0]").value("pilot"));
     }
 
     @Test
@@ -147,6 +152,64 @@ class AdminEndpointAuthorizationSecurityTest {
     }
 
     @Test
+    void viewerCannotUpdateDeviceRolloutAssignment() throws Exception {
+        when(authzService.check("user-1", EndpointAdminAuthz.MANAGER, "module", EndpointAdminAuthz.MODULE))
+                .thenReturn(false);
+
+        mockMvc.perform(patch("/api/v1/admin/endpoint-devices/{deviceId}/rollout", DEVICE_ID)
+                        .with(adminJwt("user-1"))
+                        .contentType("application/json")
+                        .content("""
+                                {
+                                  "deploymentRing": "IT",
+                                  "deviceTags": ["it"]
+                                }
+                                """))
+                .andExpect(status().isForbidden());
+
+        verifyNoInteractions(deviceService);
+    }
+
+    @Test
+    void managerCanUpdateDeviceRolloutAssignment() throws Exception {
+        when(authzService.check("user-1", EndpointAdminAuthz.MANAGER, "module", EndpointAdminAuthz.MODULE))
+                .thenReturn(true);
+        Instant now = Instant.parse("2026-04-28T10:00:00Z");
+        EndpointDeviceDto updated = new EndpointDeviceDto(
+                DEVICE_ID,
+                TENANT_ID,
+                "PC-001",
+                "Pilot PC",
+                OsType.WINDOWS,
+                "Windows 11",
+                "0.3.0",
+                "fp-001",
+                "corp.local",
+                DeploymentRing.IT,
+                Set.of("it", "pilot"),
+                DeviceStatus.ONLINE,
+                now,
+                now,
+                now,
+                now
+        );
+        when(deviceService.updateRolloutAssignment(eq(TENANT_ID), eq(DEVICE_ID), any())).thenReturn(updated);
+
+        mockMvc.perform(patch("/api/v1/admin/endpoint-devices/{deviceId}/rollout", DEVICE_ID)
+                        .with(adminJwt("user-1"))
+                        .contentType("application/json")
+                        .content("""
+                                {
+                                  "deploymentRing": "IT",
+                                  "deviceTags": ["it", "pilot"]
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.deploymentRing").value("IT"))
+                .andExpect(jsonPath("$.deviceTags").isArray());
+    }
+
+    @Test
     void disabledOpenFgaAllowsAuthenticatedAdminRequest() throws Exception {
         when(authzService.isEnabled()).thenReturn(false);
         when(deviceService.listDevices(TENANT_ID)).thenReturn(List.of(deviceDto()));
@@ -184,6 +247,8 @@ class AdminEndpointAuthorizationSecurityTest {
                 "0.3.0",
                 "fp-001",
                 "corp.local",
+                DeploymentRing.PILOT,
+                Set.of("pilot"),
                 DeviceStatus.ONLINE,
                 now,
                 now,

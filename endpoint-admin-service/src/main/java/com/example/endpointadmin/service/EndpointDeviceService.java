@@ -1,21 +1,30 @@
 package com.example.endpointadmin.service;
 
 import com.example.endpointadmin.dto.v1.admin.EndpointDeviceDto;
+import com.example.endpointadmin.dto.v1.admin.UpdateDeviceRolloutRequest;
 import com.example.endpointadmin.dto.v1.agent.ConsumeEnrollmentRequest;
 import com.example.endpointadmin.model.DeviceStatus;
+import com.example.endpointadmin.model.DeploymentRing;
 import com.example.endpointadmin.model.EndpointDevice;
 import com.example.endpointadmin.repository.EndpointDeviceRepository;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 import static org.springframework.http.HttpStatus.NOT_FOUND;
 
 @Service
 public class EndpointDeviceService {
+
+    private static final Pattern DEVICE_TAG_PATTERN = Pattern.compile("[a-z0-9][a-z0-9._-]{0,63}");
 
     private final EndpointDeviceRepository repository;
 
@@ -74,6 +83,20 @@ public class EndpointDeviceService {
         return toDto(device);
     }
 
+    @Transactional
+    public EndpointDeviceDto updateRolloutAssignment(UUID tenantId, UUID deviceId,
+                                                     UpdateDeviceRolloutRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Rollout assignment request is required.");
+        }
+        EndpointDevice device = repository.findVisibleToOrgAndId(tenantId, deviceId)
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Endpoint device not found."));
+        DeploymentRing ring = request.deploymentRing() == null ? DeploymentRing.PILOT : request.deploymentRing();
+        device.setDeploymentRing(ring);
+        device.setDeviceTags(normalizeTags(request.deviceTags()));
+        return toDto(repository.saveAndFlush(device));
+    }
+
     public EndpointDeviceDto toDto(EndpointDevice device) {
         return new EndpointDeviceDto(
                 device.getId(),
@@ -85,11 +108,35 @@ public class EndpointDeviceService {
                 device.getAgentVersion(),
                 device.getMachineFingerprint(),
                 device.getDomainName(),
+                device.getDeploymentRing(),
+                device.getDeviceTags(),
                 device.getStatus(),
                 device.getLastSeenAt(),
                 device.getEnrolledAt(),
                 device.getCreatedAt(),
                 device.getUpdatedAt()
         );
+    }
+
+    private static Set<String> normalizeTags(Set<String> rawTags) {
+        if (rawTags == null || rawTags.isEmpty()) {
+            return Set.of();
+        }
+        LinkedHashSet<String> normalized = new LinkedHashSet<>();
+        for (String raw : rawTags) {
+            String tag = raw == null ? "" : raw.trim().toLowerCase(java.util.Locale.ROOT);
+            if (tag.isEmpty()) {
+                continue;
+            }
+            if (!DEVICE_TAG_PATTERN.matcher(tag).matches()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Device tags must be lowercase slug values up to 64 characters.");
+            }
+            normalized.add(tag);
+        }
+        if (normalized.size() > 32) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "At most 32 device tags are allowed.");
+        }
+        return normalized;
     }
 }

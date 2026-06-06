@@ -13,9 +13,13 @@ import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
 import jakarta.persistence.Version;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
+import java.util.LinkedHashSet;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 @Entity
@@ -76,6 +80,14 @@ public class EndpointDevice {
     private String domainName;
 
     @Enumerated(EnumType.STRING)
+    @Column(name = "deployment_ring", nullable = false, length = 32)
+    private DeploymentRing deploymentRing = DeploymentRing.PILOT;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "device_tags", nullable = false, columnDefinition = "jsonb")
+    private Set<String> deviceTags = new LinkedHashSet<>();
+
+    @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false, length = 32)
     private DeviceStatus status = DeviceStatus.PENDING_ENROLLMENT;
 
@@ -104,11 +116,23 @@ public class EndpointDevice {
         if (updatedAt == null) {
             updatedAt = now;
         }
+        if (deploymentRing == null) {
+            deploymentRing = DeploymentRing.PILOT;
+        }
+        if (deviceTags == null) {
+            deviceTags = new LinkedHashSet<>();
+        }
     }
 
     @PreUpdate
     void preUpdate() {
         updatedAt = Instant.now();
+        if (deploymentRing == null) {
+            deploymentRing = DeploymentRing.PILOT;
+        }
+        if (deviceTags == null) {
+            deviceTags = new LinkedHashSet<>();
+        }
     }
 
     public UUID getId() {
@@ -203,6 +227,22 @@ public class EndpointDevice {
 
     public void setDomainName(String domainName) {
         this.domainName = domainName;
+    }
+
+    public DeploymentRing getDeploymentRing() {
+        return deploymentRing;
+    }
+
+    public void setDeploymentRing(DeploymentRing deploymentRing) {
+        this.deploymentRing = deploymentRing == null ? DeploymentRing.PILOT : deploymentRing;
+    }
+
+    public Set<String> getDeviceTags() {
+        return deviceTags == null ? Set.of() : Set.copyOf(deviceTags);
+    }
+
+    public void setDeviceTags(Set<String> deviceTags) {
+        this.deviceTags = deviceTags == null ? new LinkedHashSet<>() : new LinkedHashSet<>(deviceTags);
     }
 
     public DeviceStatus getStatus() {

@@ -11,6 +11,7 @@ import com.example.endpointadmin.model.CatalogItemStatus;
 import com.example.endpointadmin.model.CatalogProvider;
 import com.example.endpointadmin.model.CatalogSourceType;
 import com.example.endpointadmin.model.CommandType;
+import com.example.endpointadmin.model.DeploymentRing;
 import com.example.endpointadmin.model.EndpointCommand;
 import com.example.endpointadmin.model.EndpointDevice;
 import com.example.endpointadmin.model.CatalogSilentArgsPolicy;
@@ -224,6 +225,7 @@ class EndpointAdminCommandServiceInstallTest {
                 .containsEntry("catalogPackageId", catalog.getPackageId())
                 .containsEntry("preflightDecision", "PASS")
                 .containsEntry("reason", "scheduled install")
+                .containsEntry("deviceDeploymentRing", "PILOT")
                 // AG-027 COMMAND-CONTRACT §7 — agent-consumed fields the agent
                 // fail-closes on. These were absent before the fix, so the
                 // agent rejected the install at "missing detectionRule.type"
@@ -251,6 +253,52 @@ class EndpointAdminCommandServiceInstallTest {
                 org.mockito.ArgumentMatchers.eq("ENDPOINT_INSTALL_COMMAND_CREATED"),
                 org.mockito.ArgumentMatchers.eq("CREATE_INSTALL_COMMAND"),
                 anyString(), anyString(), any(), any(), any());
+    }
+
+    @Test
+    void createInstallRejectsWhenRequiredDeploymentRingDoesNotMatchDevice() {
+        EndpointDevice device = testDevice(DEVICE_ID);
+        device.setDeploymentRing(DeploymentRing.PILOT);
+        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+
+        CreateInstallRequest request = new CreateInstallRequest(
+                CATALOG_SLUG, CALLER_KEY, "pilot-only", DeploymentRing.IT);
+
+        assertThatThrownBy(() -> service.createInstall(TENANT, DEVICE_ID, request))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("not assigned to the requested deployment ring");
+        verify(catalogRepository, never()).findByTenantIdAndCatalogItemId(any(), anyString());
+        verify(preflightService, never()).evaluate(any(), any(), anyString());
+        verify(commandRepository, never()).saveAndFlush(any(EndpointCommand.class));
+    }
+
+    @Test
+    void createInstallRecordsRequiredDeploymentRingWhenItMatchesDevice() {
+        EndpointDevice device = testDevice(DEVICE_ID);
+        device.setDeploymentRing(DeploymentRing.IT);
+        EndpointSoftwareCatalogItem catalog = testCatalog();
+        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(catalogRepository.findByTenantIdAndCatalogItemId(TENANT_ID, CATALOG_SLUG))
+                .thenReturn(Optional.of(catalog));
+        when(commandRepository.findByTenantIdAndIdempotencyKey(TENANT_ID,
+                "admin-install:" + DEVICE_ID + ":" + CATALOG_UUID + ":" + CALLER_KEY))
+                .thenReturn(Optional.empty());
+        when(preflightService.evaluate(TENANT, DEVICE_ID, CATALOG_SLUG))
+                .thenReturn(preflightOf(InstallPreflightDecision.PASS));
+        when(commandRepository.saveAndFlush(any(EndpointCommand.class)))
+                .thenAnswer(inv -> {
+                    EndpointCommand cmd = inv.getArgument(0);
+                    setField(cmd, "id", UUID.randomUUID());
+                    return cmd;
+                });
+
+        EndpointCommandDto dto = service.createInstall(TENANT, DEVICE_ID,
+                new CreateInstallRequest(CATALOG_SLUG, CALLER_KEY, null, DeploymentRing.IT));
+
+        assertThat(dto.payload())
+                .containsEntry("deviceDeploymentRing", "IT")
+                .containsEntry("requiredDeploymentRing", "IT");
+        verify(commandRepository, times(1)).saveAndFlush(any(EndpointCommand.class));
     }
 
     @Test
@@ -496,6 +544,7 @@ class EndpointAdminCommandServiceInstallTest {
     private static EndpointDevice testDevice(UUID id) {
         EndpointDevice device = new EndpointDevice();
         device.setTenantId(TENANT_ID);
+        device.setDeploymentRing(DeploymentRing.PILOT);
         setField(device, "id", id);
         return device;
     }

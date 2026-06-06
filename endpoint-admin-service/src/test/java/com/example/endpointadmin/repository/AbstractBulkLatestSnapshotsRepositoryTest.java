@@ -14,12 +14,14 @@ import org.hibernate.stat.Statistics;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -258,12 +260,21 @@ abstract class AbstractBulkLatestSnapshotsRepositoryTest {
     private UUID seedDevice(UUID tenant) {
         UUID id = UUID.randomUUID();
         Timestamp now = Timestamp.from(Instant.parse("2026-05-30T09:00:00Z"));
+        String deviceTagsExpression = isPostgres() ? "?::jsonb" : "?";
         jdbc.update("""
                 INSERT INTO endpoint_devices
-                  (id, tenant_id, hostname, os_type, status, created_at, updated_at, version)
-                VALUES (?, ?, ?, 'WINDOWS', 'ONLINE', ?, ?, 0)
-                """, id, tenant, "host-" + id.toString().substring(0, 8), now, now);
+                  (id, tenant_id, hostname, os_type, status, deployment_ring, device_tags, created_at, updated_at, version)
+                VALUES (?, ?, ?, 'WINDOWS', 'ONLINE', 'PILOT', %s, ?, ?, 0)
+                """.formatted(deviceTagsExpression),
+                id, tenant, "host-" + id.toString().substring(0, 8), "[]", now, now);
         return id;
+    }
+
+    private boolean isPostgres() {
+        return Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection ->
+                connection.getMetaData().getDatabaseProductName()
+                        .toLowerCase(Locale.ROOT)
+                        .contains("postgres")));
     }
 
     private UUID seedHealthSnapshot(UUID tenant, UUID device, Instant collectedAt, int memoryUsedPercent) {

@@ -1,5 +1,6 @@
 package com.example.endpointadmin.dto.v1.admin;
 
+import com.example.endpointadmin.model.DeploymentRing;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 
@@ -28,5 +29,11 @@ public record CreateInstallRequest(
         String idempotencyKey,
 
         @Size(max = 512)
-        String reason) {
+        String reason,
+
+        DeploymentRing requiredDeploymentRing) {
+
+    public CreateInstallRequest(String catalogItemId, String idempotencyKey, String reason) {
+        this(catalogItemId, idempotencyKey, reason, null);
+    }
 }

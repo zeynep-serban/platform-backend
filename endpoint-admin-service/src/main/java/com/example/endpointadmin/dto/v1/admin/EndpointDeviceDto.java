@@ -1,9 +1,11 @@
 package com.example.endpointadmin.dto.v1.admin;
 
 import com.example.endpointadmin.model.DeviceStatus;
+import com.example.endpointadmin.model.DeploymentRing;
 import com.example.endpointadmin.model.OsType;
 
 import java.time.Instant;
+import java.util.Set;
 import java.util.UUID;
 
 public record EndpointDeviceDto(
@@ -16,6 +18,8 @@ public record EndpointDeviceDto(
         String agentVersion,
         String machineFingerprint,
         String domainName,
+        DeploymentRing deploymentRing,
+        Set<String> deviceTags,
         DeviceStatus status,
         Instant lastSeenAt,
         Instant enrolledAt,

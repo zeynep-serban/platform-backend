@@ -2,12 +2,16 @@ package com.example.endpointadmin.controller;
 
 import com.example.commonauth.openfga.RequireModule;
 import com.example.endpointadmin.dto.v1.admin.EndpointDeviceDto;
+import com.example.endpointadmin.dto.v1.admin.UpdateDeviceRolloutRequest;
 import com.example.endpointadmin.security.AdminTenantContext;
 import com.example.endpointadmin.security.EndpointAdminAuthz;
 import com.example.endpointadmin.security.TenantContextResolver;
 import com.example.endpointadmin.service.EndpointDeviceService;
+import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -38,5 +42,14 @@ public class AdminEndpointDeviceController {
     public EndpointDeviceDto getDevice(@PathVariable UUID deviceId) {
         AdminTenantContext context = tenantContextResolver.resolveRequired();
         return deviceService.getDevice(context.tenantId(), deviceId);
+    }
+
+    @PatchMapping("/{deviceId}/rollout")
+    @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.MANAGER)
+    public EndpointDeviceDto updateRolloutAssignment(
+            @PathVariable UUID deviceId,
+            @Valid @RequestBody UpdateDeviceRolloutRequest request) {
+        AdminTenantContext context = tenantContextResolver.resolveRequired();
+        return deviceService.updateRolloutAssignment(context.tenantId(), deviceId, request);
     }
 }
