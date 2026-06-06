@@ -72,6 +72,26 @@ class EndpointAdminAuthorizationAnnotationTest {
     }
 
     /**
+     * BE-029 (Faz 22.5.8): approved package bundle admin routes reuse the
+     * existing endpoint-admin module relations. GET routes are read-only
+     * VIEWER; create/approve/revoke writes require MANAGER. No new RBAC
+     * scope opens for rollout bundles.
+     */
+    @Test
+    void softwareBundleControllerSeparatesReadAndWriteRelations() {
+        for (Method method :
+                AdminEndpointSoftwareBundleController.class
+                        .getDeclaredMethods()) {
+            if (method.isAnnotationPresent(PostMapping.class)) {
+                assertMethodRequires(method, EndpointAdminAuthz.MANAGER);
+            }
+            if (method.isAnnotationPresent(GetMapping.class)) {
+                assertMethodRequires(method, EndpointAdminAuthz.VIEWER);
+            }
+        }
+    }
+
+    /**
      * BE-020I (Faz 22.5.3A): software inventory admin GET routes reuse the
      * existing {@code module:endpoint-admin} VIEWER relation; no new RBAC
      * scope opens (Codex 019e6ab2 iter-2 acceptance). The agent ingest
