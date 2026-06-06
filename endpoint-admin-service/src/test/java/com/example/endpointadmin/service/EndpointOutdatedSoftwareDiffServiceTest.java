@@ -42,11 +42,7 @@ class EndpointOutdatedSoftwareDiffServiceTest {
     private final EndpointOutdatedSoftwareDiffService service =
             new EndpointOutdatedSoftwareDiffService(repository);
 
-    private final AdminTenantContext context = mock(AdminTenantContext.class);
-
-    EndpointOutdatedSoftwareDiffServiceTest() {
-        when(context.tenantId()).thenReturn(TENANT);
-    }
+    private final AdminTenantContext context = new AdminTenantContext(TENANT, "outdated-diff-test-admin");
 
     @Test
     void noHistory_whenZeroSnapshots() {

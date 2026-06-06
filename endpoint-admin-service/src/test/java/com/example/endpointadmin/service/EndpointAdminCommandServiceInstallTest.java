@@ -79,6 +79,8 @@ class EndpointAdminCommandServiceInstallTest {
     private static final UUID CATALOG_UUID = UUID.fromString("33333333-3333-3333-3333-333333333333");
     private static final UUID OTHER_CATALOG_UUID = UUID.fromString("55555555-5555-5555-5555-555555555555");
     private static final Instant NOW = Instant.parse("2026-05-28T12:00:00Z");
+    private static final Instant NOT_BEFORE = Instant.parse("2026-05-28T13:00:00Z");
+    private static final Instant EXPIRES_AT = Instant.parse("2026-05-28T14:00:00Z");
     private static final AdminTenantContext TENANT =
             new AdminTenantContext(TENANT_ID, "alice@example.com");
     private static final String CATALOG_SLUG = "7zip-stable";
@@ -253,6 +255,123 @@ class EndpointAdminCommandServiceInstallTest {
                 org.mockito.ArgumentMatchers.eq("ENDPOINT_INSTALL_COMMAND_CREATED"),
                 org.mockito.ArgumentMatchers.eq("CREATE_INSTALL_COMMAND"),
                 anyString(), anyString(), any(), any(), any());
+    }
+
+    @Test
+    void createInstallSchedulesCommandInsideMaintenanceWindow() {
+        EndpointDevice device = testDevice(DEVICE_ID);
+        EndpointSoftwareCatalogItem catalog = testCatalog();
+        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(catalogRepository.findByTenantIdAndCatalogItemId(TENANT_ID, CATALOG_SLUG))
+                .thenReturn(Optional.of(catalog));
+        when(commandRepository.findByTenantIdAndIdempotencyKey(TENANT_ID,
+                "admin-install:" + DEVICE_ID + ":" + CATALOG_UUID + ":" + CALLER_KEY))
+                .thenReturn(Optional.empty());
+        when(preflightService.evaluate(TENANT, DEVICE_ID, CATALOG_SLUG))
+                .thenReturn(preflightOf(InstallPreflightDecision.PASS));
+        when(commandRepository.saveAndFlush(any(EndpointCommand.class)))
+                .thenAnswer(inv -> {
+                    EndpointCommand cmd = inv.getArgument(0);
+                    setField(cmd, "id", UUID.randomUUID());
+                    return cmd;
+                });
+
+        EndpointCommandDto dto = service.createInstall(TENANT, DEVICE_ID,
+                new CreateInstallRequest(
+                        CATALOG_SLUG,
+                        CALLER_KEY,
+                        "maintenance-window install",
+                        DeploymentRing.PILOT,
+                        NOT_BEFORE,
+                        EXPIRES_AT));
+
+        assertThat(dto.visibleAfterAt()).isEqualTo(NOT_BEFORE);
+        assertThat(dto.expiresAt()).isEqualTo(EXPIRES_AT);
+        assertThat(dto.payload())
+                .containsEntry("requiredDeploymentRing", "PILOT")
+                .containsEntry("notBefore", NOT_BEFORE.toString())
+                .containsEntry("expiresAt", EXPIRES_AT.toString());
+        org.mockito.ArgumentCaptor<EndpointCommand> captor =
+                org.mockito.ArgumentCaptor.forClass(EndpointCommand.class);
+        verify(commandRepository).saveAndFlush(captor.capture());
+        assertThat(captor.getValue().getVisibleAfterAt()).isEqualTo(NOT_BEFORE);
+        assertThat(captor.getValue().getExpiresAt()).isEqualTo(EXPIRES_AT);
+    }
+
+    @Test
+    void createInstallRejectsExpiryBeforeNotBefore() {
+        EndpointDevice device = testDevice(DEVICE_ID);
+        EndpointSoftwareCatalogItem catalog = testCatalog();
+        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(catalogRepository.findByTenantIdAndCatalogItemId(TENANT_ID, CATALOG_SLUG))
+                .thenReturn(Optional.of(catalog));
+
+        CreateInstallRequest request = new CreateInstallRequest(
+                CATALOG_SLUG,
+                CALLER_KEY,
+                "bad maintenance-window",
+                DeploymentRing.PILOT,
+                EXPIRES_AT,
+                NOT_BEFORE);
+
+        assertThatThrownBy(() -> service.createInstall(TENANT, DEVICE_ID, request))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("expiry");
+        verify(commandRepository, never()).findByTenantIdAndIdempotencyKey(any(), anyString());
+        verify(preflightService, never()).evaluate(any(), any(), anyString());
+        verify(commandRepository, never()).saveAndFlush(any(EndpointCommand.class));
+    }
+
+    @Test
+    void createInstallRejectsPastNotBefore() {
+        EndpointDevice device = testDevice(DEVICE_ID);
+        EndpointSoftwareCatalogItem catalog = testCatalog();
+        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(catalogRepository.findByTenantIdAndCatalogItemId(TENANT_ID, CATALOG_SLUG))
+                .thenReturn(Optional.of(catalog));
+
+        CreateInstallRequest request = new CreateInstallRequest(
+                CATALOG_SLUG,
+                CALLER_KEY,
+                "past maintenance-window",
+                DeploymentRing.PILOT,
+                NOW.minusSeconds(1),
+                EXPIRES_AT);
+
+        assertThatThrownBy(() -> service.createInstall(TENANT, DEVICE_ID, request))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("notBefore");
+        verify(commandRepository, never()).findByTenantIdAndIdempotencyKey(any(), anyString());
+        verify(preflightService, never()).evaluate(any(), any(), anyString());
+        verify(commandRepository, never()).saveAndFlush(any(EndpointCommand.class));
+    }
+
+    @Test
+    void createInstallRejectsIdempotencyKeyReusedWithDifferentSchedule() {
+        EndpointDevice device = testDevice(DEVICE_ID);
+        EndpointSoftwareCatalogItem catalog = testCatalog();
+        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(catalogRepository.findByTenantIdAndCatalogItemId(TENANT_ID, CATALOG_SLUG))
+                .thenReturn(Optional.of(catalog));
+
+        EndpointCommand existing = existingInstallCommand(device);
+        when(commandRepository.findByTenantIdAndIdempotencyKey(TENANT_ID,
+                "admin-install:" + DEVICE_ID + ":" + CATALOG_UUID + ":" + CALLER_KEY))
+                .thenReturn(Optional.of(existing));
+
+        CreateInstallRequest request = new CreateInstallRequest(
+                CATALOG_SLUG,
+                CALLER_KEY,
+                "scheduled retry",
+                null,
+                NOT_BEFORE,
+                EXPIRES_AT);
+
+        assertThatThrownBy(() -> service.createInstall(TENANT, DEVICE_ID, request))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("Install idempotency key already used");
+        verify(preflightService, never()).evaluate(any(), any(), anyString());
+        verify(commandRepository, never()).saveAndFlush(any(EndpointCommand.class));
     }
 
     @Test

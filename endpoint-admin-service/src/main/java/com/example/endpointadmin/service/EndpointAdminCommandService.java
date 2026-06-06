@@ -415,6 +415,8 @@ public class EndpointAdminCommandService {
 
         String reason = trimToNull(request.reason());
         Instant now = Instant.now(clock);
+        Instant visibleAfterAt = resolveInstallVisibleAfterAt(now, request.notBefore());
+        validateExpiry(visibleAfterAt, request.expiresAt());
         String idempotencyKey = resolveInstallIdempotencyKey(
                 deviceId, catalogItem.getId(), request.idempotencyKey());
 
@@ -433,7 +435,11 @@ public class EndpointAdminCommandService {
                     || !Objects.equals(cmd.getDevice().getId(), deviceId)
                     || !Objects.equals(existingCatalogUuid, catalogItem.getId())
                     || !Objects.equals(cmd.getPayload() == null ? null : cmd.getPayload().get("requiredDeploymentRing"),
-                            request.requiredDeploymentRing() == null ? null : request.requiredDeploymentRing().name())) {
+                            request.requiredDeploymentRing() == null ? null : request.requiredDeploymentRing().name())
+                    || !Objects.equals(cmd.getPayload() == null ? null : cmd.getPayload().get("notBefore"),
+                            instantStringOrNull(request.notBefore()))
+                    || !Objects.equals(cmd.getPayload() == null ? null : cmd.getPayload().get("expiresAt"),
+                            instantStringOrNull(request.expiresAt()))) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
                         "Install idempotency key already used by another install.");
             }
@@ -450,7 +456,7 @@ public class EndpointAdminCommandService {
         }
 
         Map<String, Object> payload = buildInstallPayload(catalogItem, preflight, reason,
-                device.getDeploymentRing(), request.requiredDeploymentRing());
+                device.getDeploymentRing(), request.requiredDeploymentRing(), request.notBefore(), request.expiresAt());
 
         EndpointCommand command = new EndpointCommand();
         command.setTenantId(tenantId);
@@ -466,8 +472,8 @@ public class EndpointAdminCommandService {
         command.setPriority(100);
         command.setAttemptCount(0);
         command.setMaxAttempts(3);
-        command.setVisibleAfterAt(now);
-        command.setExpiresAt(null);
+        command.setVisibleAfterAt(visibleAfterAt);
+        command.setExpiresAt(request.expiresAt());
         String subject = resolveSubject(context);
         command.setIssuedBySubject(subject);
         command.setIssuedAt(now);
@@ -484,6 +490,12 @@ public class EndpointAdminCommandService {
         auditMetadata.put("deviceDeploymentRing", device.getDeploymentRing().name());
         if (request.requiredDeploymentRing() != null) {
             auditMetadata.put("requiredDeploymentRing", request.requiredDeploymentRing().name());
+        }
+        if (request.notBefore() != null) {
+            auditMetadata.put("notBefore", request.notBefore().toString());
+        }
+        if (request.expiresAt() != null) {
+            auditMetadata.put("expiresAt", request.expiresAt().toString());
         }
         auditMetadata.put("preflightDecision", preflight.decision().name());
         auditMetadata.put("preflightDecisionAt", preflight.evaluatedAt().toString());
@@ -513,7 +525,9 @@ public class EndpointAdminCommandService {
                                                     InstallPreflightResponse preflight,
                                                     String reason,
                                                     DeploymentRing deviceDeploymentRing,
-                                                    DeploymentRing requiredDeploymentRing) {
+                                                    DeploymentRing requiredDeploymentRing,
+                                                    Instant notBefore,
+                                                    Instant expiresAt) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("catalogItemId", catalogItem.getCatalogItemId());
         payload.put("catalogItemUuid", catalogItem.getId().toString());
@@ -563,6 +577,12 @@ public class EndpointAdminCommandService {
         if (requiredDeploymentRing != null) {
             payload.put("requiredDeploymentRing", requiredDeploymentRing.name());
         }
+        if (notBefore != null) {
+            payload.put("notBefore", notBefore.toString());
+        }
+        if (expiresAt != null) {
+            payload.put("expiresAt", expiresAt.toString());
+        }
 
         payload.put("preflightDecision", preflight.decision().name());
         payload.put("preflightDecisionAt", preflight.evaluatedAt() == null
@@ -582,6 +602,21 @@ public class EndpointAdminCommandService {
             payload.put("reason", reason);
         }
         return payload;
+    }
+
+    private static Instant resolveInstallVisibleAfterAt(Instant now, Instant notBefore) {
+        if (notBefore == null) {
+            return now;
+        }
+        if (notBefore.isBefore(now)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Install notBefore must be now or in the future.");
+        }
+        return notBefore;
+    }
+
+    private static String instantStringOrNull(Instant instant) {
+        return instant == null ? null : instant.toString();
     }
 
     private static void validateRequiredDeploymentRing(EndpointDevice device, DeploymentRing requiredRing) {

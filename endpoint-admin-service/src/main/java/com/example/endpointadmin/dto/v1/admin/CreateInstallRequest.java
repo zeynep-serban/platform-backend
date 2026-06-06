@@ -4,6 +4,8 @@ import com.example.endpointadmin.model.DeploymentRing;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 
+import java.time.Instant;
+
 /**
  * BE-021 — request body for {@code POST /api/v1/admin/endpoint-devices/{deviceId}/installs}.
  *
@@ -31,9 +33,28 @@ public record CreateInstallRequest(
         @Size(max = 512)
         String reason,
 
-        DeploymentRing requiredDeploymentRing) {
+        DeploymentRing requiredDeploymentRing,
+
+        /**
+         * BE-027 first slice — do not expose the command to the agent before
+         * this instant. The service maps it to {@code visible_after_at}; the
+         * agent claim query already enforces that field.
+         */
+        Instant notBefore,
+
+        /**
+         * BE-027 first slice — optional command expiry. When supplied it must
+         * be after the resolved not-before instant, creating a bounded
+         * maintenance window.
+         */
+        Instant expiresAt) {
 
     public CreateInstallRequest(String catalogItemId, String idempotencyKey, String reason) {
-        this(catalogItemId, idempotencyKey, reason, null);
+        this(catalogItemId, idempotencyKey, reason, null, null, null);
+    }
+
+    public CreateInstallRequest(String catalogItemId, String idempotencyKey, String reason,
+                                DeploymentRing requiredDeploymentRing) {
+        this(catalogItemId, idempotencyKey, reason, requiredDeploymentRing, null, null);
     }
 }
