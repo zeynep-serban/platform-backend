@@ -4,6 +4,7 @@ import com.example.endpointadmin.config.SecurityConfigLocal;
 import com.example.endpointadmin.dto.v1.agent.AgentHeartbeatResponse;
 import com.example.endpointadmin.model.DeviceStatus;
 import com.example.endpointadmin.security.DeviceCredentialAuthenticationToken;
+import com.example.endpointadmin.security.DeviceCredentialException;
 import com.example.endpointadmin.security.DeviceCredentialResult;
 import com.example.endpointadmin.service.EndpointHeartbeatService;
 import org.junit.jupiter.api.Test;
@@ -91,5 +92,36 @@ class AgentHeartbeatControllerTest {
                                 }
                                 """))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void heartbeatReturnsUnauthorizedWhenDeviceRequiresReEnrollment() throws Exception {
+        DeviceCredentialResult principal = new DeviceCredentialResult(
+                UUID.randomUUID().toString(),
+                "credential-1",
+                Instant.parse("2026-04-28T10:00:00Z")
+        );
+        when(heartbeatService.recordHeartbeat(any(), any(), eq("127.0.0.1")))
+                .thenThrow(new DeviceCredentialException(
+                        "DEVICE_RE_ENROLL_REQUIRED",
+                        "Device credential is stale; re-enrollment is required."));
+
+        mockMvc.perform(post("/api/v1/agent/heartbeat")
+                        .with(authentication(DeviceCredentialAuthenticationToken.authenticated(principal)))
+                        .contentType("application/json")
+                        .content("""
+                                {
+                                  "installId": "install-1",
+                                  "hostname": "PC-001",
+                                  "osFamily": "WINDOWS",
+                                  "architecture": "amd64",
+                                  "agentVersion": "0.2.0",
+                                  "state": "ONLINE",
+                                  "timestamp": "2026-04-28T10:00:00Z"
+                                }
+                """))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error").value("DEVICE_RE_ENROLL_REQUIRED"))
+                .andExpect(jsonPath("$.message").value("Device credential is stale; re-enrollment is required."));
     }
 }

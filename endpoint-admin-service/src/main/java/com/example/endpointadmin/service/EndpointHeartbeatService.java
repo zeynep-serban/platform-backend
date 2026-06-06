@@ -45,7 +45,9 @@ public class EndpointHeartbeatService {
         UUID deviceId = resolveDeviceId(principal);
         Instant now = Instant.now(clock);
         EndpointDevice device = deviceRepository.findById(deviceId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Endpoint device not found."));
+                .orElseThrow(() -> new DeviceCredentialException(
+                        "DEVICE_RE_ENROLL_REQUIRED",
+                        "Device credential is stale; re-enrollment is required."));
 
         if (device.getStatus() == DeviceStatus.DECOMMISSIONED) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Endpoint device is decommissioned.");

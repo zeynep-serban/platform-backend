@@ -102,6 +102,20 @@ class EndpointHeartbeatServiceTest {
     }
 
     @Test
+    void recordHeartbeatRequiresReEnrollmentWhenCredentialReferencesMissingDevice() {
+        AgentHeartbeatRequest request = heartbeatRequest();
+
+        assertThatThrownBy(() -> heartbeatService.recordHeartbeat(
+                new DeviceCredentialResult(UUID.randomUUID().toString(), UUID.randomUUID().toString(), Instant.now()),
+                request,
+                "127.0.0.1"
+        ))
+                .isInstanceOf(DeviceCredentialException.class)
+                .extracting("errorCode")
+                .isEqualTo("DEVICE_RE_ENROLL_REQUIRED");
+    }
+
+    @Test
     void recordHeartbeatRejectsDecommissionedDevice() {
         EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.DECOMMISSIONED));
 
