@@ -1,6 +1,7 @@
 package com.example.endpointadmin.repository;
 
 import com.example.endpointadmin.model.CommandStatus;
+import com.example.endpointadmin.model.CommandType;
 import com.example.endpointadmin.model.DeviceStatus;
 import com.example.endpointadmin.model.EndpointCommand;
 import jakarta.persistence.LockModeType;
@@ -28,6 +29,11 @@ public interface EndpointCommandRepository extends JpaRepository<EndpointCommand
     List<EndpointCommand> findByTenantIdAndDevice_IdOrderByIssuedAtDesc(UUID tenantId, UUID deviceId);
 
     List<EndpointCommand> findByTenantIdOrderByIssuedAtDesc(UUID tenantId);
+
+    long countByTenantIdAndCommandTypeAndStatusInAndLockedUntilAfter(UUID tenantId,
+                                                                     CommandType commandType,
+                                                                     List<CommandStatus> statuses,
+                                                                     Instant now);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("""

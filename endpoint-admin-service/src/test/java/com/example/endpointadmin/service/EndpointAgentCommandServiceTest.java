@@ -128,6 +128,63 @@ class EndpointAgentCommandServiceTest {
     }
 
     @Test
+    void claimNextClaimsInstallWhenTenantThrottleHasCapacity() {
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-INSTALL-001"));
+        EndpointCommand install = commandRepository.saveAndFlush(
+                installCommand(device, "install-capacity", 10));
+
+        Optional<AgentCommandResponse> response = commandService.claimNext(principal(device));
+
+        assertThat(response).isPresent();
+        assertThat(response.orElseThrow().commandId()).isEqualTo(install.getId());
+        assertThat(response.orElseThrow().type()).isEqualTo(CommandType.INSTALL_SOFTWARE);
+        EndpointCommand updated = commandRepository.findById(install.getId()).orElseThrow();
+        assertThat(updated.getStatus()).isEqualTo(CommandStatus.DELIVERED);
+        assertThat(updated.getLockedUntil()).isAfter(Instant.now());
+    }
+
+    @Test
+    void claimNextDoesNotClaimInstallWhenTenantThrottleIsSaturated() {
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-INSTALL-002"));
+        EndpointDevice other = device(DeviceStatus.ONLINE, "PC-INSTALL-OTHER");
+        other.setTenantId(device.getTenantId());
+        other = deviceRepository.saveAndFlush(other);
+        commandRepository.saveAndFlush(activeInstallCommand(other, "install-active", 10));
+        EndpointCommand waitingInstall = commandRepository.saveAndFlush(
+                installCommand(device, "install-waiting", 20));
+
+        Optional<AgentCommandResponse> response = commandService.claimNext(principal(device));
+
+        assertThat(response).isEmpty();
+        EndpointCommand reloaded = commandRepository.findById(waitingInstall.getId()).orElseThrow();
+        assertThat(reloaded.getStatus()).isEqualTo(CommandStatus.QUEUED);
+        assertThat(reloaded.getLockedBy()).isNull();
+        assertThat(reloaded.getAttemptCount()).isZero();
+    }
+
+    @Test
+    void claimNextSkipsThrottledInstallAndClaimsNextNonInstallCommand() {
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-INSTALL-003"));
+        EndpointDevice other = device(DeviceStatus.ONLINE, "PC-INSTALL-OTHER-2");
+        other.setTenantId(device.getTenantId());
+        other = deviceRepository.saveAndFlush(other);
+        commandRepository.saveAndFlush(activeInstallCommand(other, "install-active-2", 10));
+        EndpointCommand throttledInstall = commandRepository.saveAndFlush(
+                installCommand(device, "install-top-priority", 5));
+        EndpointCommand inventory = commandRepository.saveAndFlush(
+                command(device, "cmd-behind-install", 10));
+
+        Optional<AgentCommandResponse> response = commandService.claimNext(principal(device));
+
+        assertThat(response).isPresent();
+        assertThat(response.orElseThrow().commandId()).isEqualTo(inventory.getId());
+        assertThat(response.orElseThrow().type()).isEqualTo(CommandType.COLLECT_INVENTORY);
+        EndpointCommand installReloaded = commandRepository.findById(throttledInstall.getId()).orElseThrow();
+        assertThat(installReloaded.getStatus()).isEqualTo(CommandStatus.QUEUED);
+        assertThat(installReloaded.getLockedBy()).isNull();
+    }
+
+    @Test
     void submitResultStoresResultAndFinalizesCommand() {
         EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-001"));
         EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-result", 10));
@@ -894,6 +951,26 @@ class EndpointAgentCommandServiceTest {
         command.setIssuedBySubject("admin@example.com");
         command.setVisibleAfterAt(Instant.now().minusSeconds(60));
         command.setIssuedAt(Instant.now().minusSeconds(120));
+        return command;
+    }
+
+    private EndpointCommand installCommand(EndpointDevice device, String idempotencyKey, int priority) {
+        EndpointCommand command = command(device, idempotencyKey, priority);
+        command.setCommandType(CommandType.INSTALL_SOFTWARE);
+        command.setPayload(Map.of(
+                "catalogItemId", "7zip-stable",
+                "packageId", "7zip.7zip",
+                "provider", "WINGET"));
+        return command;
+    }
+
+    private EndpointCommand activeInstallCommand(EndpointDevice device, String idempotencyKey, int priority) {
+        EndpointCommand command = installCommand(device, idempotencyKey, priority);
+        command.setStatus(CommandStatus.DELIVERED);
+        command.setLockedBy("active-install-claim");
+        command.setLockedUntil(Instant.now().plusSeconds(300));
+        command.setAttemptCount(1);
+        command.setDeliveredAt(Instant.now().minusSeconds(30));
         return command;
     }
 

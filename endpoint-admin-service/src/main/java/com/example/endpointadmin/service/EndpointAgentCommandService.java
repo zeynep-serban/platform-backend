@@ -30,12 +30,20 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
 @Service
 public class EndpointAgentCommandService {
+
+    // QUEUED commands are retry-visible but not actively held; only live claims
+    // count against tenant-wide install concurrency.
+    private static final List<CommandStatus> ACTIVE_INSTALL_CLAIM_STATUSES = List.of(
+            CommandStatus.DELIVERED,
+            CommandStatus.ACKED,
+            CommandStatus.RUNNING);
 
     private final EndpointCommandRepository commandRepository;
     private final EndpointCommandResultRepository resultRepository;
@@ -63,6 +71,22 @@ public class EndpointAgentCommandService {
     private final EndpointUninstallAuditService uninstallAuditService;
     private final Clock clock;
     private final Duration claimTtl;
+
+    /**
+     * BE-028 first slice — tenant-wide install throttle. A value below one is
+     * clamped to one so a misconfigured property cannot silently disable all
+     * install dispatch or remove the safety gate.
+     */
+    @Value("${endpoint-admin.commands.install-max-concurrent:1}")
+    private int installMaxConcurrent;
+
+    /**
+     * BE-028 first slice — scan beyond the single top-priority candidate so a
+     * throttled install command does not starve ordinary commands queued
+     * behind it for the same device.
+     */
+    @Value("${endpoint-admin.commands.claim-candidate-scan-limit:10}")
+    private int claimCandidateScanLimit;
 
     public EndpointAgentCommandService(EndpointCommandRepository commandRepository,
                                        EndpointCommandResultRepository resultRepository,
@@ -128,13 +152,24 @@ public class EndpointAgentCommandService {
                 CommandStatus.QUEUED,
                 CommandStatus.DELIVERED,
                 now,
-                PageRequest.of(0, 1)
+                PageRequest.of(0, Math.max(1, claimCandidateScanLimit))
         );
         if (candidates.isEmpty()) {
             return Optional.empty();
         }
 
-        EndpointCommand command = candidates.get(0);
+        EndpointCommand command = null;
+        for (EndpointCommand candidate : candidates) {
+            if (installThrottleSaturated(candidate, now)) {
+                continue;
+            }
+            command = candidate;
+            break;
+        }
+        if (command == null) {
+            return Optional.empty();
+        }
+
         String claimId = UUID.randomUUID().toString();
         Instant claimExpiresAt = now.plus(claimTtl);
         command.setStatus(CommandStatus.DELIVERED);
@@ -147,6 +182,20 @@ public class EndpointAgentCommandService {
         commandRepository.saveAndFlush(command);
 
         return Optional.of(toResponse(command, claimId, claimExpiresAt));
+    }
+
+    private boolean installThrottleSaturated(EndpointCommand candidate, Instant now) {
+        if (candidate.getCommandType() != CommandType.INSTALL_SOFTWARE) {
+            return false;
+        }
+        int maxConcurrent = Math.max(1, installMaxConcurrent);
+        long activeInstalls = commandRepository
+                .countByTenantIdAndCommandTypeAndStatusInAndLockedUntilAfter(
+                        candidate.getTenantId(),
+                        CommandType.INSTALL_SOFTWARE,
+                        ACTIVE_INSTALL_CLAIM_STATUSES,
+                        now);
+        return activeInstalls >= maxConcurrent;
     }
 
     @Transactional
