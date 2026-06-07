@@ -69,6 +69,7 @@ public class EndpointAgentCommandService {
     private final EndpointInstallAuditService installAuditService;
     private final UninstallEvidencePayloadPolicy uninstallEvidencePayloadPolicy;
     private final EndpointUninstallAuditService uninstallAuditService;
+    private final EndpointCommandSecretService commandSecretService;
     private final Clock clock;
     private final Duration claimTtl;
 
@@ -112,6 +113,7 @@ public class EndpointAgentCommandService {
                                        EndpointInstallAuditService installAuditService,
                                        UninstallEvidencePayloadPolicy uninstallEvidencePayloadPolicy,
                                        EndpointUninstallAuditService uninstallAuditService,
+                                       EndpointCommandSecretService commandSecretService,
                                        Clock clock,
                                        @Value("${endpoint-admin.commands.claim-ttl-seconds:300}") long claimTtlSeconds) {
         this.commandRepository = commandRepository;
@@ -138,6 +140,7 @@ public class EndpointAgentCommandService {
         this.installAuditService = installAuditService;
         this.uninstallEvidencePayloadPolicy = uninstallEvidencePayloadPolicy;
         this.uninstallAuditService = uninstallAuditService;
+        this.commandSecretService = commandSecretService;
         this.clock = clock;
         this.claimTtl = Duration.ofSeconds(Math.max(30L, claimTtlSeconds));
     }
@@ -545,6 +548,10 @@ public class EndpointAgentCommandService {
             uninstallAuditService.recordUninstallResult(
                     command, result, request, effectiveDetails, now);
         }
+
+        if (isTerminalResult(request.status())) {
+            commandSecretService.clearIfTerminal(command);
+        }
     }
 
     private static boolean isTerminalResult(CommandResultStatus status) {
@@ -571,14 +578,16 @@ public class EndpointAgentCommandService {
     }
 
     private AgentCommandResponse toResponse(EndpointCommand command, String claimId, Instant claimExpiresAt) {
+        Map<String, Object> payload = commandSecretService.payloadForAgentClaim(
+                command, command.getPayload(), claimId);
         return new AgentCommandResponse(
                 command.getId(),
                 claimId,
                 safeInt(command.getAttemptCount()),
                 command.getCommandType(),
                 command.getIssuedBySubject(),
-                reason(command.getPayload()),
-                command.getPayload(),
+                reason(payload),
+                payload,
                 claimExpiresAt
         );
     }

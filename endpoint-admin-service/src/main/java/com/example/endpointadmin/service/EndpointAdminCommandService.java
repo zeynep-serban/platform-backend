@@ -4,6 +4,8 @@ import com.example.endpointadmin.dto.v1.admin.ApproveEndpointCommandRequest;
 import com.example.endpointadmin.dto.v1.admin.CreateAgentUpdateRequest;
 import com.example.endpointadmin.dto.v1.admin.CreateEndpointCommandRequest;
 import com.example.endpointadmin.dto.v1.admin.CreateInstallRequest;
+import com.example.endpointadmin.dto.v1.admin.CreateLocalPasswordChangeRequest;
+import com.example.endpointadmin.dto.v1.admin.CreateLocalPasswordChangeResponse;
 import com.example.endpointadmin.dto.v1.admin.EndpointCommandDto;
 import com.example.endpointadmin.dto.v1.admin.EndpointCommandResultDto;
 import com.example.endpointadmin.dto.v1.admin.InstallPreflightResponse;
@@ -104,6 +106,9 @@ public class EndpointAdminCommandService {
             CommandType.UPDATE_AGENT,
             CommandType.CHANGE_LOCAL_PASSWORD);
 
+    private static final Duration DEFAULT_LOCAL_PASSWORD_SECRET_TTL = Duration.ofMinutes(15);
+    private static final String LOCAL_PASSWORD_SECRET_REF = "endpoint-command-secret:newPassword";
+
     private final EndpointCommandRepository commandRepository;
     private final EndpointCommandResultRepository resultRepository;
     private final EndpointCommandApprovalRepository approvalRepository;
@@ -112,6 +117,7 @@ public class EndpointAdminCommandService {
     private final EndpointAgentUpdateReleaseRepository agentUpdateReleaseRepository;
     private final EndpointHeartbeatRepository heartbeatRepository;
     private final EndpointInstallPreflightService preflightService;
+    private final EndpointCommandSecretService commandSecretService;
     private final EndpointAuditService auditService;
     private final Clock clock;
     private final Duration updateAgentHeartbeatFreshnessTtl;
@@ -133,6 +139,7 @@ public class EndpointAdminCommandService {
                                        EndpointAgentUpdateReleaseRepository agentUpdateReleaseRepository,
                                        EndpointHeartbeatRepository heartbeatRepository,
                                        EndpointInstallPreflightService preflightService,
+                                       EndpointCommandSecretService commandSecretService,
                                        EndpointAuditService auditService,
                                        Clock clock,
                                        @Value("${endpoint-admin.agent-updates.heartbeat-freshness-ttl:PT5M}")
@@ -147,6 +154,7 @@ public class EndpointAdminCommandService {
         this.agentUpdateReleaseRepository = agentUpdateReleaseRepository;
         this.heartbeatRepository = heartbeatRepository;
         this.preflightService = preflightService;
+        this.commandSecretService = commandSecretService;
         this.auditService = auditService;
         this.clock = clock;
         this.updateAgentHeartbeatFreshnessTtl = updateAgentHeartbeatFreshnessTtl == null
@@ -527,6 +535,94 @@ public class EndpointAdminCommandService {
                         "approvalStatus", saved.getApprovalStatus().name()));
 
         return toDto(saved);
+    }
+
+    // AG-042 — dedicated local recovery password creation path
+
+    /**
+     * AG-042 — create a local password change command without ever persisting
+     * the raw password in {@code endpoint_commands.payload}. The generated
+     * password is returned once to the admin response, stored encrypted in
+     * {@code endpoint_command_secrets}, and injected only into the agent claim
+     * response by {@link EndpointCommandSecretService}.
+     */
+    @Transactional
+    public CreateLocalPasswordChangeResponse createLocalPasswordChange(AdminTenantContext context,
+                                                                       UUID deviceId,
+                                                                       CreateLocalPasswordChangeRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Local password change request is required.");
+        }
+        String username = validateLocalUsername(request.username());
+        String reason = trimToNull(request.reason());
+        if (reason == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "A reason is required for local password change.");
+        }
+
+        UUID tenantId = context.tenantId();
+        EndpointDevice device = deviceRepository.findVisibleToOrgAndId(tenantId, deviceId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Endpoint device not found."));
+        Instant now = Instant.now(clock);
+        Instant visibleAfterAt = resolveInstallVisibleAfterAt(now, request.notBefore());
+        Instant expiresAt = request.expiresAt() == null
+                ? visibleAfterAt.plus(DEFAULT_LOCAL_PASSWORD_SECRET_TTL)
+                : request.expiresAt();
+        validateExpiry(visibleAfterAt, expiresAt);
+
+        String idempotencyKey = resolveLocalPasswordIdempotencyKey(deviceId, request.idempotencyKey());
+        var existing = commandRepository.findByTenantIdAndIdempotencyKey(tenantId, idempotencyKey);
+        if (existing.isPresent()) {
+            validateLocalPasswordReplay(existing.get(), deviceId, username, reason,
+                    request.notBefore(), request.expiresAt());
+            // One-time disclosure: a replay confirms the existing command but
+            // never reveals or regenerates password material.
+            return new CreateLocalPasswordChangeResponse(toDto(existing.get()), null);
+        }
+
+        Map<String, Object> payload = buildLocalPasswordPayload(username, reason,
+                request.notBefore(), expiresAt);
+        String subject = resolveSubject(context);
+        String oneTimePassword = commandSecretService.generateLocalPassword();
+        EndpointCommand command = new EndpointCommand();
+        command.setTenantId(tenantId);
+        command.setDevice(device);
+        command.setCommandType(CommandType.CHANGE_LOCAL_PASSWORD);
+        command.setIdempotencyKey(idempotencyKey);
+        command.setStatus(CommandStatus.QUEUED);
+        command.setApprovalStatus(ApprovalStatus.PENDING);
+        command.setPayload(payload);
+        command.setPriority(100);
+        command.setAttemptCount(0);
+        command.setMaxAttempts(1);
+        command.setVisibleAfterAt(visibleAfterAt);
+        command.setExpiresAt(expiresAt);
+        command.setIssuedBySubject(subject);
+        command.setIssuedAt(now);
+
+        EndpointCommand saved = commandRepository.saveAndFlush(command);
+        commandSecretService.createLocalPasswordSecret(
+                tenantId, device, saved, oneTimePassword, expiresAt, subject, username, reason);
+
+        Map<String, Object> auditMetadata = createAuditMetadata(saved, true, reason);
+        auditMetadata.put("username", username);
+        auditMetadata.put("secretRef", LOCAL_PASSWORD_SECRET_REF);
+        auditMetadata.put("secretExpiresAt", expiresAt.toString());
+        auditService.record(
+                tenantId,
+                device,
+                saved,
+                "ENDPOINT_LOCAL_PASSWORD_COMMAND_CREATED",
+                "CREATE_LOCAL_PASSWORD_COMMAND",
+                subject,
+                idempotencyKey,
+                auditMetadata,
+                null,
+                Map.of("status", saved.getStatus().name(),
+                        "approvalStatus", saved.getApprovalStatus().name()));
+
+        return new CreateLocalPasswordChangeResponse(toDto(saved), oneTimePassword);
     }
 
     // BE-021 — dedicated INSTALL_SOFTWARE creation path
@@ -977,6 +1073,16 @@ public class EndpointAdminCommandService {
         return "admin-update-agent:" + deviceId + ":" + releaseUuid + ":" + key;
     }
 
+    private String resolveLocalPasswordIdempotencyKey(UUID deviceId, String requestedKey) {
+        String key = trimToNull(requestedKey);
+        if (key == null) {
+            key = UUID.randomUUID().toString();
+        } else if (key.length() > 40) {
+            key = sha256Prefix(key);
+        }
+        return "admin-local-password:" + deviceId + ":" + key;
+    }
+
     private static String sha256Prefix(String value) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -1005,6 +1111,36 @@ public class EndpointAdminCommandService {
         }
     }
 
+    private Map<String, Object> buildLocalPasswordPayload(String username,
+                                                          String reason,
+                                                          Instant notBefore,
+                                                          Instant expiresAt) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("username", username);
+        payload.put("reason", reason);
+        payload.put("secretRef", LOCAL_PASSWORD_SECRET_REF);
+        payload.put("secretName", "newPassword");
+        payload.put("secretDelivery", "agent_claim_once");
+        if (notBefore != null) {
+            payload.put("notBefore", notBefore.toString());
+        }
+        payload.put("expiresAt", expiresAt.toString());
+        return payload;
+    }
+
+    private String validateLocalUsername(String username) {
+        String value = trimToNull(username);
+        if (value == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Local username is required.");
+        }
+        if (!value.matches("[A-Za-z0-9._-]{1,64}")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Local username must be a local SAM name without domain, UPN, path, or whitespace.");
+        }
+        return value;
+    }
+
     private void validateExpiry(Instant visibleAfterAt, Instant expiresAt) {
         if (expiresAt != null && !expiresAt.isAfter(visibleAfterAt)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Command expiry must be after visible time.");
@@ -1019,6 +1155,26 @@ public class EndpointAdminCommandService {
                 || existing.getCommandType() != type
                 || !Objects.equals(existing.getPayload(), payload)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Idempotency key is already used by another command.");
+        }
+    }
+
+    private void validateLocalPasswordReplay(EndpointCommand existing,
+                                             UUID deviceId,
+                                             String username,
+                                             String reason,
+                                             Instant notBefore,
+                                             Instant expiresAt) {
+        Map<String, Object> payload = existing.getPayload() == null
+                ? Map.of()
+                : existing.getPayload();
+        if (!Objects.equals(existing.getDevice().getId(), deviceId)
+                || existing.getCommandType() != CommandType.CHANGE_LOCAL_PASSWORD
+                || !Objects.equals(payload.get("username"), username)
+                || !Objects.equals(payload.get("reason"), reason)
+                || !Objects.equals(payload.get("notBefore"), instantStringOrNull(notBefore))
+                || (expiresAt != null && !Objects.equals(payload.get("expiresAt"), expiresAt.toString()))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Local password idempotency key is already used by another command.");
         }
     }
 

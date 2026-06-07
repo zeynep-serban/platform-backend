@@ -3,6 +3,7 @@ package com.example.endpointadmin.service;
 import com.example.endpointadmin.config.TimeConfig;
 import com.example.endpointadmin.dto.v1.agent.AgentCommandResponse;
 import com.example.endpointadmin.dto.v1.agent.AgentCommandResultRequest;
+import com.example.endpointadmin.model.ApprovalStatus;
 import com.example.endpointadmin.model.CommandResultStatus;
 import com.example.endpointadmin.model.CommandStatus;
 import com.example.endpointadmin.model.CommandType;
@@ -13,12 +14,15 @@ import com.example.endpointadmin.model.EndpointDevice;
 import com.example.endpointadmin.model.OsType;
 import com.example.endpointadmin.repository.EndpointCommandRepository;
 import com.example.endpointadmin.repository.EndpointCommandResultRepository;
+import com.example.endpointadmin.repository.EndpointCommandSecretRepository;
 import com.example.endpointadmin.repository.EndpointDeviceRepository;
+import com.example.endpointadmin.security.AesGcmDeviceSecretProtector;
 import com.example.endpointadmin.security.DeviceCredentialResult;
 import com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
@@ -77,7 +81,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         // into the UNINSTALL_SOFTWARE submitResult branch (Faz 22.5.6,
         // Codex 019e8de2 iter-2 absorb).
         com.example.endpointadmin.security.UninstallEvidencePayloadPolicy.class,
-        EndpointUninstallAuditService.class
+        EndpointUninstallAuditService.class,
+        // AG-042 — local password secrets are injected only at claim-time and
+        // cleared on terminal result.
+        EndpointCommandSecretService.class,
+        AesGcmDeviceSecretProtector.class
 })
 class EndpointAgentCommandServiceTest {
 
@@ -92,6 +100,12 @@ class EndpointAgentCommandServiceTest {
 
     @Autowired
     private EndpointCommandResultRepository resultRepository;
+
+    @Autowired
+    private EndpointCommandSecretRepository commandSecretRepository;
+
+    @Autowired
+    private EndpointCommandSecretService commandSecretService;
 
     @Test
     void claimNextClaimsOldestVisibleQueuedCommandForAuthenticatedDevice() {
@@ -919,6 +933,74 @@ class EndpointAgentCommandServiceTest {
                 .hasMessageContaining("Command claim is not valid.");
     }
 
+    @Test
+    void claimNextInjectsLocalPasswordOnceAndSubmitResultClearsEncryptedSecret() {
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-PWD"));
+        EndpointCommand command = localPasswordCommand(device, "pwd-claim-once", 10);
+        EndpointCommand saved = commandRepository.saveAndFlush(command);
+        commandSecretService.createLocalPasswordSecret(
+                saved.getTenantId(),
+                device,
+                saved,
+                "TempPass#12345",
+                Instant.now().plusSeconds(900),
+                "admin@example.com",
+                "ea-recovery",
+                "off-network recovery");
+
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        assertThat(claimed.type()).isEqualTo(CommandType.CHANGE_LOCAL_PASSWORD);
+        assertThat(claimed.payload())
+                .containsEntry("username", "ea-recovery")
+                .containsEntry("newPassword", "TempPass#12345");
+        EndpointCommand afterClaim = commandRepository.findById(saved.getId()).orElseThrow();
+        assertThat(afterClaim.getPayload()).doesNotContainKey("newPassword");
+        var deliveredSecret = commandSecretRepository.findByCommand_Id(saved.getId()).orElseThrow();
+        assertThat(deliveredSecret.getDeliveredAt()).isNotNull();
+        assertThat(deliveredSecret.getEncryptedSecret()).isNotBlank();
+
+        commandService.submitResult(
+                principal(device),
+                saved.getId(),
+                resultRequest(claimed.claimId(), claimed.attemptNumber(), CommandResultStatus.SUCCEEDED));
+
+        var clearedSecret = commandSecretRepository.findByCommand_Id(saved.getId()).orElseThrow();
+        assertThat(clearedSecret.getClearedAt()).isNotNull();
+        assertThat(clearedSecret.getEncryptedSecret()).isNull();
+    }
+
+    @Test
+    void claimNextDoesNotRediscloseDeliveredLocalPasswordSecret() {
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-PWD-RECLAIM"));
+        EndpointCommand command = localPasswordCommand(device, "pwd-no-reclaim", 10);
+        // Production create path sets maxAttempts=1, so an expired first claim
+        // is normally not retried at all. This test deliberately widens the
+        // retry budget to prove the secret-delivery guard still refuses a
+        // second disclosure if a future caller changes retry policy.
+        command.setMaxAttempts(2);
+        EndpointCommand saved = commandRepository.saveAndFlush(command);
+        commandSecretService.createLocalPasswordSecret(
+                saved.getTenantId(),
+                device,
+                saved,
+                "TempPass#12345",
+                Instant.now().plusSeconds(900),
+                "admin@example.com",
+                "ea-recovery",
+                "off-network recovery");
+        commandService.claimNext(principal(device)).orElseThrow();
+
+        EndpointCommand afterFirstClaim = commandRepository.findById(saved.getId()).orElseThrow();
+        afterFirstClaim.setLockedUntil(Instant.now().minusSeconds(1));
+        commandRepository.saveAndFlush(afterFirstClaim);
+
+        assertThatThrownBy(() -> commandService.claimNext(principal(device)))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasFieldOrPropertyWithValue("statusCode", HttpStatus.GONE)
+                .hasMessageContaining("already delivered");
+    }
+
     private DeviceCredentialResult principal(EndpointDevice device) {
         return new DeviceCredentialResult(device.getId().toString(), UUID.randomUUID().toString(), Instant.now());
     }
@@ -961,6 +1043,19 @@ class EndpointAgentCommandServiceTest {
                 "catalogItemId", "7zip-stable",
                 "packageId", "7zip.7zip",
                 "provider", "WINGET"));
+        return command;
+    }
+
+    private EndpointCommand localPasswordCommand(EndpointDevice device, String idempotencyKey, int priority) {
+        EndpointCommand command = command(device, idempotencyKey, priority);
+        command.setCommandType(CommandType.CHANGE_LOCAL_PASSWORD);
+        command.setApprovalStatus(ApprovalStatus.APPROVED);
+        command.setPayload(Map.of(
+                "username", "ea-recovery",
+                "reason", "off-network recovery",
+                "secretRef", "endpoint-command-secret:newPassword",
+                "secretName", "newPassword"));
+        command.setMaxAttempts(1);
         return command;
     }
 

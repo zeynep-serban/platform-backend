@@ -19,6 +19,7 @@ import com.example.endpointadmin.repository.EndpointCommandApprovalRepository;
 import com.example.endpointadmin.repository.EndpointCommandRepository;
 import com.example.endpointadmin.repository.EndpointDeviceRepository;
 import com.example.endpointadmin.security.AdminTenantContext;
+import com.example.endpointadmin.security.AesGcmDeviceSecretProtector;
 import com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
@@ -51,6 +52,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         "endpoint-admin.commands.admin-creatable-types=COLLECT_INVENTORY,LOCK_USER_LOGIN,CHANGE_LOCAL_PASSWORD")
 @Import({TimeConfig.class, EndpointAdminCommandService.class, EndpointAuditService.class,
         NoOpAuditChainLock.class,
+        EndpointCommandSecretService.class,
+        AesGcmDeviceSecretProtector.class,
         // BE-021 — createInstall path depends on the install preflight
         // service to recompute the decision at command-creation time.
         EndpointInstallPreflightService.class})

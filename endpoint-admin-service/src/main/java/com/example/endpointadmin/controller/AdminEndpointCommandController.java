@@ -4,6 +4,8 @@ import com.example.commonauth.openfga.RequireModule;
 import com.example.endpointadmin.dto.v1.admin.ApproveEndpointCommandRequest;
 import com.example.endpointadmin.dto.v1.admin.CreateAgentUpdateRequest;
 import com.example.endpointadmin.dto.v1.admin.CreateEndpointCommandRequest;
+import com.example.endpointadmin.dto.v1.admin.CreateLocalPasswordChangeRequest;
+import com.example.endpointadmin.dto.v1.admin.CreateLocalPasswordChangeResponse;
 import com.example.endpointadmin.dto.v1.admin.EndpointCommandDto;
 import com.example.endpointadmin.security.AdminTenantContext;
 import com.example.endpointadmin.security.EndpointAdminAuthz;
@@ -77,6 +79,20 @@ public class AdminEndpointCommandController {
         AdminTenantContext context = tenantContextResolver.resolveRequired();
         CreateAgentUpdateRequest request = parseCreateAgentUpdateRequest(requestBody);
         return commandService.createAgentUpdate(context, deviceId, request);
+    }
+
+    /**
+     * AG-042 — dedicated local recovery password path. The response returns the
+     * generated password once; command list/get DTOs keep only a secretRef and
+     * never include raw password material.
+     */
+    @PostMapping("/endpoint-devices/{deviceId}/local-password-changes")
+    @RequireModule(value = EndpointAdminAuthz.MODULE, relation = EndpointAdminAuthz.MANAGER)
+    public CreateLocalPasswordChangeResponse createLocalPasswordChange(
+            @PathVariable UUID deviceId,
+            @Valid @RequestBody CreateLocalPasswordChangeRequest request) {
+        AdminTenantContext context = tenantContextResolver.resolveRequired();
+        return commandService.createLocalPasswordChange(context, deviceId, request);
     }
 
     @PostMapping("/endpoint-commands")

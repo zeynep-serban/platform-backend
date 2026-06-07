@@ -10,6 +10,7 @@ import com.example.endpointadmin.model.CommandType;
 import com.example.endpointadmin.model.EndpointAuditEvent;
 import com.example.endpointadmin.repository.EndpointAuditEventRepository;
 import com.example.endpointadmin.security.AdminTenantContext;
+import com.example.endpointadmin.security.AesGcmDeviceSecretProtector;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
@@ -80,6 +81,8 @@ import static org.assertj.core.api.Assertions.assertThat;
         EndpointAdminCommandService.class,
         EndpointAuditService.class,
         EndpointInstallPreflightService.class,
+        EndpointCommandSecretService.class,
+        AesGcmDeviceSecretProtector.class,
         PgAdvisoryAuditChainLock.class,
         AuditIntegrityVerifier.class
 })
@@ -106,6 +109,8 @@ class EndpointInstallCommandAuditPostgresIntegrationTest {
         registry.add("spring.flyway.schemas", () -> "public");
         registry.add("spring.jpa.properties.hibernate.default_schema",
                 () -> "public");
+        registry.add("endpoint-admin.secrets.encryption-key",
+                () -> "test-endpoint-command-secret-key");
         // Pin the exact INSERT/UPDATE sequence so the repro mechanism is
         // visible in the build log (Hibernate SQL + bind params).
         registry.add("spring.jpa.show-sql", () -> "true");

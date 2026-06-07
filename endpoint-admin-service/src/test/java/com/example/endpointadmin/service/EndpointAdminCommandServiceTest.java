@@ -3,7 +3,10 @@ package com.example.endpointadmin.service;
 import com.example.endpointadmin.audit.NoOpAuditChainLock;
 import com.example.endpointadmin.config.TimeConfig;
 import com.example.endpointadmin.dto.v1.admin.CreateEndpointCommandRequest;
+import com.example.endpointadmin.dto.v1.admin.CreateLocalPasswordChangeRequest;
+import com.example.endpointadmin.dto.v1.admin.CreateLocalPasswordChangeResponse;
 import com.example.endpointadmin.dto.v1.admin.EndpointCommandDto;
+import com.example.endpointadmin.model.ApprovalStatus;
 import com.example.endpointadmin.model.CommandResultStatus;
 import com.example.endpointadmin.model.CommandStatus;
 import com.example.endpointadmin.model.CommandType;
@@ -15,8 +18,10 @@ import com.example.endpointadmin.model.OsType;
 import com.example.endpointadmin.repository.EndpointAuditEventRepository;
 import com.example.endpointadmin.repository.EndpointCommandRepository;
 import com.example.endpointadmin.repository.EndpointCommandResultRepository;
+import com.example.endpointadmin.repository.EndpointCommandSecretRepository;
 import com.example.endpointadmin.repository.EndpointDeviceRepository;
 import com.example.endpointadmin.security.AdminTenantContext;
+import com.example.endpointadmin.security.AesGcmDeviceSecretProtector;
 import com.example.endpointadmin.testsupport.IsolatedH2DataJpaTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,6 +39,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @IsolatedH2DataJpaTest
 @Import({TimeConfig.class, EndpointAdminCommandService.class, EndpointAuditService.class,
         NoOpAuditChainLock.class,
+        EndpointCommandSecretService.class,
+        AesGcmDeviceSecretProtector.class,
         // BE-021 — createInstall path depends on the install preflight
         // service to recompute the decision at command-creation time.
         EndpointInstallPreflightService.class})
@@ -55,6 +62,9 @@ class EndpointAdminCommandServiceTest {
 
     @Autowired
     private EndpointAuditEventRepository auditRepository;
+
+    @Autowired
+    private EndpointCommandSecretRepository commandSecretRepository;
 
     @Test
     void createCommandStoresQueuedCommandAndAuditEventIdempotently() {
@@ -297,6 +307,90 @@ class EndpointAdminCommandServiceTest {
                 .hasMessageContaining("CHANGE_LOCAL_PASSWORD must be created via")
                 .hasMessageContaining("dedicated local recovery");
         assertThat(commandRepository.findAll()).isEmpty();
+    }
+
+    @Test
+    void createLocalPasswordChangeStoresEncryptedSecretAndNeverPersistsRawPassword() {
+        EndpointDevice device = deviceRepository.saveAndFlush(device(TENANT_ID, "PC-PWD-DEDICATED"));
+        Instant expiresAt = Instant.now().plusSeconds(900);
+        CreateLocalPasswordChangeRequest request = new CreateLocalPasswordChangeRequest(
+                "ea-recovery",
+                "pwd-dedicated-001",
+                "user locked out off-network",
+                null,
+                expiresAt
+        );
+
+        CreateLocalPasswordChangeResponse response =
+                commandService.createLocalPasswordChange(adminContext(), device.getId(), request);
+
+        assertThat(response.oneTimePassword())
+                .isNotBlank()
+                .hasSizeGreaterThanOrEqualTo(20);
+        EndpointCommandDto command = response.command();
+        assertThat(command.type()).isEqualTo(CommandType.CHANGE_LOCAL_PASSWORD);
+        assertThat(command.approvalStatus()).isEqualTo(ApprovalStatus.PENDING);
+        assertThat(command.payload())
+                .containsEntry("username", "ea-recovery")
+                .containsEntry("reason", "user locked out off-network")
+                .containsEntry("secretRef", "endpoint-command-secret:newPassword")
+                .containsEntry("secretName", "newPassword")
+                .doesNotContainKey("newPassword");
+
+        EndpointCommand stored = commandRepository.findById(command.id()).orElseThrow();
+        assertThat(stored.getPayload()).doesNotContainKey("newPassword");
+        var secret = commandSecretRepository.findByCommand_Id(command.id()).orElseThrow();
+        assertThat(secret.getEncryptedSecret())
+                .isNotBlank()
+                .doesNotContain(response.oneTimePassword());
+        assertThat(secret.getExpiresAt()).isEqualTo(expiresAt);
+
+        EndpointCommandDto fetched = commandService.getCommand(adminContext(), command.id());
+        assertThat(fetched.payload()).doesNotContainKey("newPassword");
+        assertThat(auditRepository.findTop50ByTenantIdOrderByOccurredAtDesc(TENANT_ID))
+                .extracting("eventType")
+                .contains("ENDPOINT_LOCAL_PASSWORD_COMMAND_CREATED",
+                        "ENDPOINT_COMMAND_SECRET_CREATED");
+    }
+
+    @Test
+    void createLocalPasswordChangeIdempotencyReplayDoesNotRedisclosePassword() {
+        EndpointDevice device = deviceRepository.saveAndFlush(device(TENANT_ID, "PC-PWD-REPLAY"));
+        CreateLocalPasswordChangeRequest request = new CreateLocalPasswordChangeRequest(
+                "ea-recovery",
+                "pwd-replay-001",
+                "user locked out off-network",
+                null,
+                null
+        );
+
+        CreateLocalPasswordChangeResponse first =
+                commandService.createLocalPasswordChange(adminContext(), device.getId(), request);
+        CreateLocalPasswordChangeResponse replay =
+                commandService.createLocalPasswordChange(adminContext(), device.getId(), request);
+
+        assertThat(replay.command().id()).isEqualTo(first.command().id());
+        assertThat(first.oneTimePassword()).isNotBlank();
+        assertThat(replay.oneTimePassword()).isNull();
+        assertThat(commandSecretRepository.findByCommand_Id(first.command().id())).isPresent();
+    }
+
+    @Test
+    void createLocalPasswordChangeRejectsDomainOrUpnUsernames() {
+        EndpointDevice device = deviceRepository.saveAndFlush(device(TENANT_ID, "PC-PWD-DOMAIN"));
+
+        assertThatThrownBy(() -> commandService.createLocalPasswordChange(
+                adminContext(),
+                device.getId(),
+                new CreateLocalPasswordChangeRequest(
+                        "corp\\alice",
+                        "pwd-domain-001",
+                        "domain names are not local recovery accounts",
+                        null,
+                        null)))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasFieldOrPropertyWithValue("statusCode", HttpStatus.BAD_REQUEST)
+                .hasMessageContaining("Local username must be a local SAM name");
     }
 
     @Test

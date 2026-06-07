@@ -97,6 +97,7 @@ class EndpointAdminCommandServiceInstallTest {
     @Mock private EndpointAgentUpdateReleaseRepository agentUpdateReleaseRepository;
     @Mock private EndpointHeartbeatRepository heartbeatRepository;
     @Mock private EndpointInstallPreflightService preflightService;
+    @Mock private EndpointCommandSecretService commandSecretService;
     @Mock private EndpointAuditService auditService;
 
     private EndpointAdminCommandService service;
@@ -108,6 +109,7 @@ class EndpointAdminCommandServiceInstallTest {
                 commandRepository, resultRepository, approvalRepository,
                 deviceRepository, catalogRepository, agentUpdateReleaseRepository,
                 heartbeatRepository, preflightService,
+                commandSecretService,
                 auditService, fixed, Duration.ofMinutes(5),
                 Set.of(CommandType.COLLECT_INVENTORY));
     }

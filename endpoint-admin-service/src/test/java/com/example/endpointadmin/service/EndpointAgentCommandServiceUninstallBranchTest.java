@@ -89,6 +89,7 @@ class EndpointAgentCommandServiceUninstallBranchTest {
     @Mock private EndpointServicesService servicesService;
     @Mock private EndpointStartupExposureService startupExposureService;
     @Mock private EndpointAppControlService appControlService;
+    @Mock private EndpointCommandSecretService commandSecretService;
 
     private EndpointAgentCommandService service;
 
@@ -126,6 +127,7 @@ class EndpointAgentCommandServiceUninstallBranchTest {
                 installAuditService,
                 uninstallPolicy,
                 uninstallAuditService,
+                commandSecretService,
                 fixed,
                 300L);
     }
