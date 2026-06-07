@@ -85,6 +85,10 @@ public class EndpointAdminCommandService {
      *       signed self-update release surface (AG-029/BE-030). The generic
      *       path would accept arbitrary caller payload instead of resolving
      *       release catalog, trust metadata, maker-checker and audit state.</li>
+     *   <li>{@link CommandType#CHANGE_LOCAL_PASSWORD} — dedicated path:
+     *       local recovery / secret-delivery surface (AG-042 follow-up). The
+     *       generic path persists and returns payload JSON, so it must never
+     *       accept caller-supplied password material.</li>
      * </ul>
      *
      * <p>Migrates the prior INSTALL_SOFTWARE 409 to 422 — semantically the
@@ -97,7 +101,8 @@ public class EndpointAdminCommandService {
     private static final Set<CommandType> DEDICATED_PATH_ONLY = EnumSet.of(
             CommandType.INSTALL_SOFTWARE,
             CommandType.UNINSTALL_SOFTWARE,
-            CommandType.UPDATE_AGENT);
+            CommandType.UPDATE_AGENT,
+            CommandType.CHANGE_LOCAL_PASSWORD);
 
     private final EndpointCommandRepository commandRepository;
     private final EndpointCommandResultRepository resultRepository;
@@ -399,6 +404,8 @@ public class EndpointAdminCommandService {
                         "POST /api/v1/admin/endpoint-devices/{deviceId}/uninstalls";
                 case UPDATE_AGENT ->
                         "(dedicated signed self-update release surface; not the generic command endpoint)";
+                case CHANGE_LOCAL_PASSWORD ->
+                        "(dedicated local recovery / secret-delivery surface; not the generic command endpoint)";
                 default -> "(its dedicated REST surface)";
             };
             throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,

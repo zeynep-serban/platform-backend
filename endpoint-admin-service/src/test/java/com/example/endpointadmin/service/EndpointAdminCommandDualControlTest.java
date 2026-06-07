@@ -42,11 +42,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>The {@code admin-creatable-types} property is widened here to include a
  * destructive type ({@code LOCK_USER_LOGIN}) so the gate can be exercised end
- * to end; the production default is {@code COLLECT_INVENTORY} only.
+ * to end; {@code CHANGE_LOCAL_PASSWORD} is also present to prove that
+ * dedicated-path-only secret commands stay blocked even when the allowlist is
+ * widened. The production default is {@code COLLECT_INVENTORY} only.
  */
 @IsolatedH2DataJpaTest
 @TestPropertySource(properties =
-        "endpoint-admin.commands.admin-creatable-types=COLLECT_INVENTORY,LOCK_USER_LOGIN")
+        "endpoint-admin.commands.admin-creatable-types=COLLECT_INVENTORY,LOCK_USER_LOGIN,CHANGE_LOCAL_PASSWORD")
 @Import({TimeConfig.class, EndpointAdminCommandService.class, EndpointAuditService.class,
         NoOpAuditChainLock.class,
         // BE-021 — createInstall path depends on the install preflight
@@ -275,6 +277,28 @@ class EndpointAdminCommandDualControlTest {
 
         assertThat(created.payload()).containsEntry("reason", "authoritative incident reason");
         assertThat(created.payload()).containsEntry("targetUser", "corp.local\\jdoe");
+    }
+
+    @Test
+    void localPasswordChangeRejectsGenericPathEvenWhenAdminCreatableAllowlistIsWidened() {
+        EndpointDevice device = deviceRepository.saveAndFlush(device("PC-PWD"));
+        CreateEndpointCommandRequest request = new CreateEndpointCommandRequest(
+                CommandType.CHANGE_LOCAL_PASSWORD,
+                "pwd-generic-block",
+                "local recovery request",
+                Map.of("username", "ea-recovery", "newPassword", "MustNotPersist#123"),
+                null,
+                null,
+                null,
+                null,
+                null);
+
+        assertResponseStatus(
+                () -> commandService.createCommand(context(ISSUER), device.getId(), request),
+                HttpStatus.UNPROCESSABLE_ENTITY,
+                "dedicated local recovery");
+        assertThat(commandRepository.findAll()).isEmpty();
+        assertThat(auditRepository.findTop50ByTenantIdOrderByOccurredAtDesc(TENANT_ID)).isEmpty();
     }
 
     // --- helpers -----------------------------------------------------------

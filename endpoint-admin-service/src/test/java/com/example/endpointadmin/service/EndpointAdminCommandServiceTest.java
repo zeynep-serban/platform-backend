@@ -277,13 +277,13 @@ class EndpointAdminCommandServiceTest {
     }
 
     @Test
-    void createCommandRejectsDisabledSensitiveCommandType() {
+    void createCommandRejectsLocalPasswordChangeOnGenericEndpoint() {
         EndpointDevice device = deviceRepository.saveAndFlush(device(TENANT_ID, "PC-001"));
         CreateEndpointCommandRequest request = new CreateEndpointCommandRequest(
                 CommandType.CHANGE_LOCAL_PASSWORD,
                 "password-001",
                 "blocked",
-                Map.of("username", "local.user"),
+                Map.of("username", "local.user", "newPassword", "MustNotPersist#123"),
                 null,
                 null,
                 null,
@@ -293,7 +293,10 @@ class EndpointAdminCommandServiceTest {
 
         assertThatThrownBy(() -> commandService.createCommand(adminContext(), device.getId(), request))
                 .isInstanceOf(ResponseStatusException.class)
-                .hasMessageContaining("Command type is not enabled");
+                .hasFieldOrPropertyWithValue("statusCode", HttpStatus.UNPROCESSABLE_ENTITY)
+                .hasMessageContaining("CHANGE_LOCAL_PASSWORD must be created via")
+                .hasMessageContaining("dedicated local recovery");
+        assertThat(commandRepository.findAll()).isEmpty();
     }
 
     @Test
