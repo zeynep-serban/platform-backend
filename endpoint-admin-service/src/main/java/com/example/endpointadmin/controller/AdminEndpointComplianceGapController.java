@@ -18,6 +18,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -52,7 +53,8 @@ public class AdminEndpointComplianceGapController {
      *
      * <p>Optional query params:
      * <ul>
-     *   <li>{@code gapType[]} — canonical wire values (default: all known types)</li>
+     *   <li>{@code gapType} / {@code gapTypes} — canonical wire values
+     *       (repeatable or comma-separated; default: all known types)</li>
      *   <li>{@code freshnessWindow} — ISO-8601 duration (default {@code PT168H} = 7 days, max {@code P366D})</li>
      *   <li>{@code page} — 1-based page (default 1)</li>
      *   <li>{@code pageSize} — items per page (default 50, max 200)</li>
@@ -63,13 +65,14 @@ public class AdminEndpointComplianceGapController {
     @Transactional(readOnly = true)
     public ResponseEntity<ComplianceGapResponse> queryComplianceGaps(
             @RequestParam(name = "gapType", required = false) List<String> gapTypeWires,
+            @RequestParam(name = "gapTypes", required = false) List<String> gapTypesWires,
             @RequestParam(name = "freshnessWindow", required = false) String freshnessWindowRaw,
             @RequestParam(name = "page", defaultValue = "1") int page,
             @RequestParam(name = "pageSize", defaultValue = "50") int pageSize) {
 
         AdminTenantContext context = tenantContextResolver.resolveRequired();
 
-        Set<ComplianceGapType> gapTypes = parseGapTypes(gapTypeWires);
+        Set<ComplianceGapType> gapTypes = parseGapTypes(gapTypeWires, gapTypesWires);
         Duration freshnessWindow = parseFreshnessWindow(freshnessWindowRaw);
 
         ComplianceGapResponse response = gapService.findGaps(
@@ -77,12 +80,16 @@ public class AdminEndpointComplianceGapController {
         return ResponseEntity.ok(response);
     }
 
-    private static Set<ComplianceGapType> parseGapTypes(List<String> wires) {
-        if (wires == null || wires.isEmpty()) {
+    private static Set<ComplianceGapType> parseGapTypes(
+            List<String> gapTypeWires, List<String> gapTypesWires) {
+        List<String> tokens = new ArrayList<>();
+        addGapTypeTokens(tokens, gapTypeWires);
+        addGapTypeTokens(tokens, gapTypesWires);
+        if (tokens.isEmpty()) {
             return null;  // service default = all
         }
         Set<ComplianceGapType> result = new HashSet<>();
-        for (String w : wires) {
+        for (String w : tokens) {
             try {
                 result.add(ComplianceGapType.fromWire(w));
             } catch (IllegalArgumentException ex) {
@@ -91,6 +98,23 @@ public class AdminEndpointComplianceGapController {
             }
         }
         return result;
+    }
+
+    private static void addGapTypeTokens(List<String> tokens, List<String> wires) {
+        if (wires == null || wires.isEmpty()) {
+            return;
+        }
+        for (String raw : wires) {
+            if (raw == null) {
+                continue;
+            }
+            for (String token : raw.split(",")) {
+                String trimmed = token.trim();
+                if (!trimmed.isEmpty()) {
+                    tokens.add(trimmed);
+                }
+            }
+        }
     }
 
     private static Duration parseFreshnessWindow(String raw) {
