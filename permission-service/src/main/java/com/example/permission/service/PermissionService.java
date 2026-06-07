@@ -169,6 +169,15 @@ public class PermissionService {
 
         // Sync to OpenFGA — write module tuples for user
         syncTuplesToOpenFga(request.getUserId(), role, true);
+        // #1274 grant-add correctness (Codex 019e93bc): the legacy syncTuplesToOpenFga
+        // above is a no-op for granule rolePermission rows, so a member added AFTER the
+        // role's granules already exist would NOT receive the granule feature tuples until
+        // the next RoleChangeEvent. Refresh the granule spare-set now — the same fail-loud
+        // granule path updateAssignment/revoke already use. Missing access, not retained,
+        // so this only tightens correctness (no security regression).
+        if (tupleSyncService != null) {
+            tupleSyncService.refreshFeatureTuples(String.valueOf(request.getUserId()));
+        }
 
         PermissionResponse response = toResponse(savedAssignment);
         if (savedEvent != null && savedEvent.getId() != null) {

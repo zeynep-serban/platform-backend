@@ -98,6 +98,10 @@ class PermissionServiceTest {
         assertThat(savedAssignment.getAssignedBy()).isEqualTo(request.getAssignedBy());
 
         verify(auditEventService).recordEvent(any());
+        // #1274 grant-add correctness: assignRole must refresh the granule spare-set so a
+        // member added after the role's granules exist gets the granule tuples immediately
+        // (the legacy syncTuplesToOpenFga is a no-op for granule rows).
+        verify(tupleSyncService).refreshFeatureTuples(String.valueOf(request.getUserId()));
     }
 
     @Test
@@ -216,6 +220,10 @@ class PermissionServiceTest {
 
         verify(assignmentRepository).save(any(UserRoleAssignment.class));
         verify(auditEventService).recordEvent(any());
+        // #1274 targeted regression: this is the exact case the bug bit — a granule-only
+        // role, where legacy syncTuplesToOpenFga writes nothing, so assignRole MUST refresh
+        // the granule spare-set or the new member gets no feature tuples until the next event.
+        verify(tupleSyncService).refreshFeatureTuples(String.valueOf(request.getUserId()));
     }
 
     private Role buildRoleWithGranules(Long roleId, String name) {
