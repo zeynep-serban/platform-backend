@@ -1201,19 +1201,19 @@ public class EndpointAdminCommandService {
      * Faz 22.5 keystone — the operator-initiated "Envanteri Şimdi Topla"
      * full collect (the only backend-constructed {@code COLLECT_INVENTORY}
      * path; this generic admin command surface is what the İşlemler tab
-     * action targets) MUST carry the AG-033 device-health + AG-036
-     * outdated-software opt-ins, or the agent never runs those probes and the
-     * Cihaz Sağlığı / Güncel Olmayan Yazılım drawer views stay forever empty
-     * — even though both their empty states instruct the operator to populate
-     * them via exactly this action. The agent reads
-     * {@code boolPayload(command.Payload, "includeDeviceHealth")} /
-     * {@code "includeOutdatedSoftware"} → {@code CollectOptions.IncludeDeviceHealth}
-     * / {@code .IncludeOutdatedSoftware} → AG-033 / AG-036 probes → attaches
-     * {@code details.inventory.deviceHealth} / {@code .outdatedSoftware} which
-     * the DeviceHealthPayloadPolicy / OutdatedSoftwarePayloadPolicy ingest.
-     * The wire key names ({@code includeDeviceHealth} /
-     * {@code includeOutdatedSoftware}, camelCase) are the frozen agent
-     * contract and must match the agent's {@code boolPayload} lookups exactly.
+     * action targets) MUST carry the same read-only visibility opt-ins as the
+     * web "Envanteri Şimdi Topla" button. Otherwise a direct API/operator
+     * caller can queue a syntactically valid collect command that only runs
+     * the AG-025H lightweight contract and leaves the drawer's posture,
+     * diagnostic and visibility tabs empty.
+     *
+     * <p>The wire key names below are the frozen agent contract and must match
+     * the agent's {@code boolPayload} lookups exactly:
+     * {@code includeSoftware}, {@code includeWinGetEgress},
+     * {@code includeHardware}, {@code includeDeviceHealth},
+     * {@code includeOutdatedSoftware}, {@code includeHotfixPosture},
+     * {@code includeDiagnostics}, {@code includeServices},
+     * {@code includeStartupExposure}, and {@code includeAppControl}.
      *
      * <p>Scope (deliberate — Codex review to validate the default): this is
      * the operator-initiated full collect, so running the heavier health +
@@ -1222,20 +1222,27 @@ public class EndpointAdminCommandService {
      * cost (AG-025H) — and it does NOT flow through here: no backend code
      * constructs a {@code COLLECT_INVENTORY} command other than this admin
      * command-creation path, so opting in here cannot leak into the
-     * heartbeat default. Other collect opt-ins the web client already sends
-     * ({@code includeHardware} / {@code includeSoftware} /
-     * {@code includeWinGetEgress}) are left exactly as supplied.
+     * heartbeat default.
      *
      * <p>An explicit caller-supplied value for either key is respected (not
      * overwritten): a future lightweight caller that sends
-     * {@code includeDeviceHealth=false} keeps the AG-025H opt-out boundary.
-     * Only an absent key is defaulted to {@code true}, so the backend
-     * guarantees the documented data path for the manual collect-now without
-     * depending on every client to remember the bits.
+     * {@code includeDeviceHealth=false} or {@code includeServices=false}
+     * keeps the AG-025H opt-out boundary. Only an absent key is defaulted to
+     * {@code true}, so the backend guarantees the documented data path for
+     * manual collect-now without depending on every client to remember the
+     * bits.
      */
     private static void applyCollectInventoryOptIns(Map<String, Object> payload) {
+        payload.putIfAbsent("includeSoftware", true);
+        payload.putIfAbsent("includeWinGetEgress", true);
+        payload.putIfAbsent("includeHardware", true);
         payload.putIfAbsent("includeDeviceHealth", true);
         payload.putIfAbsent("includeOutdatedSoftware", true);
+        payload.putIfAbsent("includeHotfixPosture", true);
+        payload.putIfAbsent("includeDiagnostics", true);
+        payload.putIfAbsent("includeServices", true);
+        payload.putIfAbsent("includeStartupExposure", true);
+        payload.putIfAbsent("includeAppControl", true);
     }
 
     private void assertUpdateAgentHeartbeatFreshAndCapable(EndpointDevice device,
