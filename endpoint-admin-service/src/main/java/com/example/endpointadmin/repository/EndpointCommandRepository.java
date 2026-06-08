@@ -87,4 +87,26 @@ public interface EndpointCommandRepository extends JpaRepository<EndpointCommand
             """)
     Optional<EndpointCommand> findByTenantIdAndIdForUpdate(@Param("tenantId") UUID tenantId,
                                                            @Param("commandId") UUID commandId);
+
+    /**
+     * #508 — non-terminal {@code SET_DISPLAY_POLICY} command ids for a device,
+     * excluding one. Used by {@code DisplayPolicyApprovalListener} at approval
+     * time to supersede a prior approved-queued display-policy command so the
+     * agent never has two non-terminal display-policy commands to order
+     * (per-device single-flight, Codex 019ea92f).
+     */
+    @Query("""
+            select command.id
+            from EndpointCommand command
+            where command.device.id = :deviceId
+              and command.commandType = com.example.endpointadmin.model.CommandType.SET_DISPLAY_POLICY
+              and command.id <> :exceptCommandId
+              and command.status not in (
+                    com.example.endpointadmin.model.CommandStatus.CANCELLED,
+                    com.example.endpointadmin.model.CommandStatus.EXPIRED,
+                    com.example.endpointadmin.model.CommandStatus.FAILED,
+                    com.example.endpointadmin.model.CommandStatus.SUCCEEDED)
+            """)
+    List<UUID> findActiveDisplayPolicyCommandIdsForDevice(@Param("deviceId") UUID deviceId,
+                                                          @Param("exceptCommandId") UUID exceptCommandId);
 }

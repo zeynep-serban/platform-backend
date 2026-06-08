@@ -68,7 +68,15 @@ public class EndpointAdminCommandService {
             CommandType.CHANGE_LOCAL_PASSWORD,
             CommandType.SMB_DOWNLOAD_FILE,
             CommandType.SMB_UPLOAD_FILE,
-            CommandType.ROTATE_CREDENTIAL);
+            CommandType.ROTATE_CREDENTIAL,
+            // #508 (Codex 019ea911 must-fix #3) — SET_DISPLAY_POLICY is always
+            // maker-checker. Its dedicated dispatch
+            // (EndpointDisplayPolicyService) sets ApprovalStatus.PENDING
+            // explicitly; listing it in this canonical dual-control registry
+            // keeps the gate definition complete and prevents taxonomy drift
+            // (the generic /commands path still rejects it via
+            // DEDICATED_PATH_ONLY before this set is consulted).
+            CommandType.SET_DISPLAY_POLICY);
 
     /**
      * BE-034 — terminal command lifecycle states. A dual-control approval
@@ -142,6 +150,14 @@ public class EndpointAdminCommandService {
     private final EndpointAuditService auditService;
     private final Clock clock;
     private final Duration updateAgentHeartbeatFreshnessTtl;
+    /**
+     * #508 (Codex 019ea911 RED-fix) — publishes a generic
+     * {@link com.example.endpointadmin.event.CommandApprovalDecidedEvent} after a
+     * dual-control decision so command-type domains (display-policy) can react in
+     * the SAME transaction (e.g. promote the approved revision to current). The
+     * shared approve path stays type-agnostic.
+     */
+    private final org.springframework.context.ApplicationEventPublisher eventPublisher;
 
     /**
      * BE-017 — command types an admin may create. Defaults to
@@ -166,7 +182,9 @@ public class EndpointAdminCommandService {
                                        @Value("${endpoint-admin.agent-updates.heartbeat-freshness-ttl:PT5M}")
                                        Duration updateAgentHeartbeatFreshnessTtl,
                                        @Value("${endpoint-admin.commands.admin-creatable-types:COLLECT_INVENTORY}")
-                                       Set<CommandType> adminCreatableTypes) {
+                                       Set<CommandType> adminCreatableTypes,
+                                       org.springframework.context.ApplicationEventPublisher eventPublisher) {
+        this.eventPublisher = eventPublisher;
         this.commandRepository = commandRepository;
         this.resultRepository = resultRepository;
         this.approvalRepository = approvalRepository;
@@ -366,6 +384,21 @@ public class EndpointAdminCommandService {
                 Map.of("status", saved.getStatus().name(),
                         "approvalStatus", saved.getApprovalStatus().name())
         );
+
+        // #508 (Codex 019ea911 RED-fix) — emit a generic, type-agnostic decision
+        // event so command-type domains can react IN this transaction. The
+        // display-policy listener promotes the approved revision to current ONLY
+        // on APPROVE; a REJECT leaves domain state untouched. A listener
+        // exception rolls THIS approval back atomically (the listener is a
+        // synchronous, MANDATORY-propagation in-tx @EventListener).
+        eventPublisher.publishEvent(new com.example.endpointadmin.event.CommandApprovalDecidedEvent(
+                saved.getId(),
+                saved.getCommandType(),
+                request.decision(),
+                tenantId,
+                saved.getDevice().getId(),
+                decidedBy));
+
         return toDto(saved);
     }
 

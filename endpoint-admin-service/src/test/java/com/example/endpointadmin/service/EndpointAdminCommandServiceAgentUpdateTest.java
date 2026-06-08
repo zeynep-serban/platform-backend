@@ -94,7 +94,8 @@ class EndpointAdminCommandServiceAgentUpdateTest {
                 auditService,
                 Clock.fixed(NOW, ZoneOffset.UTC),
                 Duration.ofMinutes(5),
-                Set.of(CommandType.COLLECT_INVENTORY));
+                Set.of(CommandType.COLLECT_INVENTORY),
+                event -> { });
     }
 
     @Test

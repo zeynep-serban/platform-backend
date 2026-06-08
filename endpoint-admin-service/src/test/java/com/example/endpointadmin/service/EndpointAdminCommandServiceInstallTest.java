@@ -111,7 +111,8 @@ class EndpointAdminCommandServiceInstallTest {
                 heartbeatRepository, preflightService,
                 commandSecretService,
                 auditService, fixed, Duration.ofMinutes(5),
-                Set.of(CommandType.COLLECT_INVENTORY));
+                Set.of(CommandType.COLLECT_INVENTORY),
+                event -> { });
     }
 
     @Test
