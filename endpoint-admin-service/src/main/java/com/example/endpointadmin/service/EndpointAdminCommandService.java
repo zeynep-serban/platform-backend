@@ -282,6 +282,20 @@ public class EndpointAdminCommandService {
                     "Command is no longer actionable; current status=" + command.getStatus().name() + ".");
         }
 
+        // BE-035 — a destructive command awaiting dual-control approval is never
+        // claimable (the claim query requires approvalStatus in
+        // NOT_REQUIRED/APPROVED, and claimNext is the only DELIVERED writer), so
+        // a PENDING command can only ever be QUEUED or terminal. A PENDING
+        // command in an in-flight status (DELIVERED/ACKED/RUNNING) is an
+        // unreachable data-integrity state; refuse the decision fail-closed
+        // rather than approving an already-in-flight command (Codex 019ea810).
+        // The terminal guard above runs first so a cancelled/expired command
+        // keeps its more specific "no longer actionable" message.
+        if (command.getStatus() != CommandStatus.QUEUED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Command is not in an approvable state; current status=" + command.getStatus().name() + ".");
+        }
+
         if (command.getApprovalStatus() != ApprovalStatus.PENDING) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "Command is not pending dual-control approval.");

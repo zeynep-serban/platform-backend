@@ -295,6 +295,49 @@ class EndpointAdminCommandDualControlTest {
     }
 
     @Test
+    void approvingAnInFlightPendingCommandIsRejectedWith409AndWritesNoAudit() {
+        EndpointDevice device = deviceRepository.saveAndFlush(device("PC-INFL"));
+        // BE-035 — a PENDING destructive command is never claimable, so it can
+        // only ever be QUEUED or terminal; DELIVERED + PENDING is an unreachable
+        // data-integrity state. Built directly to prove approveCommand refuses
+        // it fail-closed instead of approving an already-in-flight command.
+        EndpointCommand inflight = new EndpointCommand();
+        inflight.setTenantId(TENANT_ID);
+        inflight.setDevice(device);
+        inflight.setCommandType(CommandType.LOCK_USER_LOGIN);
+        inflight.setIdempotencyKey("lock-inflight");
+        inflight.setStatus(CommandStatus.DELIVERED);
+        inflight.setApprovalStatus(ApprovalStatus.PENDING);
+        inflight.setPayload(Map.of("reason", "in-flight integrity violation"));
+        inflight.setPriority(100);
+        inflight.setAttemptCount(1);
+        inflight.setMaxAttempts(3);
+        inflight.setIssuedBySubject(ISSUER);
+        inflight.setVisibleAfterAt(Instant.now());
+        inflight.setIssuedAt(Instant.now().minusSeconds(60));
+        EndpointCommand saved = commandRepository.saveAndFlush(inflight);
+
+        assertResponseStatus(
+                () -> commandService.approveCommand(
+                        context(APPROVER), saved.getId(),
+                        new ApproveEndpointCommandRequest(ApprovalDecision.APPROVE, "stale approve")),
+                HttpStatus.CONFLICT,
+                "not in an approvable state");
+
+        // The decision is rejected before any state mutation: the command stays
+        // DELIVERED + PENDING and no approval row is written. The command was
+        // direct-saved (no createCommand audit), so the rejected approve writing
+        // nothing means the tenant audit trail stays completely empty — stricter
+        // than asserting only the absence of an ENDPOINT_COMMAND_APPROVED row
+        // (Codex 019ea810 non-blocking tightening).
+        EndpointCommand reloaded = commandRepository.findById(saved.getId()).orElseThrow();
+        assertThat(reloaded.getStatus()).isEqualTo(CommandStatus.DELIVERED);
+        assertThat(reloaded.getApprovalStatus()).isEqualTo(ApprovalStatus.PENDING);
+        assertThat(approvalRepository.findByCommandId(saved.getId())).isEmpty();
+        assertThat(auditRepository.findTop50ByTenantIdOrderByOccurredAtDesc(TENANT_ID)).isEmpty();
+    }
+
+    @Test
     void auditTrailRecordsCreateAndApprovalEvents() {
         EndpointDevice device = deviceRepository.saveAndFlush(device("PC-AUD"));
         EndpointCommandDto created = commandService.createCommand(
