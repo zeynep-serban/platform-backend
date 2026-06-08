@@ -2,6 +2,7 @@ package com.example.endpointadmin.service;
 
 import com.example.endpointadmin.config.TimeConfig;
 import com.example.endpointadmin.dto.v1.agent.AutoEnrollmentRequest;
+import com.example.endpointadmin.model.DeviceStatus;
 import com.example.endpointadmin.repository.EndpointAuditEventRepository;
 import com.example.endpointadmin.repository.EndpointDeviceRepository;
 import com.example.endpointadmin.repository.EndpointMachineCertRepository;
@@ -116,6 +117,31 @@ class MachineCertAutoEnrollServiceTest {
         assertThat(second.status()).isEqualTo(HttpStatus.OK);
         assertThat(second.body().status()).isEqualTo("already-enrolled");
         assertThat(second.body().deviceId()).isEqualTo(first.body().deviceId());
+    }
+
+    /**
+     * Codex 019ea789 iter-2 regression — the already-enrolled active-cert path
+     * must FAIL-CLOSE with 409 on a DECOMMISSIONED device, not silently return
+     * 200 already-enrolled (which would let a decommissioned machine keep
+     * re-presenting its cert and re-adopting itself). Only an admin reactivate
+     * restores enrollment.
+     */
+    @Test
+    void reenrollmentOfDecommissionedDeviceReturns409() {
+        UUID guid = UUID.randomUUID();
+        X509Certificate cert = TestX509Certs.validClientCert(guid);
+        var first = service.autoEnroll(cert, TENANT_A, sampleRequest("fp-decom"));
+
+        var device = deviceRepository.findById(first.body().deviceId()).orElseThrow();
+        device.setStatus(DeviceStatus.DECOMMISSIONED);
+        deviceRepository.saveAndFlush(device);
+
+        assertThatThrownBy(() -> service.autoEnroll(cert, TENANT_A, sampleRequest("fp-decom")))
+                .isInstanceOf(ResponseStatusException.class)
+                .satisfies(e -> assertThat(((ResponseStatusException) e).getStatusCode())
+                        .isEqualTo(HttpStatus.CONFLICT))
+                .satisfies(e -> assertThat(((ResponseStatusException) e).getReason())
+                        .containsIgnoringCase("decommission"));
     }
 
     @Test

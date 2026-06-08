@@ -6,7 +6,6 @@ import com.example.endpointadmin.dto.v1.admin.EndpointMaintenanceTokenDto;
 import com.example.endpointadmin.dto.v1.agent.ConsumeMaintenanceTokenRequest;
 import com.example.endpointadmin.dto.v1.agent.ConsumeMaintenanceTokenResponse;
 import com.example.endpointadmin.exception.MaintenanceTokenExpiredException;
-import com.example.endpointadmin.model.DeviceStatus;
 import com.example.endpointadmin.model.EndpointDevice;
 import com.example.endpointadmin.model.EndpointMaintenanceToken;
 import com.example.endpointadmin.model.MaintenanceAction;
@@ -75,10 +74,12 @@ public class EndpointMaintenanceTokenService {
 
         Instant now = Instant.now(clock);
         int ttlMinutes = resolveTtl(request.expiresInMinutes());
-        EndpointDevice device = findDevice(context.tenantId(), deviceId);
-        if (device.getStatus() == DeviceStatus.DECOMMISSIONED) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Endpoint device is decommissioned.");
-        }
+        // Codex 019ea789 iter-2 must-fix: lock + fail-close 409 (shared write
+        // guard) so token issuance serialises against an in-flight decommission
+        // (its cascade revokes PENDING tokens; a plain read could slip a fresh
+        // token past the sweep).
+        EndpointDevice device = EndpointDeviceWriteGuard.loadActiveForUpdate(
+                deviceRepository, context.tenantId(), deviceId);
         if (tokenRepository.existsByTenantIdAndDevice_IdAndActionAndStatusAndExpiresAtAfter(
                 context.tenantId(),
                 deviceId,

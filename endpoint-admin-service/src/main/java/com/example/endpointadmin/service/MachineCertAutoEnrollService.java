@@ -132,6 +132,15 @@ public class MachineCertAutoEnrollService {
                         ));
                 throw new ResponseStatusException(HttpStatus.FORBIDDEN, "TENANT_BOUNDARY");
             }
+            // Codex 019ea789 post-impl must-fix: the already-enrolled active-cert
+            // path must ALSO reject a DECOMMISSIONED device — it returns early
+            // without reaching adoptOrCreateDevice (where the no-revive guard
+            // lives). Only an admin reactivate revives the device.
+            if (active.getDevice() != null
+                    && active.getDevice().getStatus() == DeviceStatus.DECOMMISSIONED) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Endpoint device is decommissioned; admin reactivation is required before re-enrollment.");
+            }
             recordSuccess(tenantId, active.getDevice(), parsed, request, "already-enrolled");
             return new Outcome(
                     HttpStatus.OK,
@@ -251,6 +260,16 @@ public class MachineCertAutoEnrollService {
                 .findVisibleToOrgAndMachineFingerprint(tenantId, request.machineFingerprint())
                 .or(() -> deviceRepository.findVisibleToOrgAndHostname(tenantId, request.hostname()))
                 .orElseGet(EndpointDevice::new);
+
+        // Codex 019ea789 must-fix: mTLS auto-enroll must NOT revive a
+        // decommissioned device — this path authenticates by client cert, NOT
+        // the HMAC credential, so the auth-layer gate does not cover it. A
+        // matched DECOMMISSIONED identity is rejected (409); only an admin
+        // reactivate revives it.
+        if (device.getId() != null && device.getStatus() == DeviceStatus.DECOMMISSIONED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Endpoint device is decommissioned; admin reactivation is required before re-enrollment.");
+        }
 
         if (device.getId() == null) {
             // Faz 21.1 PR2b-iv.b2 must-fix (Codex 019e8d1d): canonical write

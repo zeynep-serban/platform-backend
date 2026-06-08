@@ -1,5 +1,6 @@
 package com.example.endpointadmin.security;
 
+import com.example.endpointadmin.model.DeviceStatus;
 import com.example.endpointadmin.model.EndpointDeviceCredential;
 import com.example.endpointadmin.model.EndpointRequestNonce;
 import com.example.endpointadmin.repository.EndpointDeviceCredentialRepository;
@@ -51,6 +52,16 @@ public class HmacDeviceCredentialProvider implements DeviceCredentialProvider {
 
         EndpointDeviceCredential credential = credentialRepository.findByCredentialKeyIdAndActiveTrue(request.keyId())
                 .orElseThrow(() -> unauthorized("DEVICE_CREDENTIAL_NOT_FOUND", "Device credential was not found."));
+
+        // Codex 019ea789 must-fix: a DECOMMISSIONED device's credential is
+        // treated as inactive at the auth layer (no hard revoke -> the credential
+        // row stays intact for reversibility). EVERY agent endpoint authenticates
+        // through here, so this single gate stops a decommissioned device from
+        // acting; only an admin reactivate revives it.
+        if (credential.getDevice() != null
+                && credential.getDevice().getStatus() == DeviceStatus.DECOMMISSIONED) {
+            throw unauthorized("DEVICE_DECOMMISSIONED", "Device is decommissioned.");
+        }
 
         if (!matchesAnyAcceptedSecret(credential, request, now)) {
             throw unauthorized("DEVICE_SIGNATURE_INVALID", "Device request signature is invalid.");

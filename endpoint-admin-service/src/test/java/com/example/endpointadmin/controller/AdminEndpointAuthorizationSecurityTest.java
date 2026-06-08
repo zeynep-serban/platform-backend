@@ -13,6 +13,7 @@ import com.example.endpointadmin.security.AdminTenantContext;
 import com.example.endpointadmin.security.DeviceCredentialProvider;
 import com.example.endpointadmin.security.EndpointAdminAuthz;
 import com.example.endpointadmin.security.TenantContextResolver;
+import com.example.endpointadmin.service.EndpointDeviceLifecycleService;
 import com.example.endpointadmin.service.EndpointDeviceService;
 import com.example.endpointadmin.service.EndpointMaintenanceTokenService;
 import org.junit.jupiter.api.BeforeEach;
@@ -60,6 +61,9 @@ class AdminEndpointAuthorizationSecurityTest {
 
     @MockitoBean
     private EndpointDeviceService deviceService;
+
+    @MockitoBean
+    private EndpointDeviceLifecycleService lifecycleService;
 
     @MockitoBean
     private EndpointMaintenanceTokenService maintenanceTokenService;

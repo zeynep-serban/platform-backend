@@ -44,6 +44,14 @@ public class EndpointDeviceService {
                 .or(() -> repository.findVisibleToOrgAndHostname(tenantId, request.hostname()))
                 .orElseGet(EndpointDevice::new);
 
+        // Codex 019ea789 must-fix: enrollment must NOT revive a decommissioned
+        // device. A matched DECOMMISSIONED identity is rejected (409) — only an
+        // admin reactivate revives it, never a self-driven re-enrollment.
+        if (device.getId() != null && device.getStatus() == DeviceStatus.DECOMMISSIONED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Endpoint device is decommissioned; admin reactivation is required before re-enrollment.");
+        }
+
         if (device.getId() == null) {
             // Faz 21.1 PR2b-ii canonical org_id write (Codex 019e8cc2 Option A,
             // inline pattern). Set both columns to the same UUID so V30 CHECK

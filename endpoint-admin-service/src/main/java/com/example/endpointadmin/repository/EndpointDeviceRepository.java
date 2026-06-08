@@ -2,7 +2,9 @@ package com.example.endpointadmin.repository;
 
 import com.example.endpointadmin.model.DeviceStatus;
 import com.example.endpointadmin.model.EndpointDevice;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -48,6 +50,24 @@ public interface EndpointDeviceRepository extends JpaRepository<EndpointDevice, 
               and d.id = :id
             """)
     Optional<EndpointDevice> findVisibleToOrgAndId(
+            @Param("orgId") UUID orgId, @Param("id") UUID id);
+
+    /**
+     * Row-locking variant of {@link #findVisibleToOrgAndId} — acquires a
+     * {@code PESSIMISTIC_WRITE} lock on the device row so a lifecycle
+     * transition (decommission/reactivate) + its cascade run serialized
+     * against concurrent operator races (Codex 019ea789: do not rely on
+     * optimistic-lock exceptions for normal operator concurrency). MUST be
+     * called inside a transaction.
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("""
+            select d
+            from EndpointDevice d
+            where (d.orgId = :orgId or (d.orgId is null and d.tenantId = :orgId))
+              and d.id = :id
+            """)
+    Optional<EndpointDevice> findVisibleToOrgAndIdForUpdate(
             @Param("orgId") UUID orgId, @Param("id") UUID id);
 
     /**

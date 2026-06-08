@@ -191,13 +191,13 @@ public class EndpointUninstallService {
         }
         UUID tenantId = context.tenantId();
 
-        // Device lookup is needed for the idempotency-replay equality check; if
-        // the device is missing, the existing-key path would silently accept a
-        // stale request.
-        EndpointDevice device = deviceRepository
-                .findVisibleToOrgAndId(tenantId, deviceId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
-                        "Endpoint device not found."));
+        // Codex 019ea789 iter-2 must-fix: lock + fail-close 409 (shared write
+        // guard) so propose serialises against an in-flight decommission + its
+        // cascade (which finalizes open uninstall requests). A plain read could
+        // slip a fresh PENDING_APPROVAL request past the sweep. The locked device
+        // is also reused for the idempotency-replay equality check + audit below.
+        EndpointDevice device = EndpointDeviceWriteGuard.loadActiveForUpdate(
+                deviceRepository, tenantId, deviceId);
         EndpointSoftwareCatalogItem catalogItem = catalogRepository
                 .findByTenantIdAndCatalogItemId(tenantId, slug)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
@@ -340,6 +340,18 @@ public class EndpointUninstallService {
         UUID tenantId = context.tenantId();
         String subject = resolveSubject(context);
 
+        // Codex 019ea789 iter-2 must-fix — LOCK ORDER. Acquire the DEVICE row
+        // lock FIRST (same device→… order the decommission lifecycle uses), THEN
+        // the request row lock. The previous order (request lock, then a PLAIN
+        // device read) both (a) inverted the lock order vs decommission — a
+        // concurrent decommission locks the device first, so a request-first
+        // approve could deadlock — and (b) failed to serialise the dispatch
+        // against an in-flight decommission. Loading the device under
+        // PESSIMISTIC_WRITE here also fail-closes a DECOMMISSIONED device with
+        // 409 before any UNINSTALL_SOFTWARE command is dispatched.
+        EndpointDevice device = EndpointDeviceWriteGuard.loadActiveForUpdate(
+                deviceRepository, tenantId, deviceId);
+
         // PESSIMISTIC_WRITE on the request row — Codex post-impl iter-1
         // absorb (thread `019e8dcd` must-fix #2). Serialises concurrent
         // approvers so the second one observes the state already advanced
@@ -378,13 +390,9 @@ public class EndpointUninstallService {
                     req.getId(), req.getCreatedBy(), subject);
         }
 
-        // Re-fetch the catalog + device under the same transaction so a
-        // propose-then-revoke race or a Phase 0 flag-flip race cannot let
-        // an approve through stale state.
-        EndpointDevice device = deviceRepository
-                .findVisibleToOrgAndId(tenantId, deviceId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
-                        "Endpoint device not found at approve time."));
+        // Re-fetch the catalog under the same transaction (the device is already
+        // loaded + locked above) so a Phase 0 flag-flip race cannot let an
+        // approve through stale catalog state.
         EndpointSoftwareCatalogItem catalogItem = catalogRepository
                 .findByTenantIdAndId(tenantId, req.getCatalogItemId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,

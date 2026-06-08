@@ -101,7 +101,7 @@ class EndpointAdminCommandServiceAgentUpdateTest {
     void createAgentUpdateQueuesCommandFromApprovedReleaseCatalog() {
         EndpointDevice device = device();
         EndpointAgentUpdateRelease release = approvedRelease(AgentUpdateSigningTier.TRUSTED_SIGNED);
-        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(deviceRepository.findVisibleToOrgAndIdForUpdate(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
         when(agentUpdateReleaseRepository.findByTenantIdAndReleaseId(TENANT_ID, "agent-0.2.0"))
                 .thenReturn(Optional.of(release));
         when(heartbeatRepository.findFirstByDevice_IdOrderByReceivedAtDesc(DEVICE_ID))
@@ -148,7 +148,7 @@ class EndpointAdminCommandServiceAgentUpdateTest {
         EndpointAgentUpdateRelease release = approvedRelease(AgentUpdateSigningTier.TRUSTED_SIGNED);
         release.setStatus(AgentUpdateReleaseStatus.DRAFT);
         release.setEnabled(false);
-        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(deviceRepository.findVisibleToOrgAndIdForUpdate(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
         when(agentUpdateReleaseRepository.findByTenantIdAndReleaseId(TENANT_ID, "agent-0.2.0"))
                 .thenReturn(Optional.of(release));
 
@@ -164,7 +164,7 @@ class EndpointAdminCommandServiceAgentUpdateTest {
     @Test
     void createAgentUpdateRejectsWhenRequiredDeploymentRingDoesNotMatchDevice() {
         EndpointDevice device = device();
-        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(deviceRepository.findVisibleToOrgAndIdForUpdate(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
 
         assertThatThrownBy(() -> service.createAgentUpdate(TENANT, DEVICE_ID,
                 new CreateAgentUpdateRequest("agent-0.2.0", "key",
@@ -180,7 +180,7 @@ class EndpointAdminCommandServiceAgentUpdateTest {
     @Test
     void createAgentUpdateRejectsStaleHeartbeatBeforeQueueingCommand() {
         EndpointDevice device = device();
-        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(deviceRepository.findVisibleToOrgAndIdForUpdate(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
         when(agentUpdateReleaseRepository.findByTenantIdAndReleaseId(TENANT_ID, "agent-0.2.0"))
                 .thenReturn(Optional.of(approvedRelease(AgentUpdateSigningTier.TRUSTED_SIGNED)));
         when(heartbeatRepository.findFirstByDevice_IdOrderByReceivedAtDesc(DEVICE_ID))
@@ -198,7 +198,7 @@ class EndpointAdminCommandServiceAgentUpdateTest {
     @Test
     void createAgentUpdateRejectsHeartbeatWithoutUpdateAgentCapability() {
         EndpointDevice device = device();
-        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(deviceRepository.findVisibleToOrgAndIdForUpdate(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
         when(agentUpdateReleaseRepository.findByTenantIdAndReleaseId(TENANT_ID, "agent-0.2.0"))
                 .thenReturn(Optional.of(approvedRelease(AgentUpdateSigningTier.TRUSTED_SIGNED)));
         when(heartbeatRepository.findFirstByDevice_IdOrderByReceivedAtDesc(DEVICE_ID))
@@ -218,7 +218,7 @@ class EndpointAdminCommandServiceAgentUpdateTest {
         EndpointDevice device = device();
         EndpointAgentUpdateRelease release = approvedRelease(AgentUpdateSigningTier.LAB_ONLY_EVIDENCE);
         EndpointCommand existing = existingUpdateCommand(device, release);
-        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(deviceRepository.findVisibleToOrgAndIdForUpdate(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
         when(agentUpdateReleaseRepository.findByTenantIdAndReleaseId(TENANT_ID, "agent-0.2.0"))
                 .thenReturn(Optional.of(release));
         when(heartbeatRepository.findFirstByDevice_IdOrderByReceivedAtDesc(DEVICE_ID))
@@ -242,7 +242,7 @@ class EndpointAdminCommandServiceAgentUpdateTest {
         EndpointDevice device = device();
         EndpointAgentUpdateRelease release = approvedRelease(AgentUpdateSigningTier.LAB_ONLY_EVIDENCE);
         EndpointCommand existing = existingUpdateCommand(device, release);
-        when(deviceRepository.findVisibleToOrgAndId(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
+        when(deviceRepository.findVisibleToOrgAndIdForUpdate(TENANT_ID, DEVICE_ID)).thenReturn(Optional.of(device));
         when(agentUpdateReleaseRepository.findByTenantIdAndReleaseId(TENANT_ID, "agent-0.2.0"))
                 .thenReturn(Optional.of(release));
         when(heartbeatRepository.findFirstByDevice_IdOrderByReceivedAtDesc(DEVICE_ID))
