@@ -71,6 +71,23 @@ public class EndpointAdminCommandService {
             CommandType.ROTATE_CREDENTIAL);
 
     /**
+     * BE-034 — terminal command lifecycle states. A dual-control approval
+     * decision on a command in one of these states is no longer actionable:
+     * the device-decommission cascade can CANCEL a command while its
+     * {@code approvalStatus} is still {@code PENDING}, and an APPROVE then
+     * writes a semantically dirty audit ({@code ENDPOINT_COMMAND_APPROVED} on
+     * an already-CANCELLED command) without producing any claimable work — the
+     * agent claim query ({@code findClaimCandidatesForDevice}) filters these
+     * statuses. {@link #approveCommand} rejects such a decision with 409 before
+     * any approval/audit write (Codex 019ea789).
+     */
+    private static final Set<CommandStatus> TERMINAL_STATUSES = EnumSet.of(
+            CommandStatus.SUCCEEDED,
+            CommandStatus.FAILED,
+            CommandStatus.EXPIRED,
+            CommandStatus.CANCELLED);
+
+    /**
      * AG-028 Phase 1 (Codex plan-time iter-2 absorb) — command types that
      * are reserved for their dedicated REST surfaces and MUST NOT be
      * created via the generic admin command surface.
@@ -252,6 +269,18 @@ public class EndpointAdminCommandService {
         UUID tenantId = context.tenantId();
         EndpointCommand command = commandRepository.findByTenantIdAndIdForUpdate(tenantId, commandId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Endpoint command not found."));
+
+        // BE-034 — the device-decommission cascade can CANCEL a command while
+        // its approvalStatus is still PENDING (the PENDING gate below would not
+        // catch it). Reject the dual-control decision on any terminal command
+        // up front, before writing the approval/audit, so we never emit an
+        // ENDPOINT_COMMAND_APPROVED audit on a command whose lifecycle is over
+        // (Codex 019ea789). This is audit/UX hygiene, not a security gate: the
+        // agent claim query already filters terminal statuses.
+        if (TERMINAL_STATUSES.contains(command.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Command is no longer actionable; current status=" + command.getStatus().name() + ".");
+        }
 
         if (command.getApprovalStatus() != ApprovalStatus.PENDING) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,

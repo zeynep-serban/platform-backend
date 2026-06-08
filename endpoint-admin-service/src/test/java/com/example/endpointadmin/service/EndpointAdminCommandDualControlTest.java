@@ -253,6 +253,48 @@ class EndpointAdminCommandDualControlTest {
     }
 
     @Test
+    void approvingACancelledCommandIsRejectedWith409AndWritesNoAudit() {
+        EndpointDevice device = deviceRepository.saveAndFlush(device("PC-CANX"));
+        // BE-034 — the device-decommission cascade CANCELs a queued command
+        // while its dual-control approvalStatus is still PENDING. Built directly
+        // because createCommand never lands a command in a terminal status.
+        EndpointCommand cancelled = new EndpointCommand();
+        cancelled.setTenantId(TENANT_ID);
+        cancelled.setDevice(device);
+        cancelled.setCommandType(CommandType.LOCK_USER_LOGIN);
+        cancelled.setIdempotencyKey("lock-cancelled");
+        cancelled.setStatus(CommandStatus.CANCELLED);
+        cancelled.setApprovalStatus(ApprovalStatus.PENDING);
+        cancelled.setPayload(Map.of("reason", "device decommissioned"));
+        cancelled.setPriority(100);
+        cancelled.setAttemptCount(0);
+        cancelled.setMaxAttempts(3);
+        cancelled.setIssuedBySubject(ISSUER);
+        cancelled.setVisibleAfterAt(Instant.now());
+        cancelled.setCancelledAt(Instant.now());
+        cancelled.setIssuedAt(Instant.now().minusSeconds(60));
+        EndpointCommand saved = commandRepository.saveAndFlush(cancelled);
+
+        assertResponseStatus(
+                () -> commandService.approveCommand(
+                        context(APPROVER), saved.getId(),
+                        new ApproveEndpointCommandRequest(ApprovalDecision.APPROVE, "stale approve")),
+                HttpStatus.CONFLICT,
+                "no longer actionable");
+
+        // The decision is rejected before any state mutation: the command stays
+        // CANCELLED + PENDING, no approval row is written, and crucially no
+        // ENDPOINT_COMMAND_APPROVED audit row is emitted.
+        EndpointCommand reloaded = commandRepository.findById(saved.getId()).orElseThrow();
+        assertThat(reloaded.getStatus()).isEqualTo(CommandStatus.CANCELLED);
+        assertThat(reloaded.getApprovalStatus()).isEqualTo(ApprovalStatus.PENDING);
+        assertThat(approvalRepository.findByCommandId(saved.getId())).isEmpty();
+        assertThat(auditRepository.findTop50ByTenantIdOrderByOccurredAtDesc(TENANT_ID))
+                .extracting("eventType")
+                .doesNotContain("ENDPOINT_COMMAND_APPROVED");
+    }
+
+    @Test
     void auditTrailRecordsCreateAndApprovalEvents() {
         EndpointDevice device = deviceRepository.saveAndFlush(device("PC-AUD"));
         EndpointCommandDto created = commandService.createCommand(
