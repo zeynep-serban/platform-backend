@@ -121,7 +121,11 @@ public class EndpointAdminCommandService {
             CommandType.INSTALL_SOFTWARE,
             CommandType.UNINSTALL_SOFTWARE,
             CommandType.UPDATE_AGENT,
-            CommandType.CHANGE_LOCAL_PASSWORD);
+            CommandType.CHANGE_LOCAL_PASSWORD,
+            // #508 — display policy carries a full desired-state snapshot + is
+            // always maker-checker; it MUST go through its dedicated dispatch
+            // surface (slice-2), never the generic /commands path.
+            CommandType.SET_DISPLAY_POLICY);
 
     private static final Duration DEFAULT_LOCAL_PASSWORD_SECRET_TTL = Duration.ofMinutes(15);
     private static final String LOCAL_PASSWORD_SECRET_REF = "endpoint-command-secret:newPassword";

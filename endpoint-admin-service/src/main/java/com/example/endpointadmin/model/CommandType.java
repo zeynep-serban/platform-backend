@@ -22,5 +22,11 @@ public enum CommandType {
     // AG-029 (Faz 22.5.7) — signed agent self-update. Backend source now
     // recognizes the command type so generic command creation can reject it
     // fail-closed until the dedicated release-catalog/trust surface lands.
-    UPDATE_AGENT
+    UPDATE_AGENT,
+    // #508 (Faz 22.5) — Endpoint Display Policy (screensaver + wallpaper)
+    // enforcement. V58 extends endpoint_commands.command_type CHECK with this
+    // value. Dedicated-path-only: the generic /commands surface rejects it
+    // (422) until the dedicated display-policy dispatch surface lands (slice-2);
+    // it carries a full desired-state snapshot and is always maker-checker.
+    SET_DISPLAY_POLICY
 }
