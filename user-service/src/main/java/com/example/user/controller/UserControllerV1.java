@@ -45,6 +45,7 @@ import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -531,6 +532,42 @@ public class UserControllerV1 {
         User updatedUser = userService.updateUser(id, request);
         recordUserUpdateAudit(currentUser, existingUser, updatedUser, request);
         return ResponseEntity.ok(UserDtoMapper.toDetail(updatedUser));
+    }
+
+    /**
+     * Soft-deletes a user (Codex 019ea573, #770 Phase 2 — UserActions "Sil").
+     * Sets the {@code deleted_at} tombstone; the {@code CurrentUserResolver}
+     * choke point then blocks the identity ({@code 403 USER_DELETED}) and
+     * every read surface excludes the row. Reversible via {@link #restoreUser}.
+     * Requires {@code user-delete} (MANAGE_USERS) within company scope and
+     * refuses self-deletion ({@code 400 CANNOT_DELETE_SELF}).
+     */
+    @DeleteMapping("/{id}")
+    public ResponseEntity<UserMutationAckDto> deleteUser(@PathVariable Long id,
+                                                         @RequestHeader(value = "X-Company-Id", required = false) Long companyId) {
+        User currentUser = requireCurrentUser();
+        requirePermissionWithCompanyScope(PermissionActions.USER_DELETE, companyId);
+        if (currentUser.getId() != null && currentUser.getId().equals(id)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "CANNOT_DELETE_SELF");
+        }
+        String auditId = userService.deleteUser(id, currentUser.getId());
+        return ResponseEntity.ok(UserMutationAckDto.ok(prefixUserAuditId(auditId)));
+    }
+
+    /**
+     * Restores a soft-deleted user (Codex 019ea573, #770 Phase 2). Clears the
+     * tombstone; the row keeps its prior {@code enabled} state (activation is
+     * a separate admin action). Requires {@code user-delete} (MANAGE_USERS)
+     * within company scope. {@code 409 USER_NOT_DELETED} when the target is
+     * not a tombstone.
+     */
+    @PostMapping("/{id}/restore")
+    public ResponseEntity<UserMutationAckDto> restoreUser(@PathVariable Long id,
+                                                          @RequestHeader(value = "X-Company-Id", required = false) Long companyId) {
+        User currentUser = requireCurrentUser();
+        requirePermissionWithCompanyScope(PermissionActions.USER_DELETE, companyId);
+        String auditId = userService.restoreUser(id, currentUser.getId());
+        return ResponseEntity.ok(UserMutationAckDto.ok(prefixUserAuditId(auditId)));
     }
 
     private void recordUserUpdateAudit(User currentUser, UserAuditSnapshot previousUser, User updatedUser, UpdateUserRequest request) {

@@ -41,6 +41,35 @@ public class UserAuditEventService {
         return repository.save(event);
     }
 
+    /**
+     * Records a soft-delete (tombstone) event. INSERT-only: a fresh
+     * {@link UserAuditEvent} with no id, persisted via {@code repository.save}
+     * (Codex 019ea573, #770 Phase 2 — append-only audit, no UPDATE).
+     */
+    @Transactional
+    public UserAuditEvent recordDeleteEvent(Long performedBy, Long targetUserId) {
+        UserAuditEvent event = new UserAuditEvent();
+        event.setEventType("USER_DELETE");
+        event.setPerformedBy(performedBy);
+        event.setTargetUserId(targetUserId);
+        event.setDetails("User %d soft-deleted by %s".formatted(targetUserId, String.valueOf(performedBy)));
+        return repository.save(event);
+    }
+
+    /**
+     * Records a restore (un-tombstone) event. INSERT-only, mirrors
+     * {@link #recordDeleteEvent} (Codex 019ea573, #770 Phase 2).
+     */
+    @Transactional
+    public UserAuditEvent recordRestoreEvent(Long performedBy, Long targetUserId) {
+        UserAuditEvent event = new UserAuditEvent();
+        event.setEventType("USER_RESTORE");
+        event.setPerformedBy(performedBy);
+        event.setTargetUserId(targetUserId);
+        event.setDetails("User %d restored by %s".formatted(targetUserId, String.valueOf(performedBy)));
+        return repository.save(event);
+    }
+
     @Transactional
     public UserAuditEvent recordExportEvent(Long performedBy, String details, boolean success) {
         UserAuditEvent event = new UserAuditEvent();

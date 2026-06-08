@@ -97,6 +97,42 @@ class AuthenticatedUserLookupServiceTest {
         assertEquals("admin@example.com", resolved.email());
     }
 
+    @Test
+    void resolve_softDeleteColumn_suppressesTombstonedNumericClaim() {
+        // Finding 1 (Codex thread 019ea6f6 REVISE): with a soft-delete column
+        // configured, a numeric uid/userId/sub claim pointing at a tombstone
+        // must NOT resolve — neither numericUserId nor responseUserId may echo
+        // the deleted id. Active-by-id query returns empty = tombstone.
+        AuthenticatedUserLookupService service = new AuthenticatedUserLookupService(
+                new StubJdbcTemplate(List.of(), "user_service.users"),
+                "user_service.users",
+                "deleted_at"
+        );
+        Jwt jwt = buildJwt(Map.of("uid", 42L, "email", "ghost@example.com"), "kc-user-uuid");
+
+        var resolved = service.resolve(jwt);
+
+        assertNull(resolved.numericUserId());
+        assertNull(resolved.responseUserId());
+        assertEquals("ghost@example.com", resolved.email());
+    }
+
+    @Test
+    void resolve_softDeleteColumn_keepsActiveNumericClaim() {
+        // An active numeric id is preserved when the soft-delete column is set.
+        AuthenticatedUserLookupService service = new AuthenticatedUserLookupService(
+                new StubJdbcTemplate(List.of(Map.of("id", 42L)), "user_service.users"),
+                "user_service.users",
+                "deleted_at"
+        );
+        Jwt jwt = buildJwt(Map.of("uid", 42L, "email", "live@example.com"), "kc-user-uuid");
+
+        var resolved = service.resolve(jwt);
+
+        assertEquals(42L, resolved.numericUserId());
+        assertEquals("42", resolved.responseUserId());
+    }
+
     private static Jwt buildJwt(Map<String, Object> claims, String subject) {
         var builder = Jwt.withTokenValue("token")
                 .header("alg", "none")

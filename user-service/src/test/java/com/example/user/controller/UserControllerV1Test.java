@@ -27,7 +27,9 @@ import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 
 import static org.hamcrest.Matchers.containsString;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -852,6 +854,154 @@ class UserControllerV1Test {
         Assertions.assertThat(userAuditEventRepository.findAll().getFirst().getDetails())
                 .contains("role:USER->ADMIN")
                 .contains("sessionTimeoutMinutes:15->16");
+    }
+
+    // ── Soft-delete (Codex 019ea573, #770 Phase 2 — UserActions "Sil") ──
+
+    @Test
+    void deleteUser_softDeletesTarget_excludesFromListAndGet() throws Exception {
+        User admin = ensureUserExists("delete-admin@example.com");
+        User target = ensureUserExists("delete-target@example.com");
+        String token = issueToken(admin.getEmail());
+
+        mockMvc.perform(delete("/api/v1/users/{id}", target.getId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ok"))
+                .andExpect(jsonPath("$.auditId").value(org.hamcrest.Matchers.startsWith("user-")));
+
+        // Tombstone set in DB.
+        User reloaded = userRepository.findById(target.getId()).orElseThrow();
+        Assertions.assertThat(reloaded.getDeletedAt()).isNotNull();
+        Assertions.assertThat(reloaded.isDeleted()).isTrue();
+
+        // INSERT-only USER_DELETE audit event recorded.
+        Assertions.assertThat(userAuditEventRepository.findAll().stream()
+                        .anyMatch(e -> "USER_DELETE".equals(e.getEventType())))
+                .isTrue();
+
+        // GET by id → 404 (active-only read).
+        mockMvc.perform(get("/api/v1/users/{id}", target.getId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isNotFound());
+
+        // List excludes the tombstone.
+        mockMvc.perform(get("/api/v1/users?page=1&pageSize=100&dataSource=client")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.not(
+                        containsString("delete-target@example.com"))));
+    }
+
+    @Test
+    void deleteUser_self_returns400_andDoesNotTombstone() throws Exception {
+        User admin = ensureUserExists("self-delete@example.com");
+        String token = issueToken(admin.getEmail());
+
+        mockMvc.perform(delete("/api/v1/users/{id}", admin.getId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(containsString("CANNOT_DELETE_SELF")));
+
+        Assertions.assertThat(userRepository.findById(admin.getId()).orElseThrow().isDeleted())
+                .isFalse();
+    }
+
+    // NOTE: the missing-permission (403) path is intentionally NOT asserted
+    // here. The MockMvc/H2 harness resolves an OpenFGA ScopeContext with
+    // superAdmin=true, which short-circuits requirePermissionWithCompanyScope
+    // before the permission check — so no controller-integration test in this
+    // suite can negatively assert the gate (none of the existing mutation
+    // tests do either). The DELETE endpoint uses the same
+    // requirePermissionWithCompanyScope(USER_DELETE, companyId) gate that the
+    // proven PUT /{id} (USER_UPDATE) endpoint uses; missing-permission denial
+    // is covered by live E2E with a scoped (non-superadmin) token.
+
+    @Test
+    void deletedUser_cannotTransact_returns403_USER_DELETED() throws Exception {
+        User admin = ensureUserExists("choke-admin@example.com");
+        User victim = ensureUserExists("choke-victim@example.com");
+        // Soft-delete the victim through the real endpoint.
+        mockMvc.perform(delete("/api/v1/users/{id}", victim.getId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + issueToken(admin.getEmail())))
+                .andExpect(status().isOk());
+
+        // The victim's own token is now refused at the resolver choke point —
+        // the tombstone gate takes precedence and reports USER_DELETED.
+        mockMvc.perform(get("/api/v1/users?page=1&pageSize=10")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + issueToken(victim.getEmail())))
+                .andExpect(status().isForbidden())
+                .andExpect(content().string(containsString("USER_DELETED")));
+    }
+
+    @Test
+    void restoreUser_clearsTombstone_userVisibleAgain() throws Exception {
+        User admin = ensureUserExists("restore-admin@example.com");
+        User target = ensureUserExists("restore-target@example.com");
+        String token = issueToken(admin.getEmail());
+
+        mockMvc.perform(delete("/api/v1/users/{id}", target.getId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/v1/users/{id}/restore", target.getId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ok"))
+                .andExpect(jsonPath("$.auditId").value(org.hamcrest.Matchers.startsWith("user-")));
+
+        User reloaded = userRepository.findById(target.getId()).orElseThrow();
+        Assertions.assertThat(reloaded.getDeletedAt()).isNull();
+        Assertions.assertThat(reloaded.isDeleted()).isFalse();
+
+        Assertions.assertThat(userAuditEventRepository.findAll().stream()
+                        .anyMatch(e -> "USER_RESTORE".equals(e.getEventType())))
+                .isTrue();
+
+        // GET by id resolves again after restore.
+        mockMvc.perform(get("/api/v1/users/{id}", target.getId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk());
+    }
+
+    /**
+     * Codex 019ea6f6 iter-2 regression guard: create/provision stores canonical
+     * lowercase email; the active by-email lookup is ignore-case, so a
+     * mixed-case query resolves the row (no authn/read regression). After
+     * soft-delete the same mixed-case lookup is 404 (active-only).
+     */
+    @Test
+    void getUserByEmail_mixedCaseLookup_resolvesActiveThenTombstone404() throws Exception {
+        User caller = ensureUserExists("mixedcase-admin@example.com");
+        User target = ensureUserExists("mixedlogin@example.com"); // stored lowercase
+        String token = issueToken(caller.getEmail());
+
+        mockMvc.perform(get("/api/v1/users/by-email")
+                        .param("email", "MixedLogin@Example.COM")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("mixedlogin@example.com")));
+
+        mockMvc.perform(delete("/api/v1/users/{id}", target.getId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/v1/users/by-email")
+                        .param("email", "MixedLogin@Example.COM")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void restoreUser_notDeleted_returns409() throws Exception {
+        User admin = ensureUserExists("restore-noop-admin@example.com");
+        User target = ensureUserExists("restore-noop-target@example.com");
+        String token = issueToken(admin.getEmail());
+
+        mockMvc.perform(post("/api/v1/users/{id}/restore", target.getId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isConflict())
+                .andExpect(content().string(containsString("USER_NOT_DELETED")));
     }
 
     private User ensureUserExists(String email) {

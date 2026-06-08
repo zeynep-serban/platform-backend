@@ -86,6 +86,19 @@ public class CurrentUserResolver {
      */
     public User resolveCurrentUser() {
         User user = resolveAuthenticatedUser();
+        // Soft-delete tombstone gate (Codex 019ea573, #770 Phase 2). A
+        // soft-deleted profile must never transact, regardless of principal
+        // type (User / numeric-userId JWT / lazy-provision bridge /
+        // gate-denied JWT / service token). Because the entity carries NO
+        // global @Where, every resolution path returns the tombstone row and
+        // this single choke point converts it to a clean 403 USER_DELETED.
+        // Checked BEFORE the activation gate so a deleted-and-disabled row
+        // reports the more specific terminal state.
+        if (user.isDeleted()) {
+            log.warn("Silinmiş hesap isteği reddedildi (deleted_at set): userId={} email={}",
+                    user.getId(), user.getEmail());
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "USER_DELETED");
+        }
         // Account-activation gate. A passive (enabled=false) profile — an
         // M365 first-login auto-provisioned account awaiting admin
         // activation, or a manually-disabled account — must not transact

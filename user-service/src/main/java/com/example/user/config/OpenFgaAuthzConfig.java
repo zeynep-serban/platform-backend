@@ -36,8 +36,13 @@ public class OpenFgaAuthzConfig {
     @Bean
     public AuthenticatedUserLookupService authenticatedUserLookupService(
             JdbcTemplate jdbcTemplate,
-            @Value("${authz.user-table:user_service.users}") String userTable) {
-        return new AuthenticatedUserLookupService(jdbcTemplate, userTable);
+            @Value("${authz.user-table:user_service.users}") String userTable,
+            @Value("${authz.user-soft-delete-column:deleted_at}") String softDeleteColumn) {
+        // Soft-delete (Codex 019ea573, #770 Phase 2): the user-service users
+        // table carries a deleted_at tombstone, so a soft-deleted identity
+        // must not resolve a numeric userId in the OpenFGA authz context.
+        // Other services keep the 2-arg (no soft-delete column) behaviour.
+        return new AuthenticatedUserLookupService(jdbcTemplate, userTable, softDeleteColumn);
     }
 
     @Bean

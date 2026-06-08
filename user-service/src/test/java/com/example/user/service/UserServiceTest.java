@@ -106,7 +106,7 @@ class UserServiceTest {
         // --- ARRANGE (Hazırlık) ---
         // Mockito'ya, userRepository.existsByEmail metodu çağrıldığında
         // ne olursa olsun 'false' döndürmesini söylüyoruz.
-        when(userRepository.existsByEmail("test@example.com")).thenReturn(false);
+        when(userRepository.findByEmailIgnoreCase("test@example.com")).thenReturn(java.util.Optional.empty());
 
         // Parola şifreleme metodunun sahte bir şifrelenmiş değer döndürmesini sağlıyoruz.
         when(passwordEncoder.encode("password123")).thenReturn("hashed_password");
@@ -131,7 +131,7 @@ class UserServiceTest {
         // --- ARRANGE (Hazırlık) ---
         // Bu senaryoda, email'in zaten var olduğunu varsayıyoruz.
         // Mockito'ya, existsByEmail çağrıldığında 'true' döndürmesini söylüyoruz.
-        when(userRepository.existsByEmail("test@example.com")).thenReturn(true);
+        when(userRepository.findByEmailIgnoreCase("test@example.com")).thenReturn(java.util.Optional.of(user));
 
         // --- ACT & ASSERT (Eylem ve Doğrulama) ---
         // registerUser metodunun bir IllegalStateException fırlatıp fırlatmadığını test ediyoruz.
@@ -155,7 +155,12 @@ class UserServiceTest {
 
         Pageable pageable = PageRequest.of(0, 10);
         java.util.List<User> users = java.util.List.of(user, user);
-        when(userRepository.findAll(any(Pageable.class))).thenReturn(new PageImpl<>(users, pageable, users.size()));
+        // Soft-delete (Codex 019ea573, #770 Phase 2): every list query — even a
+        // superadmin's — now carries the UserSpecifications.notDeleted() seed,
+        // so it goes through the Specification overload (tombstones excluded)
+        // rather than the bare findAll(Pageable).
+        when(userRepository.findAll(any(org.springframework.data.jpa.domain.Specification.class), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(users, pageable, users.size()));
 
         Page<User> result = userService.searchUsers(null, null, null, null, pageable);
 
@@ -223,7 +228,7 @@ class UserServiceTest {
         request.setRole("USER");
         request.setKcSubject("kc-subject-uuid-fresh");
 
-        when(userRepository.findByEmail("new.user@example.com")).thenReturn(java.util.Optional.empty());
+        when(userRepository.findByEmailIgnoreCase("new.user@example.com")).thenReturn(java.util.Optional.empty());
         when(passwordEncoder.encode(any(String.class))).thenReturn("random-encoded");
         ArgumentCaptor<User> savedUser = ArgumentCaptor.forClass(User.class);
         when(userRepository.save(savedUser.capture())).thenAnswer(inv -> inv.getArgument(0));
@@ -252,7 +257,7 @@ class UserServiceTest {
         // kcSubject intentionally left null — older callers that don't
         // know about the field must NOT wipe a backfilled subject.
 
-        when(userRepository.findByEmail("existing@example.com")).thenReturn(java.util.Optional.of(existing));
+        when(userRepository.findByEmailIgnoreCase("existing@example.com")).thenReturn(java.util.Optional.of(existing));
         ArgumentCaptor<User> savedUser = ArgumentCaptor.forClass(User.class);
         when(userRepository.save(savedUser.capture())).thenAnswer(inv -> inv.getArgument(0));
 
@@ -272,7 +277,7 @@ class UserServiceTest {
         request.setEnabled(true);
         // kcSubject left null
 
-        when(userRepository.findByEmail("legacy@example.com")).thenReturn(java.util.Optional.empty());
+        when(userRepository.findByEmailIgnoreCase("legacy@example.com")).thenReturn(java.util.Optional.empty());
         when(passwordEncoder.encode(any(String.class))).thenReturn("random-encoded");
         ArgumentCaptor<User> savedUser = ArgumentCaptor.forClass(User.class);
         when(userRepository.save(savedUser.capture())).thenAnswer(inv -> inv.getArgument(0));
@@ -287,6 +292,119 @@ class UserServiceTest {
         assertNull(savedUser.getValue().getKcSubject());
     }
 
+    /**
+     * No-resurrection guard (Codex 019ea573, #770 Phase 2): the internal
+     * provision path must never silently reactivate/mutate a soft-deleted
+     * tombstone. Re-admitting the identity is an explicit admin restore,
+     * surfaced as 409 USER_DELETED_RESTORE_REQUIRED — and the row is never
+     * written.
+     */
+    @Test
+    void provisionFromKeycloak_softDeletedRow_throws409_noResurrection() {
+        User tombstone = new User();
+        tombstone.setId(7L);
+        tombstone.setEmail("ghost@example.com");
+        tombstone.setName("Ghost");
+        tombstone.setDeletedAt(java.time.LocalDateTime.now());
+
+        KeycloakUserProvisionRequest request = new KeycloakUserProvisionRequest();
+        request.setEmail("Ghost@Example.COM"); // mixed-case → canonical → ignore-case tombstone hit (finding 3)
+        request.setName("Resurrected?");
+        request.setEnabled(true);
+
+        when(userRepository.findByEmailIgnoreCase("ghost@example.com")).thenReturn(java.util.Optional.of(tombstone));
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+                () -> userService.provisionFromKeycloak(request));
+        assertEquals(409, ex.getStatusCode().value());
+        org.assertj.core.api.Assertions.assertThat(ex.getReason()).contains("USER_DELETED_RESTORE_REQUIRED");
+        // The tombstone is never written (no reactivation / no name change).
+        verify(userRepository, never()).save(any(User.class));
+    }
+
+    /**
+     * Finding 2+4 (Codex thread 019ea6f6 REVISE): the shared by-email service
+     * method — backing V1/legacy GET /by-email AND the auth-service internal
+     * credential endpoint (/api/users/internal/by-email) — must be active-only
+     * so a deleted-but-enabled account cannot be read or used to authenticate.
+     */
+    @Test
+    void findByEmail_isActiveOnlyIgnoreCase() {
+        User active = new User();
+        active.setId(3L);
+        active.setEmail("live@example.com");
+        // Mixed-case lookup must resolve the canonical lowercase row (Codex
+        // 019ea6f6 iter-2) and never use the raw/exact repo methods.
+        when(userRepository.findActiveByEmailIgnoreCase("Live@Example.com"))
+                .thenReturn(java.util.Optional.of(active));
+
+        assertTrue(userService.findByEmail("Live@Example.com").isPresent());
+        verify(userRepository).findActiveByEmailIgnoreCase("Live@Example.com");
+        verify(userRepository, never()).findByEmail(any());
+        verify(userRepository, never()).findActiveByEmail(any());
+    }
+
+    /**
+     * Codex 019ea6f6 iter-2: create paths store the canonical lowercase email
+     * so the ignore-case active lookup (and thus local login) resolves
+     * consistently — no mixed-case authn regression.
+     */
+    @Test
+    void registerUserPublic_canonicalizesEmailToLowercase() {
+        RegisterRequest req = new RegisterRequest();
+        req.setName("Mixed Case");
+        req.setEmail("Mixed@Case.COM");
+        req.setPassword("pw123456");
+        when(userRepository.findByEmailIgnoreCase("mixed@case.com")).thenReturn(java.util.Optional.empty());
+        when(passwordEncoder.encode("pw123456")).thenReturn("hashed");
+        ArgumentCaptor<User> saved = ArgumentCaptor.forClass(User.class);
+        when(userRepository.save(saved.capture())).thenAnswer(inv -> inv.getArgument(0));
+
+        userService.registerUserPublic(req);
+
+        assertEquals("mixed@case.com", saved.getValue().getEmail());
+    }
+
+    /**
+     * Finding 3 (Codex 019ea6f6): a soft-deleted email (any casing) blocks
+     * re-registration via the ignore-case existence check — no case-variant
+     * resurrection into a fresh active row.
+     */
+    @Test
+    void registerUser_existingTombstoneAnyCase_blocks() {
+        User tombstone = new User();
+        tombstone.setEmail("test@example.com");
+        tombstone.setDeletedAt(java.time.LocalDateTime.now());
+        when(userRepository.findByEmailIgnoreCase("test@example.com")).thenReturn(java.util.Optional.of(tombstone));
+
+        assertThrows(IllegalStateException.class, () -> userService.registerUser(registerRequest));
+        verify(userRepository, never()).save(any(User.class));
+    }
+
+    /**
+     * Finding 5 (Codex 019ea6f6): a stale email-verification token must not
+     * re-enable a soft-deleted tombstone — activateUser is active-only.
+     */
+    @Test
+    void activateUser_softDeleted_failsClosed() {
+        when(userRepository.findActiveById(99L)).thenReturn(java.util.Optional.empty());
+        assertThrows(IllegalArgumentException.class, () -> userService.activateUser(99L));
+        verify(userRepository, never()).save(any(User.class));
+    }
+
+    /**
+     * Finding 5 (Codex 019ea6f6): the legacy PUT /api/users/{id} calls
+     * updateUser directly (no controller precheck) — it must fail-closed for a
+     * tombstone so a deleted user cannot be mutated.
+     */
+    @Test
+    void updateUser_softDeleted_failsClosed() {
+        when(userRepository.findActiveById(99L)).thenReturn(java.util.Optional.empty());
+        assertThrows(IllegalArgumentException.class,
+                () -> userService.updateUser(99L, new com.example.user.dto.UpdateUserRequest()));
+        verify(userRepository, never()).save(any(User.class));
+    }
+
     @Test
     void registerUser_doesNotPopulateKcSubject_documentedGap() {
         // BUG #1 prevention documentation: the (deprecated) registerUser
@@ -294,7 +412,7 @@ class UserServiceTest {
         // kc_subject null. Future callers that need impersonable users
         // must go through /internal/provision with a kcSubject value, or
         // run the backfill runbook afterwards.
-        when(userRepository.existsByEmail(any(String.class))).thenReturn(false);
+        when(userRepository.findByEmailIgnoreCase(any(String.class))).thenReturn(java.util.Optional.empty());
         when(passwordEncoder.encode(any(String.class))).thenReturn("hashed");
         ArgumentCaptor<User> savedUser = ArgumentCaptor.forClass(User.class);
         when(userRepository.save(savedUser.capture())).thenAnswer(inv -> inv.getArgument(0));

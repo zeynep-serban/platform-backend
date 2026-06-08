@@ -5,6 +5,7 @@ import com.example.user.dto.RegisterRequest;
 import com.example.user.dto.UpdateUserRequest;
 import com.example.user.model.User;
 import com.example.user.repository.UserRepository;
+import com.example.user.repository.UserSpecifications;
 import com.example.user.authz.AuthorizationContextService;
 import com.example.commonauth.AuthorizationContext;
 import org.springframework.beans.factory.annotation.Value;
@@ -187,7 +188,10 @@ public class UserService implements UserDetailsService { // UserDetailsService a
     }
 
     public User updateUser(Long userId, UpdateUserRequest updateRequest) {
-        User user = userRepository.findById(userId)
+        // Active-only (Codex 019ea573, #770 Phase 2): a soft-deleted user
+        // cannot be mutated through any update path (V1 prechecks, but the
+        // legacy PUT /api/users/{id} calls this directly — fail-closed here).
+        User user = userRepository.findActiveById(userId)
                 .orElseThrow(() -> new IllegalArgumentException("Kullanıcı bulunamadı: " + userId));
 
         if (updateRequest.getName() != null && !updateRequest.getName().isBlank()) {
@@ -220,13 +224,17 @@ public class UserService implements UserDetailsService { // UserDetailsService a
      * @return Kaydedilen User nesnesi.
      */
     public User registerUser(RegisterRequest registerRequest) {
-        if (userRepository.existsByEmail(registerRequest.getEmail())) {
+        String email = canonicalEmail(registerRequest.getEmail());
+        // Ignore-case existence (Codex 019ea573, #770 Phase 2): a same-email
+        // tombstone in ANY casing blocks create, so a case-variant cannot
+        // resurrect a soft-deleted identity into a fresh active row.
+        if (!StringUtils.hasText(email) || userRepository.findByEmailIgnoreCase(email).isPresent()) {
             throw new IllegalStateException("Bu email adresi zaten kullanılıyor.");
         }
 
         User newUser = new User();
         newUser.setName(registerRequest.getName());
-        newUser.setEmail(registerRequest.getEmail());
+        newUser.setEmail(email);
         // Parolayı şifreleyerek kaydediyoruz.
         newUser.setPassword(passwordEncoder.encode(registerRequest.getPassword()));
         newUser.setSessionTimeoutMinutes(User.DEFAULT_SESSION_TIMEOUT_MINUTES);
@@ -244,13 +252,16 @@ public class UserService implements UserDetailsService { // UserDetailsService a
      * Hesap başlangıçta pasif (enabled=false) bırakılır, doğrulama sonrası admin tarafından aktifleştirilir.
      */
     public User registerUserPublic(RegisterRequest registerRequest) {
-        if (userRepository.existsByEmail(registerRequest.getEmail())) {
+        String email = canonicalEmail(registerRequest.getEmail());
+        // Ignore-case existence (Codex 019ea573, #770 Phase 2): same-email
+        // tombstone (any casing) blocks public register — no resurrection.
+        if (!StringUtils.hasText(email) || userRepository.findByEmailIgnoreCase(email).isPresent()) {
             throw new IllegalStateException("Bu email adresi zaten kullanılıyor.");
         }
 
         User newUser = new User();
         newUser.setName(registerRequest.getName());
-        newUser.setEmail(registerRequest.getEmail());
+        newUser.setEmail(email);
         newUser.setPassword(passwordEncoder.encode(registerRequest.getPassword()));
         newUser.setEnabled(false);
         newUser.setRole("USER");
@@ -264,7 +275,9 @@ public class UserService implements UserDetailsService { // UserDetailsService a
     }
 
     public void activateUser(Long userId) {
-        User user = userRepository.findById(userId)
+        // Active-only (Codex 019ea573, #770 Phase 2): a stale email-verification
+        // token must not re-enable a soft-deleted tombstone.
+        User user = userRepository.findActiveById(userId)
                 .orElseThrow(() -> new IllegalArgumentException("Kullanıcı bulunamadı: " + userId));
 
         if (!user.isEnabled()) {
@@ -274,7 +287,9 @@ public class UserService implements UserDetailsService { // UserDetailsService a
     }
 
     public void updatePasswordInternal(Long userId, String rawPassword) {
-        User user = userRepository.findById(userId)
+        // Active-only (Codex 019ea573, #770 Phase 2): a soft-deleted account's
+        // password must not be reset (no silent credential revival).
+        User user = userRepository.findActiveById(userId)
                 .orElseThrow(() -> new IllegalArgumentException("Kullanıcı bulunamadı: " + userId));
 
         user.setPassword(passwordEncoder.encode(rawPassword));
@@ -283,7 +298,8 @@ public class UserService implements UserDetailsService { // UserDetailsService a
 
     @Transactional
     public void updateLastLogin(Long userId) {
-        User user = userRepository.findById(userId)
+        // Active-only (Codex 019ea573, #770 Phase 2): never touch a tombstone.
+        User user = userRepository.findActiveById(userId)
                 .orElseThrow(() -> new IllegalArgumentException("Kullanıcı bulunamadı: " + userId));
 
         user.setLastLogin(LocalDateTime.now());
@@ -293,8 +309,17 @@ public class UserService implements UserDetailsService { // UserDetailsService a
 
     @Transactional
     public User provisionFromKeycloak(KeycloakUserProvisionRequest request) {
-        String email = request.getEmail().trim();
-        Optional<User> existing = userRepository.findByEmail(email);
+        String email = canonicalEmail(request.getEmail());
+        // Ignore-case lookup (Codex 019ea573, #770 Phase 2): catch a same-email
+        // tombstone regardless of casing so a mixed-case re-provision cannot
+        // create a duplicate active row alongside the soft-deleted one.
+        Optional<User> existing = userRepository.findByEmailIgnoreCase(email);
+        // No-resurrection guard: a soft-deleted row must never be silently
+        // reactivated/mutated by the internal provision path. Re-admitting the
+        // identity is an explicit admin restore → 409 USER_DELETED_RESTORE_REQUIRED.
+        if (existing.isPresent() && existing.get().isDeleted()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "USER_DELETED_RESTORE_REQUIRED");
+        }
         User target = existing.orElseGet(() -> {
             User fresh = new User();
             fresh.setEmail(email);
@@ -542,6 +567,15 @@ public class UserService implements UserDetailsService { // UserDetailsService a
      * </ul>
      */
     private User resolveEmailMatchedRow(User emailRow, String kcSubject, String canonicalEmail) {
+        // No-resurrection guard (Codex 019ea573, #770 Phase 2): if the
+        // email-matched row is a soft-delete tombstone, return it as-is
+        // WITHOUT backfilling kcSubject or bumping @Version. The
+        // CurrentUserResolver choke point then blocks it with 403
+        // USER_DELETED; we must not write to (and thus partially revive) a
+        // tombstone.
+        if (emailRow.isDeleted()) {
+            return emailRow;
+        }
         // Defensive: every caller currently supplies a non-blank,
         // gate-certified sub (the JwtAutoProvisionGate denies a blank
         // `sub` with `missing-sub`), but if none is available there is
@@ -577,6 +611,13 @@ public class UserService implements UserDetailsService { // UserDetailsService a
         try {
             return requiresNewTransactionTemplate.execute(status -> {
                 User row = userRepository.findById(emailRow.getId()).orElse(emailRow);
+                // No-resurrection race guard (Codex 019ea573, #770 Phase 2): if
+                // the row was soft-deleted between the initial match and this
+                // backfill transaction, do not write to / version-bump the
+                // tombstone. The CurrentUserResolver choke point then blocks it.
+                if (row.isDeleted()) {
+                    return row;
+                }
                 if (!StringUtils.hasText(row.getKcSubject())) {
                     row.setKcSubject(kcSubject);
                     return userRepository.saveAndFlush(row);
@@ -607,12 +648,23 @@ public class UserService implements UserDetailsService { // UserDetailsService a
     }
 
     /**
-     * Email adresine göre kullanıcıyı bulur.
-     * @param email Aranacak email adresi.
-     * @return Opsiyonel olarak User nesnesi.
+     * Email lookup backing read + internal-credential surfaces. Active-only
+     * (Codex 019ea573, #770 Phase 2): a soft-deleted user is never returned,
+     * so the V1 + legacy {@code GET /by-email} reads AND the auth-service
+     * internal credential endpoint ({@code GET /api/users/internal/by-email})
+     * all fail-closed for a tombstone — a deleted account cannot be read or
+     * used to authenticate (defends the deleted-but-enabled local-login path).
+     * Identity resolution and restore use tombstone-aware repository methods
+     * directly, not this service method.
+     *
+     * <p>Ignore-case (Codex 019ea6f6 iter-2): create/provision paths now store
+     * the canonical lowercase email, so this lookup must be case-insensitive —
+     * otherwise a mixed-case local login ({@code User@X}) would 404 against the
+     * canonical {@code user@x} row (an authn regression). The repository
+     * {@code findActiveByEmailIgnoreCase} keeps it active-only AND case-folded.
      */
     public Optional<User> findByEmail(String email) {
-        return userRepository.findByEmail(email);
+        return userRepository.findActiveByEmailIgnoreCase(email);
     }
 
     @Transactional
@@ -625,12 +677,16 @@ public class UserService implements UserDetailsService { // UserDetailsService a
     }
 
     public User findRequiredById(Long id) {
-        return userRepository.findById(id)
+        // Active-only: a soft-deleted user is treated as not-found for
+        // read/update surfaces (Codex 019ea573, #770 Phase 2). The explicit
+        // restore path uses a tombstone-aware lookup instead.
+        return userRepository.findActiveById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Kullanıcı bulunamadı: " + id));
     }
 
     public String updateActivation(Long userId, boolean active, Long performedBy) {
-        User user = userRepository.findById(userId)
+        // Active-only: a soft-deleted user cannot be (de)activated (404).
+        User user = userRepository.findActiveById(userId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Kullanıcı bulunamadı: " + userId));
         if (user.isEnabled() != active) {
             user.setEnabled(active);
@@ -638,6 +694,66 @@ public class UserService implements UserDetailsService { // UserDetailsService a
         }
         if (performedBy != null) {
             var event = userAuditEventService.recordActivationEvent(performedBy, userId, active);
+            if (event != null && event.getId() != null) {
+                return event.getId().toString();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Soft-deletes a user — sets the {@code deleted_at} tombstone (Codex
+     * 019ea573, #770 Phase 2). Reversible via {@link #restoreUser}. The
+     * single {@code CurrentUserResolver} choke point then refuses any
+     * request from this identity with {@code 403 USER_DELETED}, and every
+     * read/query surface excludes the row. The {@code email}/{@code kc_subject}
+     * unique constraints are preserved, so re-admitting the same identity via
+     * the internal provision path is an explicit {@code 409
+     * USER_DELETED_RESTORE_REQUIRED} rather than a silent duplicate.
+     *
+     * @return the audit event id (raw, un-prefixed) or {@code null}
+     * @throws ResponseStatusException {@code 404} when no active row exists
+     */
+    @Transactional
+    public String deleteUser(Long userId, Long performedBy) {
+        User user = userRepository.findActiveById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Kullanıcı bulunamadı: " + userId));
+        user.setDeletedAt(LocalDateTime.now());
+        userRepository.save(user);
+        log.info("Kullanıcı soft-delete edildi userId={} performedBy={}", userId, performedBy);
+        if (performedBy != null) {
+            var event = userAuditEventService.recordDeleteEvent(performedBy, userId);
+            if (event != null && event.getId() != null) {
+                return event.getId().toString();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Restores a soft-deleted user — clears the {@code deleted_at} tombstone
+     * (Codex 019ea573, #770 Phase 2). Uses a tombstone-aware lookup (raw
+     * {@code findById}) so it can locate the deleted row. Idempotency is
+     * fail-closed: restoring an already-active row is a {@code 409
+     * USER_NOT_DELETED}. The restored row keeps its prior {@code enabled}
+     * state; activation remains a separate admin action.
+     *
+     * @return the audit event id (raw, un-prefixed) or {@code null}
+     * @throws ResponseStatusException {@code 404} when the id does not exist,
+     *         {@code 409 USER_NOT_DELETED} when the row is not a tombstone
+     */
+    @Transactional
+    public String restoreUser(Long userId, Long performedBy) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Kullanıcı bulunamadı: " + userId));
+        if (!user.isDeleted()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "USER_NOT_DELETED");
+        }
+        user.setDeletedAt(null);
+        userRepository.save(user);
+        log.info("Kullanıcı geri yüklendi userId={} performedBy={}", userId, performedBy);
+        if (performedBy != null) {
+            var event = userAuditEventService.recordRestoreEvent(performedBy, userId);
             if (event != null && event.getId() != null) {
                 return event.getId().toString();
             }
@@ -1314,6 +1430,9 @@ public class UserService implements UserDetailsService { // UserDetailsService a
         java.util.Map<String, Object> result = new java.util.LinkedHashMap<>();
         if (valueCols == null || valueCols.isBlank()) return result;
 
+        // Soft-delete: exclude tombstones from SSRM aggregation (Codex 019ea573).
+        spec = spec == null ? UserSpecifications.notDeleted() : spec.and(UserSpecifications.notDeleted());
+
         CriteriaBuilder cb = entityManager.getCriteriaBuilder();
 
         for (String vc : valueCols.split(",")) {
@@ -1351,6 +1470,8 @@ public class UserService implements UserDetailsService { // UserDetailsService a
      */
     public java.util.Map<String, Object> computePivot(Specification<User> spec,
                                                         String groupField, String pivotField, String valueCols) {
+        // Soft-delete: exclude tombstones from SSRM pivot (Codex 019ea573).
+        spec = spec == null ? UserSpecifications.notDeleted() : spec.and(UserSpecifications.notDeleted());
         // 1. Get distinct pivot values
         CriteriaBuilder cb = entityManager.getCriteriaBuilder();
         CriteriaQuery<String> pvq = cb.createQuery(String.class);
@@ -1425,7 +1546,9 @@ public class UserService implements UserDetailsService { // UserDetailsService a
                                                    String status,
                                                    String role,
                                                    Specification<User> extraSpec) {
-        Specification<User> spec = null;
+        // Soft-delete: every list/group/search surface excludes tombstones
+        // (Codex 019ea573, #770 Phase 2). Seeded here so it always applies.
+        Specification<User> spec = UserSpecifications.notDeleted();
 
         if (StringUtils.hasText(search)) {
             String like = "%" + search.trim().toLowerCase() + "%";
@@ -1481,9 +1604,11 @@ public class UserService implements UserDetailsService { // UserDetailsService a
      */
     @Override
     public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
-        // Kullanıcıyı kendi veritabanından bul ve döndür.
-        // User modelimiz zaten UserDetails'i uyguladığı için doğrudan döndürebiliriz.
-        return userRepository.findByEmail(email)
+        // Active-only + ignore-case (Codex 019ea573 + 019ea6f6 iter-2): a
+        // soft-deleted account cannot authenticate via local login, and the
+        // lookup is case-insensitive so a mixed-case username still matches the
+        // canonical lowercase row (consistent with write-time canonicalization).
+        return userRepository.findActiveByEmailIgnoreCase(email)
                 .orElseThrow(() -> new UsernameNotFoundException("Kullanıcı bulunamadı: " + email));
     }
 }

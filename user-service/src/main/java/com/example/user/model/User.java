@@ -85,6 +85,19 @@ public class User implements UserDetails {
     @Column(name = "kc_subject", length = 64, unique = true)
     private String kcSubject;
 
+    /**
+     * Soft-delete tombstone (Codex thread {@code 019ea573}, platform-web #770
+     * Phase 2 — user DELETE action). {@code null} = active; non-null = the
+     * instant the row was soft-deleted. There is deliberately NO global
+     * Hibernate {@code @Where}/{@code @SQLRestriction}: identity-resolution
+     * security paths must read tombstones explicitly to emit a clean
+     * {@code 403 USER_DELETED} and refuse resurrection. Public/query surfaces
+     * exclude tombstones via {@code UserSpecifications.notDeleted()} + the
+     * {@code findActive*} repository methods.
+     */
+    @Column(name = "deleted_at")
+    private LocalDateTime deletedAt;
+
     @Version
     @Column(name = "version", nullable = false)
     private Integer version = 0;
@@ -123,6 +136,10 @@ public class User implements UserDetails {
     public void setTimeFormat(String timeFormat) { this.timeFormat = normalizeTimeFormat(timeFormat); }
     public String getKcSubject() { return kcSubject; }
     public void setKcSubject(String kcSubject) { this.kcSubject = kcSubject; }
+    public LocalDateTime getDeletedAt() { return deletedAt; }
+    public void setDeletedAt(LocalDateTime deletedAt) { this.deletedAt = deletedAt; }
+    /** True when this row is a soft-delete tombstone (Codex 019ea573). */
+    public boolean isDeleted() { return deletedAt != null; }
     public Integer getVersion() { return version; }
     public void setVersion(Integer version) { this.version = version; }
 

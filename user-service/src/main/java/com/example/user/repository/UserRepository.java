@@ -58,6 +58,37 @@ public interface UserRepository extends JpaRepository<User, Long>, JpaSpecificat
     @Query("select u from User u where lower(u.email) = lower(:email)")
     Optional<User> findByEmailIgnoreCase(@Param("email") String email);
 
+    // ── Soft-delete tombstone-aware reads (Codex 019ea573, #770 Phase 2) ──
+    // No global @Where on the entity (identity paths read tombstones
+    // explicitly); these active-only variants back the read/query surfaces
+    // that must never return a deleted user.
+
+    /**
+     * Find an <em>active</em> (non-tombstoned) user by id.
+     *
+     * <p>Backs {@code getUser}, {@code updateUser} and {@code updateActivation}
+     * so those surfaces return {@code 404} for a soft-deleted row instead of
+     * acting on a tombstone. The explicit {@code restore} path uses the raw
+     * {@link #findById(Object)} so it can still locate the tombstone.
+     */
+    @Query("select u from User u where u.id = :id and u.deletedAt is null")
+    Optional<User> findActiveById(@Param("id") Long id);
+
+    /**
+     * Find an <em>active</em> (non-tombstoned) user by exact email. Backs the
+     * Spring Security {@code loadUserByUsername} local-login path so a
+     * soft-deleted account cannot authenticate.
+     */
+    @Query("select u from User u where u.email = :email and u.deletedAt is null")
+    Optional<User> findActiveByEmail(@Param("email") String email);
+
+    /**
+     * Find an <em>active</em> (non-tombstoned) user by case-insensitive email.
+     * Backs the {@code GET /by-email} read surface.
+     */
+    @Query("select u from User u where lower(u.email) = lower(:email) and u.deletedAt is null")
+    Optional<User> findActiveByEmailIgnoreCase(@Param("email") String email);
+
     @Modifying(clearAutomatically = true)
     @Query("update User u set u.sessionTimeoutMinutes = :timeout where u.sessionTimeoutMinutes is null or u.sessionTimeoutMinutes < 1")
     int normalizeSessionTimeouts(@Param("timeout") int timeout);
