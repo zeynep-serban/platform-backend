@@ -375,6 +375,43 @@ class EndpointAgentCommandServiceTest {
     }
 
     @Test
+    void submitResultRejectsShortDiagnosticsConfigHashButMarksCommandFailed() {
+        // MKR-A1 standard-PC pilot regression: the agent once submitted a
+        // 16-char diagnostics configHash while the backend contract requires
+        // 64-char lowercase hex or "unknown". The payload must remain
+        // fail-closed (no result row), but operators must not be left with a
+        // silent DELIVERED command.
+        EndpointDevice device = deviceRepository.saveAndFlush(device(DeviceStatus.ONLINE, "PC-DIAG-HASH"));
+        EndpointCommand command = commandRepository.saveAndFlush(command(device, "cmd-diag-short-hash", 10));
+        AgentCommandResponse claimed = commandService.claimNext(principal(device)).orElseThrow();
+
+        assertThatThrownBy(() ->
+                commandService.submitResult(
+                        principal(device),
+                        command.getId(),
+                        resultRequestWithDiagnostics(
+                                claimed.claimId(), claimed.attemptNumber(),
+                                CommandResultStatus.SUCCEEDED,
+                                diagnosticsWithConfigHash("0b637676053e2aca"))))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("configHash")
+                .hasMessageContaining("64-char lowercase hex");
+
+        assertThat(resultRepository.findByCommand_Id(command.getId())).isEmpty();
+        EndpointCommand updated = commandRepository.findById(command.getId()).orElseThrow();
+        assertThat(updated.getStatus()).isEqualTo(CommandStatus.FAILED);
+        assertThat(updated.getLockedBy()).isNull();
+        assertThat(updated.getLockedUntil()).isNull();
+        assertThat(updated.getCompletedAt()).isNotNull();
+        assertThat(updated.getLastError())
+                .startsWith("RESULT_REJECTED:")
+                .contains("configHash")
+                .doesNotContain("http://")
+                .doesNotContain("Bearer");
+        assertThat(updated.getLastError().length()).isLessThanOrEqualTo(512);
+    }
+
+    @Test
     void submitResultSanitizesHardwareBeforeSoftwarePolicyValidates() {
         // Regression for sanitize-before-validate ordering:
         // hardware sub-tree's user path is stripped by the hardware
@@ -647,6 +684,35 @@ class EndpointAgentCommandServiceTest {
                 claimId, attemptNumber, status, "done", details,
                 null, null, 0,
                 Instant.now().minusSeconds(5), Instant.now());
+    }
+
+    private AgentCommandResultRequest resultRequestWithDiagnostics(
+            String claimId, int attemptNumber, CommandResultStatus status,
+            java.util.Map<String, Object> diagnostics) {
+        java.util.Map<String, Object> inventory = new java.util.LinkedHashMap<>();
+        inventory.put("diagnostics", diagnostics);
+        java.util.Map<String, Object> details = new java.util.LinkedHashMap<>();
+        details.put("inventory", inventory);
+        return new AgentCommandResultRequest(
+                claimId, attemptNumber, status, "done", details,
+                null, null, 0,
+                Instant.now().minusSeconds(5), Instant.now());
+    }
+
+    private java.util.Map<String, Object> diagnosticsWithConfigHash(String configHash) {
+        java.util.Map<String, Object> diagnostics = new java.util.LinkedHashMap<>();
+        diagnostics.put("schemaVersion", 1);
+        diagnostics.put("supported", true);
+        diagnostics.put("probeComplete", true);
+        diagnostics.put("agentVersion", "0.1.0-dev");
+        diagnostics.put("configHash", configHash);
+        diagnostics.put("lastPollLatencyMs", 120);
+        diagnostics.put("backendDNSReachable", true);
+        diagnostics.put("backendTLSValid", true);
+        diagnostics.put("lastError", null);
+        diagnostics.put("probeErrors", java.util.List.of());
+        diagnostics.put("probeDurationMs", 42);
+        return diagnostics;
     }
 
     /**

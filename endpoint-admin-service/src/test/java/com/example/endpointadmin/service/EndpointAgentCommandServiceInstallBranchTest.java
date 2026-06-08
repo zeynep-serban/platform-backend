@@ -46,8 +46,9 @@ import static org.mockito.Mockito.when;
  * iter-6 closing note follow-up:
  *
  * <ul>
- *   <li>Raw forbidden details → 400 + zero persistence (no result row,
- *       no audit row, no command save).</li>
+ *   <li>Raw forbidden details → 400 + no raw payload persistence (no result
+ *       row, no audit row), while the command is terminal FAILED with a
+ *       bounded operator-facing rejection reason.</li>
  *   <li>Clean details → the policy's redacted map reference is the SAME
  *       object that lands in
  *       {@code endpoint_command_results.result_payload.details} and that
@@ -180,7 +181,17 @@ class EndpointAgentCommandServiceInstallBranchTest {
                         .isEqualTo(HttpStatus.BAD_REQUEST))
                 .hasMessageContaining("licenseKey");
 
-        verify(commandRepository, never()).saveAndFlush(any(EndpointCommand.class));
+        verify(commandRepository, times(1)).saveAndFlush(command);
+        verify(commandSecretService, times(1)).clearIfTerminal(command);
+        assertThat(command.getStatus()).isEqualTo(CommandStatus.FAILED);
+        assertThat(command.getStartedAt()).isEqualTo(NOW.minusSeconds(30));
+        assertThat(command.getCompletedAt()).isEqualTo(NOW);
+        assertThat(command.getLockedBy()).isNull();
+        assertThat(command.getLockedUntil()).isNull();
+        assertThat(command.getLastError())
+                .startsWith("RESULT_REJECTED:")
+                .contains("licenseKey")
+                .hasSizeLessThanOrEqualTo(512);
         verify(resultRepository, never()).saveAndFlush(any(EndpointCommandResult.class));
         verify(installAuditService, never()).recordInstallResult(
                 any(), any(), any(), any(), any());
@@ -213,7 +224,18 @@ class EndpointAgentCommandServiceInstallBranchTest {
                         .isEqualTo(HttpStatus.BAD_REQUEST))
                 .hasMessageContaining("JWT");
 
-        verify(commandRepository, never()).saveAndFlush(any(EndpointCommand.class));
+        verify(commandRepository, times(1)).saveAndFlush(command);
+        verify(commandSecretService, times(1)).clearIfTerminal(command);
+        assertThat(command.getStatus()).isEqualTo(CommandStatus.FAILED);
+        assertThat(command.getStartedAt()).isEqualTo(NOW.minusSeconds(30));
+        assertThat(command.getCompletedAt()).isEqualTo(NOW);
+        assertThat(command.getLockedBy()).isNull();
+        assertThat(command.getLockedUntil()).isNull();
+        assertThat(command.getLastError())
+                .startsWith("RESULT_REJECTED:")
+                .contains("JWT")
+                .doesNotContain(jwtFixture)
+                .hasSizeLessThanOrEqualTo(512);
         verify(resultRepository, never()).saveAndFlush(any(EndpointCommandResult.class));
         verify(installAuditService, never()).recordInstallResult(
                 any(), any(), any(), any(), any());

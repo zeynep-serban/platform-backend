@@ -201,7 +201,7 @@ public class EndpointAgentCommandService {
         return activeInstalls >= maxConcurrent;
     }
 
-    @Transactional
+    @Transactional(noRollbackFor = ResultSubmissionRejectedException.class)
     public void submitResult(DeviceCredentialResult principal,
                              UUID commandId,
                              AgentCommandResultRequest request) {
@@ -325,8 +325,8 @@ public class EndpointAgentCommandService {
                 // 5. Software validator (validate-only) on the sanitized form.
                 inventoryPayloadPolicy.validate(effectiveDetails);
             } catch (IllegalArgumentException ex) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                        ex.getMessage());
+                markResultRejected(command, request, ex.getMessage());
+                throw new ResultSubmissionRejectedException(ex.getMessage());
             }
         }
 
@@ -335,14 +335,15 @@ public class EndpointAgentCommandService {
         // result row is built so the raw agent payload never reaches
         // either endpoint_command_results.result_payload.details or
         // endpoint_install_audit.redacted_payload. A forbidden key or
-        // value throws 400 + rolls back the entire submitResult tx.
+        // value still throws 400, but the command row records a bounded
+        // terminal failure for operator visibility.
         if (command.getCommandType() == CommandType.INSTALL_SOFTWARE
                 && request.details() != null) {
             try {
                 installEvidencePayloadPolicy.validate(request.details());
             } catch (IllegalArgumentException ex) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                        ex.getMessage());
+                markResultRejected(command, request, ex.getMessage());
+                throw new ResultSubmissionRejectedException(ex.getMessage());
             }
             effectiveDetails = installEvidencePayloadPolicy.redact(request.details());
         }
@@ -352,15 +353,15 @@ public class EndpointAgentCommandService {
         // payload goes through the same validate-then-redact pass so the
         // raw payload never reaches endpoint_command_results.result_payload
         // .details or endpoint_uninstall_audit.redacted_payload. A forbidden
-        // key/value throws 400 + rolls back the entire submitResult tx
-        // (matching the install-side fail-closed contract).
+        // key/value still throws 400, but the command row records a bounded
+        // terminal failure for operator visibility.
         if (command.getCommandType() == CommandType.UNINSTALL_SOFTWARE
                 && request.details() != null) {
             try {
                 uninstallEvidencePayloadPolicy.validate(request.details());
             } catch (IllegalArgumentException ex) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                        ex.getMessage());
+                markResultRejected(command, request, ex.getMessage());
+                throw new ResultSubmissionRejectedException(ex.getMessage());
             }
             effectiveDetails = uninstallEvidencePayloadPolicy.redact(request.details());
         }
@@ -561,6 +562,41 @@ public class EndpointAgentCommandService {
                 || status == CommandResultStatus.UNSUPPORTED;
     }
 
+    private void markResultRejected(EndpointCommand command,
+                                    AgentCommandResultRequest request,
+                                    String reason) {
+        Instant now = Instant.now(clock);
+        if (request != null && request.startedAt() != null) {
+            command.setStartedAt(request.startedAt());
+        } else if (command.getStartedAt() == null) {
+            command.setStartedAt(now);
+        }
+        command.setCompletedAt(request == null || request.finishedAt() == null
+                ? now
+                : request.finishedAt());
+        command.setStatus(CommandStatus.FAILED);
+        command.setLastError(boundedResultRejectError(reason));
+        command.setLockedBy(null);
+        command.setLockedUntil(null);
+        commandRepository.saveAndFlush(command);
+        commandSecretService.clearIfTerminal(command);
+    }
+
+    private String boundedResultRejectError(String reason) {
+        String message = trimToNull(reason);
+        if (message == null) {
+            message = "Command result rejected by backend validation.";
+        }
+        message = message.replaceAll("[\\r\\n\\t]+", " ");
+        message = message.replaceAll("(?i)bearer\\s+[^\\s,;)]*", "bearer <redacted>");
+        message = message.replaceAll("(?i)(token|secret|password|jwt)=?[^\\s,;)]*", "$1=<redacted>");
+        message = message.replaceAll("https?://\\S+", "<url-redacted>");
+        message = message.replaceAll("\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b", "<ip-redacted>");
+        message = message.replaceAll("(?i)[A-Z]:\\\\Users\\\\[^\\\\\\s]+", "<user-path-redacted>");
+        String prefixed = "RESULT_REJECTED: " + message.trim();
+        return prefixed.length() <= 512 ? prefixed : prefixed.substring(0, 512);
+    }
+
     private void validateResultSubmission(EndpointCommand command, AgentCommandResultRequest request) {
         if (request == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Command result request is required.");
@@ -670,5 +706,11 @@ public class EndpointAgentCommandService {
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private static final class ResultSubmissionRejectedException extends ResponseStatusException {
+        private ResultSubmissionRejectedException(String reason) {
+            super(HttpStatus.BAD_REQUEST, reason);
+        }
     }
 }

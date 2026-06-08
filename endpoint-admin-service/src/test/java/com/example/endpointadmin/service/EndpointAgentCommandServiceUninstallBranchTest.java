@@ -43,9 +43,10 @@ import static org.mockito.Mockito.when;
  * branch of {@link EndpointAgentCommandService#submitResult}.
  *
  * <ul>
- *   <li>Forbidden details → 400 + zero persistence (no result row, no audit
- *       row, no command save). Parity with the install branch fail-closed
- *       contract.</li>
+ *   <li>Forbidden details → 400 + no raw payload persistence (no result row,
+ *       no audit row), while the command is terminal FAILED with a bounded
+ *       operator-facing rejection reason. Parity with the install branch
+ *       fail-closed contract.</li>
  *   <li>Clean details → the policy's redacted map is the SAME object that
  *       lands in the result row AND is forwarded to
  *       {@link EndpointUninstallAuditService#recordUninstallResult}.</li>
@@ -154,7 +155,17 @@ class EndpointAgentCommandServiceUninstallBranchTest {
                         .isEqualTo(HttpStatus.BAD_REQUEST))
                 .hasMessageContaining("licenseKey");
 
-        verify(commandRepository, never()).saveAndFlush(any(EndpointCommand.class));
+        verify(commandRepository, times(1)).saveAndFlush(command);
+        verify(commandSecretService, times(1)).clearIfTerminal(command);
+        assertThat(command.getStatus()).isEqualTo(CommandStatus.FAILED);
+        assertThat(command.getStartedAt()).isEqualTo(NOW.minusSeconds(30));
+        assertThat(command.getCompletedAt()).isEqualTo(NOW);
+        assertThat(command.getLockedBy()).isNull();
+        assertThat(command.getLockedUntil()).isNull();
+        assertThat(command.getLastError())
+                .startsWith("RESULT_REJECTED:")
+                .contains("licenseKey")
+                .hasSizeLessThanOrEqualTo(512);
         verify(resultRepository, never()).saveAndFlush(any(EndpointCommandResult.class));
         verify(uninstallAuditService, never()).recordUninstallResult(
                 any(), any(), any(), any(), any());
