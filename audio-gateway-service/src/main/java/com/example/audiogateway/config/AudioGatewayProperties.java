@@ -117,12 +117,19 @@ public class AudioGatewayProperties {
      * RedisStreamsAudioChunkDispatcher bean register).
      */
     public static class Dispatcher {
-        /** Supported modes in PR-gw-01B3. PR-gw-01C ekleyecek: redis. */
-        private static final java.util.Set<String> SUPPORTED_MODES_B3 = java.util.Set.of("noop");
+        /**
+         * Supported modes. PR-gw-01B3 shipped {@code noop}; PR-gw-01C (#106) adds
+         * {@code redis} — the cross-server Redis Streams producer.
+         */
+        private static final java.util.Set<String> SUPPORTED_MODES = java.util.Set.of("noop", "redis");
 
         private String mode = "noop";
         private long queueFullRetryAfterSeconds = 5L;
         private long unavailableRetryAfterSeconds = 30L;
+
+        // PR-gw-01C (#106) Redis Streams producer config — no hard-coded values.
+        private String streamKeyPrefix = "meeting:chunks:";
+        private long streamMaxLen = 10_000L;
 
         public String getMode() {
             return mode;
@@ -138,12 +145,31 @@ public class AudioGatewayProperties {
          * {@code @PostConstruct} bean lifecycle olarak çağrılmaz).
          */
         public void validate() {
-            if (!SUPPORTED_MODES_B3.contains(mode)) {
+            if (!SUPPORTED_MODES.contains(mode)) {
                 throw new IllegalStateException(
-                        "audio.gateway.dispatcher.mode='" + mode + "' not supported in PR-gw-01B3 — "
-                        + "only 'noop' currently. 'redis' arrives in PR-gw-01C with cross-server "
-                        + "Streams producer. Supported: " + SUPPORTED_MODES_B3);
+                        "audio.gateway.dispatcher.mode='" + mode + "' not supported — "
+                        + "supported modes: " + SUPPORTED_MODES);
             }
+            if (streamMaxLen <= 0) {
+                throw new IllegalStateException(
+                        "audio.gateway.dispatcher.stream-max-len must be positive, got " + streamMaxLen);
+            }
+        }
+
+        public String getStreamKeyPrefix() {
+            return streamKeyPrefix;
+        }
+
+        public void setStreamKeyPrefix(final String streamKeyPrefix) {
+            this.streamKeyPrefix = streamKeyPrefix;
+        }
+
+        public long getStreamMaxLen() {
+            return streamMaxLen;
+        }
+
+        public void setStreamMaxLen(final long streamMaxLen) {
+            this.streamMaxLen = streamMaxLen;
         }
 
         public long getQueueFullRetryAfterSeconds() {
