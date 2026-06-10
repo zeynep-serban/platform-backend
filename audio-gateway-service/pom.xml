@@ -64,7 +64,8 @@
 
         <!-- Redis Streams cross-server dispatcher producer (PR-gw-01C #106).
              Synchronous StringRedisTemplate (Lettuce) — the dispatch() port is a
-             fast synchronous call under the admission monitor (ADR-0031 §3.7). -->
+             fast synchronous call under the admission monitor (ADR-0031 D3
+             resource pressure gate; cross-server topology per ADR-0031 D2). -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
