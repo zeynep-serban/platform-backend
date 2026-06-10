@@ -19,7 +19,8 @@ import org.springframework.stereotype.Service;
  * Redis Streams cross-server audio chunk dispatcher producer (PR-gw-01C, #106).
  *
  * <p>ADR-0031 D2 cross-server network topology: platform-backend audio-gateway (producer) →
- * staging-sw Redis Streams → platform-ai live-stt-service (consumer, PR-stt-03 scope).
+ * staging-sw Redis Streams → platform-ai live-stt-service (consumer, PR-stt-04 scope —
+ * platform-ai#137, implemented in platform-ai#138).
  * Failure modes per ADR-0031 D8. Active only when
  * {@code audio.gateway.dispatcher.mode=redis}; otherwise the default
  * {@link NoOpAudioChunkDispatcher} is used. {@link Primary} so it wins injection over the
@@ -70,7 +71,7 @@ import org.springframework.stereotype.Service;
  *
  * <p><b>Backpressure, not trimming:</b> a full stream is rejected with QueueFull rather than
  * trimmed, so unread backlog applies real backpressure. Consumer-side XACK/trim is
- * live-stt-service scope (PR-stt-03), out of scope here.
+ * live-stt-service scope (PR-stt-04, platform-ai#137/#138), out of scope here.
  *
  * <p><b>Concurrency note (AudioChunkDispatcher C-debt):</b> {@code dispatch} runs under the
  * registry admission monitor. XLEN + XADD are two round-trips; under a single gateway and
